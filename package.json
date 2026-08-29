@@ -1,0 +1,21 @@
+{
+  "name": "quv5",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Qu V5 - a from-scratch, Yjs-native core for Qu: signed and end-to-end encrypted CRDT sync (Space/Node/Field), a blind relay, and persistence adapters. See docs/v5-space-core-guide.md.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "demo": "node demo/auto-demo.mjs",
+    "demo:relay": "node demo/relay.mjs",
+    "demo:alice": "node demo/chat.mjs alice",
+    "demo:bob": "node demo/chat.mjs bob"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,11 @@
+node_modules/
+*.log
+.DS_Store
+dist/
+
+# demo runtime state - private keys and mirrored chat data, local-only
+demo/.identities/
+demo/.data/
+
+# relay deployment data (see docs/v5-space-core-guide.md §5)
+relay-data/

@@ -1,0 +1,12 @@
+{
+  "name": "@qu/core",
+  "version": "0.1.0",
+  "description": "Qu V5 core: QuCrypto, the minimal cryptographic primitives (Ed25519 signing, X25519/AES-GCM encryption, key fingerprinting) that @qu/space-core, @qu/space-storage and @qu/space-transport are built on.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./crypto": "./src/crypto.js"
+  },
+  "license": "MIT"
+}

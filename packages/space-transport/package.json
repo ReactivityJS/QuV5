@@ -1,0 +1,20 @@
+{
+  "name": "@qu/space-transport",
+  "version": "0.1.0",
+  "description": "Qu V5: transport + relay for @qu/space-core. InProcessTransport/InProcessHub simulate client<->relay<->client delivery for tests without a real network; WsClientTransport/createWsServerHub are the real-network counterpart (see relay-server.js, runnable directly or via the repo's packages/space-transport/Dockerfile). RelayForwarder verifies each envelope's write signature, forwards it live, and - given a storage adapter - mirrors it, so a peer that connects after the original author went offline still catches up (see relay.js). It never holds a decryption key, so it structurally cannot read content.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "bin": {
+    "qu-space-relay": "./src/relay-server.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/space-core": "^0.1.0",
+    "@qu/space-storage": "^0.1.0",
+    "ws": "^8.18.0"
+  },
+  "license": "MIT"
+}

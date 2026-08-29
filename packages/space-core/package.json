@@ -1,0 +1,15 @@
+{
+  "name": "@qu/space-core",
+  "version": "0.1.0",
+  "description": "Qu V5 Yjs-native Space/Node/Field core. A Node is a Y.Doc (meta + content), fields are typed per Kind-Schema ('atomic-encrypted' | 'text' | 'list'), every outgoing Yjs update is signed and sealed before it ever reaches storage or a transport (see envelope.js).",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "yjs": "^13.6.32"
+  },
+  "license": "MIT"
+}

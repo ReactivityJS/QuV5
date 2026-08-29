@@ -1,0 +1,20 @@
+services:
+  qu-space-relay:
+    build:
+      context: .
+      dockerfile: packages/space-transport/Dockerfile
+    ports:
+      - "${SPACE_RELAY_PORT:-8081}:8081"
+    environment:
+      SPACE_RELAY_PORT: "8081"
+      SPACE_RELAY_DATA_DIR: /data
+      # REQUIRED - no default, the container refuses to start without it.
+      # A JSON array of every Space member's {"pub","xPub"} (base64) -
+      # see docs/v5-space-core-guide.md for how to generate these.
+      SPACE_MEMBERS_JSON: ${SPACE_MEMBERS_JSON:?set SPACE_MEMBERS_JSON - see docs/v5-space-core-guide.md}
+    volumes:
+      - qu-space-relay-data:/data
+    restart: unless-stopped
+
+volumes:
+  qu-space-relay-data:
