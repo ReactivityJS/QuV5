@@ -299,14 +299,26 @@ own terminal log a push once bob's client isn't running).
   snapshotting/compaction is real, separate work.
 - **No relay clustering/HA** — one relay process, one data directory. A
   multi-relay federation (or even just a hot standby) is not built.
-- **No member/key rotation** — `SPACE_MEMBERS_JSON` is fixed at relay
-  startup; adding/removing a member means restarting the relay with a new
-  list. Live membership changes are real, separate work.
+- **Member ADDITION is live, removal/rotation is not** — a relay's
+  `addMember()` and a `Space`'s own `addMember()` (see their doc comments
+  in `relay.js`/`space.js`) let a new member join a running relay/an
+  already-constructed `Space` without a restart (see `demo/web/main.js`'s
+  `/join` + member-poll for a full worked example). What's still missing:
+  removing a member (nothing revokes their standing ability to decrypt
+  future writes or forge signed ones), and - inherent to "every write is
+  encrypted only for the members known at seal time", not a gap so much as
+  a property - a newly added member can never retroactively decrypt a
+  write sealed before they joined.
 - **`@qu/space-ui`** (declarative `<qu-view>`/`<qu-bind>`/`<qu-list>`/
   `<qu-text>`-style components) is not built yet — core sync/signing/
   encryption was sequenced first, UI bindings are real, separate work.
-- **No app/UI beyond the demo** — `demo/` is a minimal CLI proving the
+- **No app/UI beyond the demo** — `demo/` is a minimal CLI AND a minimal
+  browser page (`demo/web/`, served by `demo/relay.mjs` at `/`) proving the
   sync mechanism (see `demo/README.md`); nothing app-shaped is built yet.
+- **`/join`'s dynamic membership has no authentication** — see
+  `demo/relay.mjs`'s own doc comment on that endpoint; it's a deliberate,
+  loud demo-only tradeoff (anyone reaching the port can join), not
+  something to copy into a production relay unmodified.
 
 ## 9. Where to look for more
 
@@ -337,10 +349,17 @@ see `packages/core/src/crypto.js`) rather than a raw key or a username:
 
 ```sh
 npm run demo            # zero-setup: one process, two simulated peers
-npm run demo:relay      # real relay, terminal 1
+npm run demo:relay      # real relay, terminal 1 - also serves a browser client at http://localhost:8081/
 npm run demo:alice      # real client "alice", terminal 2
 npm run demo:bob        # real client "bob", terminal 3 - type in either, watch it appear in the other
 ```
 
+`demo:relay` serves a small browser page on that SAME port (`demo/web/`,
+esbuild-bundled at startup) - open it in two tabs, pick a name, and chat
+live with each other or with a CLI `demo:alice`/`demo:bob` in the same
+room. Point a reverse proxy at this one port for HTTPS/TLS-offloading - it
+never needs a second port, the WebSocket upgrade rides the same HTTP
+server as the page/API.
+
 See `demo/README.md` for what each command does and how identity/
-membership works for the demo.
+membership works for the demo, in the browser and the CLI alike.

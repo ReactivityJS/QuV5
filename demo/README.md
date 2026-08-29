@@ -51,8 +51,44 @@ name and fingerprint, e.g.:
 14:02:11  alice [a1b2-c3d4-e5f6-0102]:  Hallo Bob!
 ```
 
-Stop with Ctrl+C. Restart `demo:relay` any time you add a third identity
+Stop with Ctrl+C. Restart `demo:relay` any time you add a third CLI identity
 (`node demo/chat.mjs carol`) so it picks up the new member.
+
+## In the browser
+
+`demo:relay` also serves a browser client on the SAME port:
+
+```sh
+npm run demo:relay
+# then open http://localhost:8081/ in two browser tabs/profiles
+```
+
+Each tab: type a name, click "Beitreten" (Join). Unlike the CLI, a browser
+tab generates its OWN keypair on the spot (Web Crypto, kept in
+`localStorage` - this browser/profile only) and registers its public halves
+with the running relay via `POST /join` - no restart, no pre-existing
+identity file needed, and no private key ever leaves the browser. A browser
+tab and a CLI `demo:alice`/`demo:bob` can chat in the same room live, since
+both are just members of the same relay-managed Space.
+
+The page also has a "Debug-Log" checkbox (`@qu/events`' `createDebugLogger()`
+watching everything on that tab's own bus - the granular event system this
+demo has been building toward the whole time, see
+`docs/v5-space-core-guide.md` §7) and a "Browser-Notifications erlauben"
+button - grant it, switch to another tab/app, and a message that mentions
+you shows a real OS-level notification instead of an in-page toast (the
+handler decides the channel purely from `document.visibilityState` +
+`Notification.permission`, exactly the "toast vs. browser-notification vs.
+push is the handler's call based on state" design this repo settled on -
+nothing about that decision lives in `Space`, the bus, or the relay).
+
+**Reverse proxy / HTTPS**: `demo/relay.mjs` is plain HTTP + WebSocket on one
+port - point a reverse proxy at it for TLS offloading on the standard HTTPS
+port. Nothing relay-specific to configure beyond forwarding WebSocket
+upgrades (the `Upgrade`/`Connection` headers) the way you would for any
+other WebSocket backend; the page derives `ws://`/`wss://` from its own
+`location.protocol`, so it automatically uses `wss://` once served over
+HTTPS.
 
 ### Push routing: stop one client and watch the relay terminal
 
@@ -91,6 +127,12 @@ silent, since bob's live connection already got it.
   stdin/stdout, and attaches a `notify` hint to every push.
 - `demo/auto-demo.mjs` - the same mechanism, in-process, no relay/terminal
   needed - see `npm run demo` above.
+- `demo/web/` - the browser client (`index.html` + `main.js`), esbuild-
+  bundled into `dist/bundle.js` automatically on `demo:relay` startup (see
+  `demo/web/build.mjs`; `npm run build:web` to bundle standalone). Imports
+  `@qu/space-transport`'s dedicated `./ws-client-transport` subpath, not
+  its main entry, specifically to stay browser-safe (see that file's own
+  doc comment on why the main entry can't be bundled for a browser).
 
 Every message is signed with the sender's Ed25519 key and end-to-end
 encrypted for every member's X25519 key before it ever reaches the relay or
@@ -99,10 +141,19 @@ and mirrors ciphertext it cannot decrypt.
 
 ## Caveats (it's a demo)
 
-- All identities live in one shared local directory - fine for "two
+- CLI identities live in one shared local directory - fine for "two
   terminals on the same machine," not a real key-distribution mechanism.
-- The member list is whatever identity files exist in `demo/.identities/`
-  when `demo:relay` starts; adding a new participant means restarting it.
-- No auth beyond Qu's own signature/ACL check - anyone who can reach the
-  relay port and already has (or is given) an authorized identity file can
-  join the room.
+- `POST /join` (what lets a browser tab join live) has NO AUTHENTICATION
+  beyond "well-formed base64 keys" - anyone who can reach the relay port
+  can join the room as a fully-authorized member. Fine for "two people
+  testing," not for anything actually private - see `relay.mjs`'s own doc
+  comment on `/join` for what a real deployment would add in front of it.
+- A member added after another client's `Space` was already constructed
+  (via `demo:relay` restart for the CLI, or `/join` for the browser) is
+  invisible to that client until it learns about them - the CLI demo
+  requires a restart; the browser demo polls `/members.json` every 3s and
+  calls `Space.addMember()` (see that method's own doc comment in
+  `packages/space-core/src/space.js`) - so a message sent in the few
+  seconds right after someone joins may not reach them, by design (a write
+  is encrypted only for the members known at the moment it's sealed;
+  wait a few seconds after a join before relying on delivery).

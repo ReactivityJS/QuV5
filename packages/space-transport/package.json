@@ -5,7 +5,8 @@
   "type": "module",
   "main": "src/index.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./ws-client-transport": "./src/ws-client-transport.js"
   },
   "bin": {
     "qu-space-relay": "./src/relay-server.js"

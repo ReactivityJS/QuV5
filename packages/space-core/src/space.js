@@ -34,6 +34,27 @@
  * Omitting `bus` (the default) makes a Space behave exactly as before this
  * existed - nothing is emitted, nothing else changes.
  *
+ * The SAME `bus` also gets a `debug.space.*` family, purely for optional
+ * debugging/observability (see `@qu/events`' `createDebugLogger()`) - every
+ * write-lifecycle step the two app-facing topics above only summarize:
+ *   - `debug.space.write.local` - a local update was sealed and sent,
+ *     `{nodeId, kind, bytes, notify}` (`bytes` = the raw Yjs update's
+ *     length, before encryption - a rough "how big was this write" signal).
+ *   - `debug.space.write.remote.accepted` - an incoming envelope passed
+ *     signature verification and was applied, `{nodeId, kind, authorPub, bytes}`.
+ *   - `debug.space.write.remote.rejected` - an incoming envelope FAILED
+ *     signature verification (tampered, or signed by a non-member) and was
+ *     dropped before touching the CRDT, `{nodeId, authorPub}`.
+ *   - `debug.space.write.remote.ignored` - an incoming envelope arrived for
+ *     a Node this Space never subscribed to (ordinary relay fan-out, not
+ *     an error) and was silently ignored, `{nodeId}`.
+ *   - `debug.space.subscribe.sent` / `debug.space.hello.sent` - the two
+ *     signed control messages this Space sends on its own, `{nodeId}` / `{}`.
+ * Deliberately NOT instrumented: plain local reads (`field.get()`/
+ * `toArray()`) - they touch no network/storage and aren't where a sync bug
+ * usually hides; this stays scoped to what actually crosses a process
+ * boundary or gets persisted.
+ *
  * A Space also announces itself to whatever it's connected to with one
  * signed `{type:'hello', pub, sig}` message on construction (fire-and-
  * forget, same posture as `subscribeNode()`'s own subscribe request) -
@@ -65,7 +86,7 @@ export class Space {
    */
   constructor({ identity, members, transport, storage = null, bus = null }) {
     this._identity = identity;
-    this._members = members;
+    this._members = [...members]; // own copy - addMember() (see below) must never mutate the caller's own array out from under them.
     this._transport = transport;
     this._storage = storage;
     this._bus = bus;
@@ -78,10 +99,36 @@ export class Space {
   async _sendHello() {
     const sig = await QuCrypto.sign(new TextEncoder().encode(HELLO_DOMAIN), this._identity.signingKey);
     this._transport.send({ type: 'hello', pub: this._identity.signingPub, sig });
+    this._bus?.emit('debug.space.hello.sent', {});
   }
 
   _recipientXPubKeys() {
     return this._members.map((m) => m.xPub);
+  }
+
+  /**
+   * Adds one member to THIS Space's own live view of the Space's
+   * membership - the client-side counterpart to `@qu/space-transport`'s
+   * `relay.addMember()` (same shape, same purpose, different half of the
+   * problem: the relay accepting a new member's signed writes and routing
+   * pushes for them does NOTHING for an already-constructed `Space`
+   * elsewhere, which still encrypts new writes only for its OLD member
+   * list and would reject the new member's incoming writes as
+   * unauthorized - both `_recipientXPubKeys()` and `_isAuthorizedWriter()`
+   * read `this._members` fresh on every call, so calling this is enough;
+   * no other internal state needs touching).
+   *
+   * Callers decide HOW they learn about a new member (there is no
+   * membership-change notification built into `Space`/the relay protocol
+   * itself - see `demo/web/main.js`'s own periodic `/members.json` poll
+   * for one concrete, demo-scoped answer). Idempotent: adding an
+   * already-known pubkey is a no-op.
+   * @param {{pub: Uint8Array, xPub: Uint8Array}} member
+   */
+  addMember(member) {
+    const pubB64 = QuCrypto.toBase64(member.pub);
+    if (this._members.some((m) => QuCrypto.toBase64(m.pub) === pubB64)) return;
+    this._members.push(member);
   }
 
   _isAuthorizedWriter(kindSchema) {
@@ -135,6 +182,7 @@ export class Space {
   async _sendSubscribeRequest(nodeId) {
     const sig = await QuCrypto.sign(new TextEncoder().encode(nodeId), this._identity.signingKey);
     this._transport.send({ type: 'subscribe', nodeId, pub: this._identity.signingPub, sig });
+    this._bus?.emit('debug.space.subscribe.sent', { nodeId });
   }
 
   /** Replays a Node's envelope history from storage (see @qu/space-storage) - the "durable persistence survives a reload" path. */
@@ -150,6 +198,7 @@ export class Space {
       Y.applyUpdate(doc, bytes, REMOTE_ORIGIN);
     }
     node._skipReSeal = false;
+    this._bus?.emit('debug.space.load', { nodeId: id, envelopeCount: envelopes.length });
     return node;
   }
 
@@ -171,18 +220,27 @@ export class Space {
     const envelope = await sealUpdate(update, this._identity, this._recipientXPubKeys(), notify);
     await this._storage?.append(nodeId, envelope);
     this._transport.send({ nodeId, envelope });
+    this._bus?.emit('debug.space.write.local', { nodeId, kind: node.kind, bytes: update.length, notify });
     this._emitChangeEvents(nodeId, node, { origin: 'local', notify, authorPub: this._identity.signingPub });
   }
 
   async _handleIncoming({ nodeId, envelope, type }) {
     if (type === 'subscribe' || type === 'hello' || !envelope) return; // both are relay-bound, not peer-bound (see _sendSubscribeRequest/_sendHello) - defensive no-op if one ever reaches here anyway.
     const node = this._nodes.get(nodeId);
-    if (!node) return; // not subscribed to this Node - ignore, same as QuStore's watch() only reacting to watched paths.
+    if (!node) {
+      this._bus?.emit('debug.space.write.remote.ignored', { nodeId }); // not subscribed to this Node - ordinary relay fan-out, not an error, see this file's own doc comment.
+      return;
+    }
     const isAuthorized = this._isAuthorizedWriter(node.kindSchema);
-    if (!(await verifyEnvelope(envelope, isAuthorized))) return; // bad/foreign signature - reject before it ever touches the CRDT.
+    if (!(await verifyEnvelope(envelope, isAuthorized))) {
+      // envelope.pub is guaranteed well-formed here: verifyEnvelope() already base64-encoded it internally without throwing.
+      this._bus?.emit('debug.space.write.remote.rejected', { nodeId, authorPub: QuCrypto.toBase64(envelope.pub) });
+      return; // bad/foreign signature - reject before it ever touches the CRDT.
+    }
     const bytes = await openUpdate(envelope, this._identity);
     Y.applyUpdate(node.doc, bytes, REMOTE_ORIGIN);
     await this._storage?.append(nodeId, envelope);
+    this._bus?.emit('debug.space.write.remote.accepted', { nodeId, kind: node.kind, authorPub: QuCrypto.toBase64(envelope.pub), bytes: bytes.length });
     this._emitChangeEvents(nodeId, node, { origin: 'remote', notify: envelope.notify ?? null, authorPub: envelope.pub });
   }
 

@@ -106,12 +106,20 @@ export class EventBus {
    * `order`) from running for this emit - e.g. a settings gate at `order:
    * -100` stopping a muted topic before any delivery handler sees it.
    *
+   * `ctx.topic` is always set to the CONCRETE topic emitted - a handler
+   * registered on a wildcard pattern (e.g. `debug.**`) has no other way to
+   * know which specific topic actually fired; this is what
+   * `createDebugLogger()` (debug-logger.js) reads to print one line per
+   * event without every call site having to duplicate its own topic string
+   * into the payload.
+   *
    * @param {string} topic - Concrete (no wildcards).
    * @param {*} payload
    * @param {object} [ctx]
-   * @returns {Promise<object>} ctx, with `ctx.errors` (array) and `ctx.stopped` (boolean).
+   * @returns {Promise<object>} ctx, with `ctx.errors` (array), `ctx.stopped` (boolean), and `ctx.topic`.
    */
   async emit(topic, payload, ctx = {}) {
+    ctx.topic = topic;
     ctx.errors = ctx.errors ?? [];
     ctx.stopped = false;
     ctx.stop = () => {

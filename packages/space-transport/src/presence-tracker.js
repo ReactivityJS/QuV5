@@ -46,4 +46,9 @@ export class PresenceTracker {
   isOnline(pubB64) {
     return this.#peerIdByPub.has(pubB64);
   }
+
+  /** @param {string} peerId @returns {string|null} The pubkey currently mapped to this connection, if any - read BEFORE disconnect() clears it (see relay.js's own disconnect wiring, which needs this to emit a debug.relay.presence.offline event naming who went offline). */
+  pubFor(peerId) {
+    return this.#pubByPeerId.get(peerId) ?? null;
+  }
 }

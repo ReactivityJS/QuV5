@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Qu V5 — Demo</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 40rem;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      line-height: 1.4;
+    }
+    h1 { font-size: 1.1rem; opacity: 0.7; font-weight: 600; }
+    #status { font-size: 0.85rem; opacity: 0.7; min-height: 1.2em; }
+    #status.error { color: #c0392b; opacity: 1; }
+    #setup { display: flex; gap: 0.5rem; margin: 1rem 0; }
+    #setup input { flex: 1; padding: 0.5rem; font-size: 1rem; }
+    #setup button { padding: 0.5rem 1rem; }
+    #chat[hidden], #setup[hidden] { display: none; }
+    #you { font-size: 0.85rem; opacity: 0.7; margin-bottom: 0.5rem; }
+    #members { list-style: none; padding: 0; margin: 0 0 1rem; font-size: 0.8rem; opacity: 0.8; display: flex; flex-wrap: wrap; gap: 0.75rem; }
+    #messages {
+      border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+      border-radius: 6px;
+      height: 20rem;
+      overflow-y: auto;
+      padding: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .message { margin-bottom: 0.4rem; }
+    .message .meta { display: block; font-size: 0.7rem; opacity: 0.55; }
+    .message.own .meta { opacity: 0.8; }
+    .message .text { font-size: 0.95rem; }
+    #compose-form { display: flex; gap: 0.5rem; }
+    #compose-input { flex: 1; padding: 0.5rem; font-size: 1rem; }
+    #compose-form button { padding: 0.5rem 1rem; }
+    .row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.75rem; font-size: 0.85rem; }
+    #debug-log {
+      margin-top: 0.5rem;
+      max-height: 12rem;
+      overflow-y: auto;
+      background: color-mix(in srgb, currentColor 6%, transparent);
+      border-radius: 6px;
+      padding: 0.5rem;
+      font-family: ui-monospace, monospace;
+      font-size: 0.72rem;
+    }
+    #debug-log[hidden] { display: none; }
+    .toast {
+      position: fixed;
+      right: 1rem;
+      bottom: 1rem;
+      background: #333;
+      color: #fff;
+      padding: 0.6rem 0.9rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      max-width: 20rem;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+    }
+  </style>
+</head>
+<body>
+  <h1>Qu V5 — Yjs-native text exchange demo</h1>
+  <div id="status"></div>
+
+  <div id="setup">
+    <input id="name-input" type="text" placeholder="Dein Name (z.B. alice)" autocomplete="off" />
+    <button id="join-button" type="button">Beitreten</button>
+  </div>
+
+  <div id="chat" hidden>
+    <div id="you"></div>
+    <ul id="members"></ul>
+    <div id="messages"></div>
+    <form id="compose-form">
+      <input id="compose-input" type="text" placeholder="Nachricht (@name für Mention)" autocomplete="off" />
+      <button type="submit">Senden</button>
+    </form>
+    <div class="row">
+      <button id="notify-button" type="button">Browser-Notifications erlauben</button>
+      <label><input id="debug-toggle" type="checkbox" /> Debug-Log (@qu/events)</label>
+    </div>
+    <div id="debug-log" hidden></div>
+  </div>
+
+  <script type="module" src="/bundle.js"></script>
+</body>
+</html>

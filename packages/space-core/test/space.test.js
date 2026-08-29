@@ -119,3 +119,145 @@ test('omitting bus entirely (the default) is a no-op - a Space works exactly as 
   await node.field('messages').push('hi', { notify: { topic: 'message' } });
   assert.equal(await node.field('messages').length, 1);
 });
+
+test('constructing a Space emits debug.space.hello.sent', async () => {
+  const alice = await actor();
+  const [aliceTransport] = pairTransports();
+  const bus = recordingBus();
+  new Space({ identity: alice, members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }], transport: aliceTransport, bus });
+
+  await waitUntil(() => bus.calls.some((c) => c.topic === 'debug.space.hello.sent'));
+});
+
+test('subscribeNode() emits debug.space.subscribe.sent with the nodeId', async () => {
+  const alice = await actor();
+  const [aliceTransport] = pairTransports();
+  const bus = recordingBus();
+  const space = new Space({ identity: alice, members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }], transport: aliceTransport, bus });
+  space.subscribeNode('room-sub', chatKind);
+
+  await waitUntil(() => bus.calls.some((c) => c.topic === 'debug.space.subscribe.sent'));
+  const call = bus.calls.find((c) => c.topic === 'debug.space.subscribe.sent');
+  assert.equal(call.payload.nodeId, 'room-sub');
+});
+
+test('a local write emits debug.space.write.local with the update size and notify hint', async () => {
+  const alice = await actor();
+  const [aliceTransport] = pairTransports();
+  const bus = recordingBus();
+  const space = new Space({ identity: alice, members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }], transport: aliceTransport, bus });
+  const node = await space.createNode(chatKind, {}, { id: 'room-debug-1' });
+
+  await node.field('messages').push('hi', { notify: { topic: 'message' } });
+
+  // createNode() above ALSO produces its own debug.space.write.local (the meta-stamp transaction,
+  // notify: null) - wait for the specific one this push() produced, not just any write for this nodeId.
+  await waitUntil(() => bus.calls.some((c) => c.topic === 'debug.space.write.local' && c.payload.notify?.topic === 'message'));
+  const call = bus.calls.find((c) => c.topic === 'debug.space.write.local' && c.payload.notify?.topic === 'message');
+  assert.equal(call.payload.nodeId, 'room-debug-1');
+  assert.equal(call.payload.kind, 'chat');
+  assert.ok(call.payload.bytes > 0);
+  assert.deepEqual(call.payload.notify, { topic: 'message' });
+});
+
+test('a REMOTE write emits debug.space.write.remote.accepted on the receiving Space', async () => {
+  const alice = await actor();
+  const bob = await actor();
+  const members = [
+    { pub: alice.signingPub, xPub: alice.xPublicKey },
+    { pub: bob.signingPub, xPub: bob.xPublicKey },
+  ];
+  const [aliceTransport, bobTransport] = pairTransports();
+  const bobBus = recordingBus();
+  const aliceSpace = new Space({ identity: alice, members, transport: aliceTransport });
+  const bobSpace = new Space({ identity: bob, members, transport: bobTransport, bus: bobBus });
+
+  const aliceNode = await aliceSpace.createNode(chatKind, {}, { id: 'room-debug-2' });
+  bobSpace.subscribeNode('room-debug-2', chatKind);
+  await aliceNode.field('messages').push('hi bob');
+
+  await waitUntil(() => bobBus.calls.some((c) => c.topic === 'debug.space.write.remote.accepted'));
+  const call = bobBus.calls.find((c) => c.topic === 'debug.space.write.remote.accepted');
+  assert.equal(call.payload.nodeId, 'room-debug-2');
+  assert.equal(call.payload.authorPub, QuCrypto.toBase64(alice.signingPub));
+  assert.ok(call.payload.bytes > 0);
+});
+
+test('a write for a Node this Space never subscribed to emits debug.space.write.remote.ignored, not .accepted', async () => {
+  const alice = await actor();
+  const bus = recordingBus();
+  const [aliceTransport] = pairTransports();
+  const space = new Space({ identity: alice, members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }], transport: aliceTransport, bus });
+
+  // Simulate an envelope arriving for a Node id this Space was never told about - content
+  // doesn't matter, _handleIncoming() returns before ever inspecting it (see !node check).
+  await space._handleIncoming({ nodeId: 'never-subscribed', envelope: {} });
+
+  assert.ok(bus.calls.some((c) => c.topic === 'debug.space.write.remote.ignored' && c.payload.nodeId === 'never-subscribed'));
+  assert.ok(!bus.calls.some((c) => c.topic === 'debug.space.write.remote.accepted'));
+});
+
+test('loadNode() emits debug.space.load with the replayed envelope count', async () => {
+  const alice = await actor();
+  const [aliceTransport] = pairTransports();
+
+  const memoryStore = (() => {
+    const log = new Map();
+    return {
+      async append(nodeId, envelope) {
+        const list = log.get(nodeId) ?? [];
+        list.push(envelope);
+        log.set(nodeId, list);
+      },
+      async load(nodeId) {
+        return [...(log.get(nodeId) ?? [])];
+      },
+    };
+  })();
+
+  const writeBus = recordingBus();
+  const writeSpace = new Space({ identity: alice, members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }], transport: aliceTransport, storage: memoryStore, bus: writeBus });
+  const node = await writeSpace.createNode(chatKind, {}, { id: 'room-debug-3' });
+  await node.field('messages').push('one');
+  await node.field('messages').push('two');
+  await waitUntil(() => writeBus.calls.filter((c) => c.topic === 'debug.space.write.local').length >= 3); // meta-stamp + 2 pushes, all storage.append()-ed
+
+  const readBus = recordingBus();
+  const readSpace = new Space({ identity: alice, members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }], transport: pairTransports()[0], storage: memoryStore, bus: readBus });
+  await readSpace.loadNode('room-debug-3', chatKind);
+
+  assert.ok(readBus.calls.some((c) => c.topic === 'debug.space.load' && c.payload.nodeId === 'room-debug-3' && c.payload.envelopeCount >= 3));
+});
+
+test('addMember() lets an already-constructed Space encrypt-for and accept writes from a member it did not start with', async () => {
+  const alice = await actor();
+  const bob = await actor();
+  const [aliceTransport, bobTransport] = pairTransports();
+
+  // Alice's Space is constructed WITHOUT bob - simulates bob joining later (e.g. via a relay's dynamic-membership endpoint) -
+  // but he's added BEFORE alice's first write here: this architecture's every-member-is-a-recipient
+  // model means a write sealed before a member is added can never retroactively include them (by
+  // design - see envelope.js), so this proves the real, useful case: added-then-written-to works.
+  const aliceSpace = new Space({ identity: alice, members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }], transport: aliceTransport });
+  const bobSpace = new Space({ identity: bob, members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }, { pub: bob.signingPub, xPub: bob.xPublicKey }], transport: bobTransport });
+  aliceSpace.addMember({ pub: bob.signingPub, xPub: bob.xPublicKey });
+
+  const aliceNode = await aliceSpace.createNode(chatKind, {}, { id: 'room-late-join' });
+  const bobNode = bobSpace.subscribeNode('room-late-join', chatKind);
+  await aliceNode.field('messages').push('hi bob');
+
+  await waitUntil(() => bobNode.field('messages').length === 1);
+  assert.equal((await bobNode.field('messages').toArray())[0], 'hi bob');
+});
+
+test('addMember() is idempotent and does not mutate the caller\'s original members array', async () => {
+  const alice = await actor();
+  const [aliceTransport] = pairTransports();
+  const originalMembers = [{ pub: alice.signingPub, xPub: alice.xPublicKey }];
+  const space = new Space({ identity: alice, members: originalMembers, transport: aliceTransport });
+
+  space.addMember({ pub: alice.signingPub, xPub: alice.xPublicKey }); // already a member - no-op
+  space.addMember({ pub: alice.signingPub, xPub: alice.xPublicKey }); // again - still a no-op
+
+  assert.equal(originalMembers.length, 1); // the caller's own array is untouched, per Space's own doc comment.
+});

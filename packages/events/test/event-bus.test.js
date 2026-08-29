@@ -177,6 +177,15 @@ test('listenerCount() reflects patterns that would match a given topic, across l
   assert.equal(bus.listenerCount('a.b'), 3);
 });
 
+test('ctx.topic is always the CONCRETE emitted topic, even for a wildcard-matched handler', async () => {
+  const bus = new EventBus();
+  const seenTopics = [];
+  bus.on('debug.**', (payload, ctx) => seenTopics.push(ctx.topic));
+  await bus.emit('debug.relay.write.received', { nodeId: 'n1' });
+  await bus.emit('debug.space.write.local', { nodeId: 'n2' });
+  assert.deepEqual(seenTopics, ['debug.relay.write.received', 'debug.space.write.local']);
+});
+
 test('on()/emit() reject a non-string topic/pattern with a clear error', () => {
   const bus = new EventBus();
   assert.throws(() => bus.on('', () => {}), /non-empty string/);

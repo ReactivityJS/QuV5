@@ -30,6 +30,15 @@
  * storage handling) answers by replaying every envelope it has mirrored
  * for that Node, regardless of whether the original author is still
  * connected.
+ *
+ * Importable on its own via the `@qu/space-transport/ws-client-transport`
+ * subpath (see package.json's `exports`), separate from the package's main
+ * `.` entry - a browser bundle (see `demo/web/main.js`) needs exactly this
+ * file and nothing else from this package; the main entry's `index.js`
+ * also re-exports `createWsServerHub`, which imports `node:crypto` and has
+ * no browser build. Bundling THAT into a browser page would fail (or drag
+ * in a Node-core polyfill for code a browser client never calls) - this
+ * subpath sidesteps the problem entirely rather than needing one.
  */
 import { encodeForWire, decodeFromWire } from '@qu/space-core';
 

@@ -50,7 +50,8 @@ npm run demo
 Runs a self-contained, zero-setup demo: two identities exchange chat
 messages through an in-process relay, each identified by their Qu
 public-key fingerprint. For the real thing - two separate terminals talking
-over an actual WebSocket relay - see [`demo/README.md`](./demo/README.md).
+over an actual WebSocket relay, or a browser client `npm run demo:relay`
+also serves on that same port - see [`demo/README.md`](./demo/README.md).
 
 ## Deploying the relay
 

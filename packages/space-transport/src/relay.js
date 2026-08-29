@@ -60,6 +60,21 @@
  * consistent with "toast vs. browser-notification vs. push is the
  * handler's call based on state" (see this repo's own design notes on
  * `@qu/events`).
+ *
+ * The SAME `bus` (optional, same as above) also gets a `debug.relay.*`
+ * family, for optional debugging/observability only (see `@qu/events`'
+ * `createDebugLogger()`) - every write/subscribe/hello/presence event this
+ * relay handles, not just the ones that end up notify-routed:
+ *   - `debug.relay.write.received` / `.rejected` (`{nodeId, reason}`,
+ *     `reason` one of `'unknown-node'`/`'bad-signature'`) / `.forwarded`
+ *     (`{nodeId, toPeerIds}`) / `.mirrored` (`{nodeId}`, only when a
+ *     `storage` adapter is configured).
+ *   - `debug.relay.subscribe.received` / `.rejected` (`{nodeId, reason}`)
+ *     / `.replayed` (`{nodeId, count}`).
+ *   - `debug.relay.hello.received` / `.rejected` (`{reason}`).
+ *   - `debug.relay.presence.online` / `.offline` (`{pub}`).
+ * A relay never has a decryption key regardless of whether `bus` is wired
+ * up - none of this exposes anything `seen`/`emitNotify()` don't already.
  */
 import { verifyEnvelope } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
@@ -71,7 +86,11 @@ const HELLO_DOMAIN = 'qu-space-hello-v1'; // MUST match @qu/space-core's own HEL
  * @param {{hub: object, members: Array<{pub: Uint8Array}>, resolveKindSchema: (nodeId: string) => object, storage?: object, bus?: import('@qu/events').EventBus, presence?: PresenceTracker}} params
  */
 export function createRelayForwarder({ hub, members, resolveKindSchema, storage = null, bus = null, presence = new PresenceTracker() }) {
-  const memberPubs = new Set(members.map((m) => QuCrypto.toBase64(m.pub)));
+  // A local, mutable copy - addMember() (see the returned API, and this
+  // file's own "DYNAMIC MEMBERSHIP" doc comment below) appends to THIS
+  // array/Set, never to the caller's original `members` argument.
+  const memberList = [...members];
+  const memberPubs = new Set(memberList.map((m) => QuCrypto.toBase64(m.pub)));
   const isSpaceMember = (pubB64) => memberPubs.has(pubB64);
 
   /** @type {Array<{nodeId: string, envelope: object}>} Every envelope this relay ever handled, ciphertext/signature only - for tests to assert "no plaintext ever passed through here." */
@@ -88,45 +107,84 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     }
     await handleWrite(fromPeerId, message);
   });
-  hub.registerDisconnect?.((peerId) => presence.disconnect(peerId));
+  hub.registerDisconnect?.((peerId) => {
+    const pubB64 = presence.pubFor?.(peerId) ?? null;
+    presence.disconnect(peerId);
+    if (pubB64) bus?.emit('debug.relay.presence.offline', { pub: pubB64 });
+  });
 
   /** See this file's own "A THIRD message shape" doc comment. */
   async function handleHello(fromPeerId, { pub, sig }) {
-    if (!pub || !sig) return;
+    if (!pub || !sig) {
+      bus?.emit('debug.relay.hello.rejected', { reason: 'malformed' });
+      return;
+    }
     const pubB64 = QuCrypto.toBase64(pub);
-    if (!isSpaceMember(pubB64)) return; // not a member - presence is only meaningful for who the relay would ever route to anyway.
+    if (!isSpaceMember(pubB64)) {
+      bus?.emit('debug.relay.hello.rejected', { reason: 'not-member' });
+      return; // not a member - presence is only meaningful for who the relay would ever route to anyway.
+    }
     const ok = await QuCrypto.verify(new TextEncoder().encode(HELLO_DOMAIN), sig, pub);
-    if (!ok) return; // claims a pubkey it can't prove possession of - ignore.
+    if (!ok) {
+      bus?.emit('debug.relay.hello.rejected', { reason: 'bad-signature' });
+      return; // claims a pubkey it can't prove possession of - ignore.
+    }
     presence.setOnline(pubB64, fromPeerId);
+    bus?.emit('debug.relay.hello.received', { pub: pubB64 });
+    bus?.emit('debug.relay.presence.online', { pub: pubB64 });
   }
 
   /** Mirror-storage catch-up: hand a requesting member everything this relay has mirrored for one Node, regardless of whether the original author is still connected. */
   async function handleSubscribe(fromPeerId, { nodeId, pub, sig }) {
     if (!storage) return; // this relay isn't mirroring anything - nothing to catch a late peer up on.
-    if (!pub || !sig) return;
+    if (!pub || !sig) {
+      bus?.emit('debug.relay.subscribe.rejected', { nodeId, reason: 'malformed' });
+      return;
+    }
     const pubB64 = QuCrypto.toBase64(pub);
-    if (!isSpaceMember(pubB64)) return; // not a member - no history for you, mirrored ciphertext or not.
+    if (!isSpaceMember(pubB64)) {
+      bus?.emit('debug.relay.subscribe.rejected', { nodeId, reason: 'not-member' });
+      return; // not a member - no history for you, mirrored ciphertext or not.
+    }
     const ok = await QuCrypto.verify(new TextEncoder().encode(nodeId), sig, pub);
-    if (!ok) return; // signature doesn't match the claimed pub - reject, don't trust the claim.
+    if (!ok) {
+      bus?.emit('debug.relay.subscribe.rejected', { nodeId, reason: 'bad-signature' });
+      return; // signature doesn't match the claimed pub - reject, don't trust the claim.
+    }
+    bus?.emit('debug.relay.subscribe.received', { nodeId, pub: pubB64 });
 
     const envelopes = await storage.load(nodeId);
     for (const envelope of envelopes) {
       hub.deliverTo(fromPeerId, 'relay', { nodeId, envelope });
     }
+    bus?.emit('debug.relay.subscribe.replayed', { nodeId, count: envelopes.length });
   }
 
   async function handleWrite(fromPeerId, { nodeId, envelope }) {
     const kindSchema = resolveKindSchema(nodeId);
-    if (!kindSchema) return; // unknown Node - nothing to route to.
-    if (!(await verifyEnvelope(envelope, isSpaceMember))) return; // bad/foreign signature - drop, never forwarded or mirrored.
+    if (!kindSchema) {
+      bus?.emit('debug.relay.write.rejected', { nodeId, reason: 'unknown-node' });
+      return; // unknown Node - nothing to route to.
+    }
+    if (!(await verifyEnvelope(envelope, isSpaceMember))) {
+      bus?.emit('debug.relay.write.rejected', { nodeId, reason: 'bad-signature' });
+      return; // bad/foreign signature - drop, never forwarded or mirrored.
+    }
+    bus?.emit('debug.relay.write.received', { nodeId, kind: kindSchema.kind });
 
     seen.push({ nodeId, envelope });
-    await storage?.append(nodeId, envelope); // the mirror - present even if the author disconnects the instant after this line runs.
+    if (storage) {
+      await storage.append(nodeId, envelope); // the mirror - present even if the author disconnects the instant after this line runs.
+      bus?.emit('debug.relay.write.mirrored', { nodeId });
+    }
 
+    const toPeerIds = [];
     for (const peerId of hub.peerIds()) {
       if (peerId === fromPeerId) continue; // never echo a write back to its own author.
       hub.deliverTo(peerId, fromPeerId, { nodeId, envelope });
+      toPeerIds.push(peerId);
     }
+    bus?.emit('debug.relay.write.forwarded', { nodeId, toPeerIds });
 
     await emitNotify(kindSchema, nodeId, envelope);
   }
@@ -137,7 +195,7 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     const authorPubB64 = QuCrypto.toBase64(envelope.pub);
     const recipients = envelope.notify.to?.length
       ? envelope.notify.to
-      : members.map((m) => QuCrypto.toBase64(m.pub)).filter((p) => p !== authorPubB64);
+      : memberList.map((m) => QuCrypto.toBase64(m.pub)).filter((p) => p !== authorPubB64);
     for (const toPubB64 of recipients) {
       await bus.emit(`relay.notify.${kindSchema.kind}.${envelope.notify.topic}`, {
         nodeId,
@@ -150,5 +208,33 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     }
   }
 
-  return { seen, presence };
+  /**
+   * DYNAMIC MEMBERSHIP: adds one new authorized member to this ALREADY
+   * RUNNING relay - no restart needed. Intended for exactly one case: a
+   * client that generates its own keypair itself (e.g. in a browser, see
+   * `demo/web/main.js`) and registers only its PUBLIC halves here - this
+   * relay is never handed anything decryptable, same guarantee as every
+   * member set at construction time.
+   *
+   * Deliberately NOT what `docs/v5-space-core-guide.md`'s own "known gaps"
+   * section means by "member/key rotation" (that's about a Kind-Schema's
+   * write-ACL evolving safely for an EXISTING encrypted Node's readers,
+   * which this does nothing for - a newly added member can't retroactively
+   * decrypt history they weren't an original recipient of). This only
+   * widens WHO may sign/be-routed-to from this point forward.
+   *
+   * No proof-of-anything is required to call this beyond well-formed keys
+   * - see `demo/relay.mjs`'s own `/join` endpoint doc comment for why that
+   * is an accepted, loudly-documented demo-only tradeoff, not something to
+   * copy into a production relay unmodified.
+   * @param {{pub: Uint8Array, xPub: Uint8Array}} member
+   */
+  function addMember(member) {
+    const pubB64 = QuCrypto.toBase64(member.pub);
+    if (memberPubs.has(pubB64)) return; // already a member - idempotent, not an error.
+    memberList.push(member);
+    memberPubs.add(pubB64);
+  }
+
+  return { seen, presence, addMember };
 }
