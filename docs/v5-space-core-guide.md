@@ -241,7 +241,51 @@ Proven end-to-end (real WebSocket, real disk, relay process actually
 restarted between the two halves) in
 `packages/space-transport/test/mirror-offline.test.js`.
 
-## 7. Known gaps (honest, not hidden)
+## 7. Granular events: notifications, presence, and push routing
+
+`@qu/events`'s `EventBus` is one dot-namespaced, wildcard-matching
+(`*`/`**`) pub/sub primitive used on BOTH sides of a Space, fed different
+information appropriate to what each side can see:
+
+- **Client-side** (`new Space({..., bus})`): every applied update - local
+  or remote - fires `space.node.<nodeId>.changed` (generic change feed,
+  `{nodeId, kind, origin}`). A write that also carried a `notify` hint (see
+  below) additionally fires `notification.<kind>.<topic>`. This is real
+  content: the client has already decrypted the update by the time it
+  emits.
+- **Relay-side** (`createRelayForwarder({..., bus})`): the relay is
+  content-blind by construction (§3) - it can never compute "this is a
+  mention" from ciphertext. So a WRITER who wants the relay to route a
+  push notification attaches a small `notify: {topic, to?}` hint to the
+  write itself (`field.set(value, {notify})` / `field.push(value,
+  {notify})`), which travels UNENCRYPTED alongside the envelope - signed
+  (tamper-evident against a third party), but not verifiable against real
+  content (the sender could mislabel their own write - an accepted,
+  documented tradeoff, not a hole in the encryption). `notify.topic` must
+  be declared in the Kind-Schema's `notifyTopics` (`defineKind(kind,
+  {fields, notifyTopics: [...]})`) - an undeclared topic throws locally,
+  before the write ever reaches Yjs. The relay emits one
+  `relay.notify.<kind>.<topic>` event per recipient, carrying `online`
+  (from its own `PresenceTracker`, built from every `Space`'s automatic
+  signed `{type:'hello'}` message on connect).
+
+**Delivery channel is a handler's decision, not the bus's:** the bus only
+ever describes what happened and whether the recipient looks reachable
+live - `packages/space-transport/src/push-handler.js`'s
+`registerPushHandler(bus, {sendPush})` is the reference example: it
+subscribes to `relay.notify.**` and sends a push ONLY when `online` is
+false (an online recipient's live connection already got the real
+envelope, a push would be redundant). A browser-notification or in-app
+toast handler on the CLIENT side works the same way - subscribe to
+`notification.**`, decide locally (tab visible? `Notification.permission`
+granted?) whether to actually show one. None of that logic lives in
+`EventBus`, `Space`, or the relay themselves - see `demo/auto-demo.mjs`
+for both sides wired up together in one runnable script, and
+`demo/chat.mjs`/`demo/relay.mjs` for the same thing over a real WebSocket
+relay (a `@bob ...` message attaches a `mention` hint; watch the relay's
+own terminal log a push once bob's client isn't running).
+
+## 8. Known gaps (honest, not hidden)
 
 - **No auto-reconnect** in `WsClientTransport` — a dropped connection stays
   dropped; reconnect logic (with backoff) is real, separate work.
@@ -264,7 +308,7 @@ restarted between the two halves) in
 - **No app/UI beyond the demo** — `demo/` is a minimal CLI proving the
   sync mechanism (see `demo/README.md`); nothing app-shaped is built yet.
 
-## 8. Where to look for more
+## 9. Where to look for more
 
 Every claim above is backed by a runnable test, not just a comment:
 
@@ -284,7 +328,7 @@ Every claim above is backed by a runnable test, not just a comment:
 Run any of them with `node --test <path>` from the relevant package
 directory, or `npm test` from the repo root to run everything.
 
-## 9. Try it yourself: the text-exchange demo
+## 10. Try it yourself: the text-exchange demo
 
 `demo/` is a small, runnable proof that two independent processes can
 exchange collaboratively-edited text over a real relay, each side

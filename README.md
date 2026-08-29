@@ -27,7 +27,12 @@ enforced, and how to run a relay (standalone or via Docker).
   storing the same sealed envelopes that go out over the wire.
 - [`packages/space-transport`](./packages/space-transport) -
   `@qu/space-transport`: in-process transport (for tests), a real WebSocket
-  transport + relay, and the relay's Docker deployment.
+  transport + relay, presence tracking, a pluggable push-notification
+  handler, and the relay's Docker deployment.
+- [`packages/events`](./packages/events) - `@qu/events`: `EventBus`, a
+  granular, dot-namespaced, wildcard-matching (`*`/`**`) pub/sub primitive
+  used for domain notifications, Space/Node change events, and UI events
+  alike - client-side and relay-side.
 
 ## Development
 

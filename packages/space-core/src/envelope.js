@@ -29,6 +29,23 @@
  * That is exactly the property this design wants: a relay or a durable
  * store only ever handles ONE kind of thing (a sealed envelope), never a
  * per-field-type special case.
+ *
+ * `notify` (optional, see `sealUpdate()`'s own param doc) is the ONE
+ * deliberate exception to "the relay only ever sees ciphertext": a small,
+ * caller-supplied `{topic, to?}` hint that travels UNENCRYPTED alongside
+ * the envelope, specifically so a content-blind relay CAN still decide who
+ * to Push-notify without ever decrypting the write itself (see
+ * `@qu/space-transport`'s `relay.js`). It is still tamper-evident - folded
+ * into the same signed `sigInput` as `iv`/`ct` below, so altering it
+ * in-flight invalidates the signature exactly like altering the ciphertext
+ * would - but it is NOT tamper-evident against the ORIGINAL SENDER lying
+ * about their own write (e.g. tagging a boring message `topic: 'mention'`
+ * to spam someone's push notifications). That is an accepted, documented
+ * tradeoff, not an oversight: the alternative (the relay verifying a
+ * notify claim against real content) is impossible without breaking the
+ * relay's blindness, and a sender who wants to spam a member they're
+ * already in a Space with has cheaper ways to do it than a fake `notify`
+ * hint (they could just also write more, real, honestly-tagged messages).
  */
 import { QuCrypto } from '@qu/core';
 
@@ -36,11 +53,19 @@ import { QuCrypto } from '@qu/core';
  * @param {Uint8Array} update - Raw bytes from `doc.on('update', ...)`.
  * @param {object} sender - `{signingKey, signingPub, xPrivateKey, xPublicKey}` (Ed25519 + X25519 pairs).
  * @param {Array<Uint8Array>} recipientXPubKeys - Every space member's X25519 public key (encryption recipients).
+ * @param {{topic: string, to?: string[]}|null} [notify] - Optional, UNENCRYPTED routing hint for
+ *   push delivery (see this file's own doc comment). `topic` is a plain
+ *   string (the calling field/Node validates it against the Kind-Schema's
+ *   `notifyTopics` allowlist BEFORE calling this - see field.js - envelope.js
+ *   itself has no Kind-Schema to check against). `to` (optional) is a list
+ *   of base64 Ed25519 pubkeys narrowing which members this concerns (e.g.
+ *   the @mentioned ones); omitted/empty means "every other space member."
  * @returns {Promise<object>} A plain, structurally-cloneable envelope - safe to hand to a Transport or a Storage adapter as-is.
  */
-export async function sealUpdate(update, sender, recipientXPubKeys) {
+export async function sealUpdate(update, sender, recipientXPubKeys, notify = null) {
   const { iv, ct, to } = await QuCrypto.encrypt(update, recipientXPubKeys, sender.xPrivateKey);
-  const sigInput = concatBytes(iv, ct);
+  const notifyBytes = encodeNotify(notify);
+  const sigInput = concatBytes(concatBytes(iv, ct), notifyBytes);
   const sig = await QuCrypto.sign(sigInput, sender.signingKey);
   return {
     iv,
@@ -50,12 +75,14 @@ export async function sealUpdate(update, sender, recipientXPubKeys) {
     sig,
     pub: sender.signingPub, // Ed25519 - who to verify the signature against
     ts: Date.now(),
+    ...(notify ? { notify } : {}), // present only when the write actually attached one - see this file's own doc comment.
   };
 }
 
 /**
- * Verifies an envelope's write signature. Requires ONLY the signer's public
- * key - never a decryption key. A relay (see @qu/space-transport's
+ * Verifies an envelope's write signature (including its `notify` hint, if
+ * any - see this file's own doc comment). Requires ONLY the signer's
+ * public key - never a decryption key. A relay (see @qu/space-transport's
  * RelayForwarder) calls exactly this and nothing else, which is what makes
  * it structurally unable to read content: it never even receives an
  * X25519 private key to attempt decryption with.
@@ -66,8 +93,16 @@ export async function sealUpdate(update, sender, recipientXPubKeys) {
 export async function verifyEnvelope(envelope, isAuthorizedWriter) {
   const pubB64 = QuCrypto.toBase64(envelope.pub);
   if (!isAuthorizedWriter(pubB64)) return false;
-  const sigInput = concatBytes(envelope.iv, envelope.ct);
+  const notifyBytes = encodeNotify(envelope.notify ?? null);
+  const sigInput = concatBytes(concatBytes(envelope.iv, envelope.ct), notifyBytes);
   return QuCrypto.verify(sigInput, envelope.sig, envelope.pub);
+}
+
+/** Canonical (stable key order), UTF-8 encoding of a `notify` hint for the signature - `null`/absent encodes to zero bytes, so an envelope with no hint signs identically to before this feature existed. */
+function encodeNotify(notify) {
+  if (!notify) return new Uint8Array(0);
+  const canonical = { topic: notify.topic, to: notify.to ?? [] };
+  return new TextEncoder().encode(JSON.stringify(canonical));
 }
 
 /**

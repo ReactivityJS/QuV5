@@ -54,6 +54,26 @@ name and fingerprint, e.g.:
 Stop with Ctrl+C. Restart `demo:relay` any time you add a third identity
 (`node demo/chat.mjs carol`) so it picks up the new member.
 
+### Push routing: stop one client and watch the relay terminal
+
+Every message attaches a granular `notify` hint (`@qu/events`' `EventBus`
+topics, see `docs/v5-space-core-guide.md` §7): a plain line is
+`notify.topic: 'message'`, a line starting with `@bob` (a known member) is
+`notify.topic: 'mention'` addressed just to bob. Stop `demo:bob` (Ctrl+C)
+but leave `demo:relay` and `demo:alice` running, then type a message (or
+`@bob ...`) in alice's terminal - the RELAY's own terminal logs a line
+like:
+
+```
+📮 ~146cc634b870… is offline -> sending Web Push: "demo-chat.mention" (from ~db145406dd7c…)
+```
+
+That line is the `push-handler.js` plugin reacting to the relay's
+presence-gated `relay.notify.**` events (`online: false`, since bob's
+`Space` never sent its connect-time "hello") - restart `demo:bob` and send
+another message: the same code path now sees `online: true` and stays
+silent, since bob's live connection already got it.
+
 ## How it works
 
 - `demo/lib/identity.mjs` - persists one Ed25519+X25519 keypair per name
@@ -63,11 +83,12 @@ Stop with Ctrl+C. Restart `demo:relay` any time you add a third identity
 - `demo/relay.mjs` - a real relay (`@qu/space-transport`'s
   `createWsServerHub`/`createRelayForwarder` + `@qu/space-storage`'s
   `createFileStore`), same code path as
-  `packages/space-transport/src/relay-server.js`.
+  `packages/space-transport/src/relay-server.js` - plus an `@qu/events`
+  `EventBus` and `registerPushHandler()` for the push-routing log above.
 - `demo/chat.mjs` - a CLI peer: connects via `WsClientTransport`, joins a
   shared `demo-chat` Node (`{ messages: 'list' }` Kind-Schema, see
-  `packages/space-core/src/kind-schema.js`), and reads/writes it from
-  stdin/stdout.
+  `packages/space-core/src/kind-schema.js`), reads/writes it from
+  stdin/stdout, and attaches a `notify` hint to every push.
 - `demo/auto-demo.mjs` - the same mechanism, in-process, no relay/terminal
   needed - see `npm run demo` above.
 

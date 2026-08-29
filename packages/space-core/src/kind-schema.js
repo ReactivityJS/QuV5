@@ -29,22 +29,42 @@
  * intentionally simple for the PoC ('members': every space member may
  * write). A real ACL (per-field read/write, role-based, ...) is later work,
  * not part of proving the sync/signing/encryption mechanism itself.
+ *
+ * `notifyTopics` (optional) is the closed vocabulary of notification hints
+ * a write to a Node of this kind may attach (see envelope.js's `notify`
+ * param on `sealUpdate()`, and field.js's `set()`/`push()` `{notify}`
+ * option). Deliberately a fixed list, not a free-form string a writer can
+ * invent on the spot: the relay routes push notifications off this hint
+ * WITHOUT ever decrypting the write it's attached to (see relay.js's own
+ * doc comment on why it structurally can't), so the hint is the one piece
+ * of routing information the relay trusts at face value, straight from
+ * whoever signed the envelope. Bounding it to a per-Kind allowlist doesn't
+ * stop a malicious member from mislabeling their OWN write (same trust
+ * model as any self-reported metadata), but it does stop "chat.mention"
+ * silently typo'd as "chat.mentoin" from just vanishing into an unmatched
+ * topic string with zero feedback, and keeps the topic namespace a Kind
+ * actually emits documented in exactly one place. Omit entirely for a Kind
+ * that never attaches notify hints (the default) - `notify` is then
+ * rejected outright, not silently dropped.
  */
 
 const FIELD_TYPES = new Set(['atomic-encrypted', 'text', 'list']);
 
 /**
  * @param {string} kind
- * @param {{fields: Record<string, 'atomic-encrypted'|'text'|'list'>, acl?: {write?: 'members'}}} def
+ * @param {{fields: Record<string, 'atomic-encrypted'|'text'|'list'>, acl?: {write?: 'members'}, notifyTopics?: string[]}} def
  */
-export function defineKind(kind, { fields, acl = { write: 'members' } }) {
+export function defineKind(kind, { fields, acl = { write: 'members' }, notifyTopics = [] }) {
   if (!kind || typeof kind !== 'string') throw new Error('defineKind: "kind" must be a non-empty string');
   for (const [name, type] of Object.entries(fields ?? {})) {
     if (!FIELD_TYPES.has(type)) {
       throw new Error(`defineKind("${kind}"): field "${name}" has unknown type "${type}" (expected ${[...FIELD_TYPES].join(' | ')})`);
     }
   }
-  return Object.freeze({ kind, fields: Object.freeze({ ...fields }), acl: Object.freeze({ ...acl }) });
+  if (!Array.isArray(notifyTopics) || notifyTopics.some((t) => typeof t !== 'string' || !t)) {
+    throw new Error(`defineKind("${kind}"): "notifyTopics" must be an array of non-empty strings`);
+  }
+  return Object.freeze({ kind, fields: Object.freeze({ ...fields }), acl: Object.freeze({ ...acl }), notifyTopics: Object.freeze([...notifyTopics]) });
 }
 
 /** Small static registry, same public surface as EntityTypeRegistry (register/get/list) so the pattern stays familiar. */

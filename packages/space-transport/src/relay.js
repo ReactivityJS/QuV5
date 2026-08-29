@@ -36,14 +36,41 @@
  * signed-for space member," precisely because a relay with mirrored
  * history for a Node it doesn't otherwise recognize should still be able
  * to hand that history back to a legitimate member.
+ *
+ * A THIRD message shape flows through here, for presence/push routing
+ * only, never for content: `{type:'hello', pub, sig}` (sent once by every
+ * `Space` on construction, see `@qu/space-core`'s own doc comment on it) -
+ * `sig` proves possession of `pub`'s signing key, and on success just
+ * updates `presence` (a `PresenceTracker`, see that file) to say "this
+ * pubkey is on this connection right now." Nothing about it is forwarded
+ * or mirrored - it never enters `seen`.
+ *
+ * PUSH ROUTING (the `notify`/`bus` pair): when a write's envelope carries
+ * a `notify` hint (see `@qu/space-core`'s `envelope.js` - a small,
+ * UNENCRYPTED `{topic, to?}` the AUTHOR attached, never something this
+ * relay infers from content it can't read), this relay emits one
+ * `relay.notify.<kind>.<topic>` event per intended recipient on `bus` (an
+ * `@qu/events` `EventBus`, optional - omitting it makes notify hints a
+ * no-op here, same as before this existed), carrying `online` (from
+ * `presence`). It is bus SUBSCRIBERS - a push-handler plugin, see
+ * `push-handler.js` - that decide what to actually DO with that
+ * (`online: false` => send a Web Push; `online: true` => typically
+ * nothing, the live-forwarded envelope above already reaches them) -
+ * this class itself makes no delivery decision, only routes the event,
+ * consistent with "toast vs. browser-notification vs. push is the
+ * handler's call based on state" (see this repo's own design notes on
+ * `@qu/events`).
  */
 import { verifyEnvelope } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
+import { PresenceTracker } from './presence-tracker.js';
+
+const HELLO_DOMAIN = 'qu-space-hello-v1'; // MUST match @qu/space-core's own HELLO_DOMAIN (space.js) - duplicated as a literal rather than imported, to keep this package's only @qu/space-core dependency at "the same version, not a live shared module" (matches this file's own already-existing `verifyEnvelope` import boundary).
 
 /**
- * @param {{hub: object, members: Array<{pub: Uint8Array}>, resolveKindSchema: (nodeId: string) => object, storage?: object}} params
+ * @param {{hub: object, members: Array<{pub: Uint8Array}>, resolveKindSchema: (nodeId: string) => object, storage?: object, bus?: import('@qu/events').EventBus, presence?: PresenceTracker}} params
  */
-export function createRelayForwarder({ hub, members, resolveKindSchema, storage = null }) {
+export function createRelayForwarder({ hub, members, resolveKindSchema, storage = null, bus = null, presence = new PresenceTracker() }) {
   const memberPubs = new Set(members.map((m) => QuCrypto.toBase64(m.pub)));
   const isSpaceMember = (pubB64) => memberPubs.has(pubB64);
 
@@ -51,12 +78,27 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
   const seen = [];
 
   hub.registerRelay(async (fromPeerId, message) => {
+    if (message?.type === 'hello') {
+      await handleHello(fromPeerId, message);
+      return;
+    }
     if (message?.type === 'subscribe') {
       await handleSubscribe(fromPeerId, message);
       return;
     }
     await handleWrite(fromPeerId, message);
   });
+  hub.registerDisconnect?.((peerId) => presence.disconnect(peerId));
+
+  /** See this file's own "A THIRD message shape" doc comment. */
+  async function handleHello(fromPeerId, { pub, sig }) {
+    if (!pub || !sig) return;
+    const pubB64 = QuCrypto.toBase64(pub);
+    if (!isSpaceMember(pubB64)) return; // not a member - presence is only meaningful for who the relay would ever route to anyway.
+    const ok = await QuCrypto.verify(new TextEncoder().encode(HELLO_DOMAIN), sig, pub);
+    if (!ok) return; // claims a pubkey it can't prove possession of - ignore.
+    presence.setOnline(pubB64, fromPeerId);
+  }
 
   /** Mirror-storage catch-up: hand a requesting member everything this relay has mirrored for one Node, regardless of whether the original author is still connected. */
   async function handleSubscribe(fromPeerId, { nodeId, pub, sig }) {
@@ -85,7 +127,28 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
       if (peerId === fromPeerId) continue; // never echo a write back to its own author.
       hub.deliverTo(peerId, fromPeerId, { nodeId, envelope });
     }
+
+    await emitNotify(kindSchema, nodeId, envelope);
   }
 
-  return { seen };
+  /** See this file's own "PUSH ROUTING" doc comment. No-op entirely when the write carried no `notify` hint, or when `bus` was never given. Awaited by handleWrite() (same as the mirror-storage append above) so a caller awaiting a write's own forwarding also sees every notify-driven handler (a push send included) actually run, not just scheduled. */
+  async function emitNotify(kindSchema, nodeId, envelope) {
+    if (!bus || !envelope.notify) return;
+    const authorPubB64 = QuCrypto.toBase64(envelope.pub);
+    const recipients = envelope.notify.to?.length
+      ? envelope.notify.to
+      : members.map((m) => QuCrypto.toBase64(m.pub)).filter((p) => p !== authorPubB64);
+    for (const toPubB64 of recipients) {
+      await bus.emit(`relay.notify.${kindSchema.kind}.${envelope.notify.topic}`, {
+        nodeId,
+        kind: kindSchema.kind,
+        topic: envelope.notify.topic,
+        to: toPubB64,
+        authorPub: authorPubB64,
+        online: presence.isOnline(toPubB64),
+      });
+    }
+  }
+
+  return { seen, presence };
 }

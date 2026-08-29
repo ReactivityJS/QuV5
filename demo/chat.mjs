@@ -8,10 +8,20 @@
  * message tagged with the sender's Qu pubkey fingerprint
  * (`QuCrypto.fingerprint()`), not just a self-reported name.
  *
+ * A line starting with `@<name>` (a known member) attaches a `notify:
+ * {topic: 'mention', to: [<name>'s pubkey]}` hint to the push - see
+ * `@qu/space-core`'s envelope.js for what that hint is (a small,
+ * deliberately UNENCRYPTED routing field, signed but not secret) and
+ * `relay.mjs`, which routes it to a "would send Web Push" log when the
+ * mentioned member isn't currently connected. Any other line attaches
+ * `{topic: 'message'}` (broadcast to every other member, no explicit
+ * `to`) - still enough for the relay to route push-vs-not per recipient.
+ *
  * Usage: node demo/chat.mjs <name> [--relay ws://localhost:8081] [--room demo-room] [--dir demo/.identities]
  */
 import { createInterface } from 'node:readline';
 import WebSocket from 'ws';
+import { QuCrypto } from '@qu/core';
 import { defineKind, Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport';
 import { ensureIdentity, loadMembers, fingerprintOf, DEFAULT_IDENTITY_DIR } from './lib/identity.mjs';
@@ -27,7 +37,8 @@ function parseArgs(argv) {
   return opts;
 }
 
-const chatKind = defineKind('demo-chat', { fields: { messages: 'list' } });
+// MUST match relay.mjs's own defineKind() call - both processes need the identical Kind-Schema shape.
+const chatKind = defineKind('demo-chat', { fields: { messages: 'list' }, notifyTopics: ['message', 'mention'] });
 
 async function main() {
   const { name, relay, room, dir } = parseArgs(process.argv.slice(2));
@@ -74,7 +85,12 @@ async function main() {
   rl.on('line', async (line) => {
     const text = line.trim();
     if (!text) return;
-    await node.field('messages').push({ from: name, fingerprint: myFingerprint, text, ts: Date.now() });
+    const mentioned = text.match(/^@(\S+)/)?.[1];
+    const mentionedMember = mentioned && members.find((m) => m.name === mentioned);
+    const notify = mentionedMember
+      ? { topic: 'mention', to: [QuCrypto.toBase64(mentionedMember.pub)] }
+      : { topic: 'message' };
+    await node.field('messages').push({ from: name, fingerprint: myFingerprint, text, ts: Date.now() }, { notify });
   });
   rl.on('close', () => {
     transport.close();

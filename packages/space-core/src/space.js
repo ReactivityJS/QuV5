@@ -17,6 +17,33 @@
  *      update this Space just received, the same "don't echo a synced
  *      write back out" problem QuStore's own `putSealed()` doc comment
  *      describes for `origin: 'sync'`.
+ *
+ * An optional `bus` (`@qu/events`' `EventBus`) turns every applied update -
+ * local OR remote - into two kinds of granular event, so app code never
+ * has to hand-roll its own "did anything change" plumbing on top of Yjs'
+ * own low-level `observe()`:
+ *   - `space.node.<nodeId>.changed` - ALWAYS, `{nodeId, kind, origin}`
+ *     (`origin` is `'local'` or `'remote'`) - the generic change-event feed
+ *     (UI reactivity, caches, ...), independent of any notify hint.
+ *   - `notification.<kind>.<topic>` - ONLY when the write carried a
+ *     `notify` hint (see field.js's `{notify}` option / envelope.js's own
+ *     doc comment) - the semantic notification feed a delivery handler
+ *     (toast/browser Notification/relay-triggered push) subscribes to.
+ *     `{nodeId, kind, topic, to, authorPub, origin}` - `to` is the hint's
+ *     own (optional) recipient narrowing, `authorPub` is who wrote it.
+ * Omitting `bus` (the default) makes a Space behave exactly as before this
+ * existed - nothing is emitted, nothing else changes.
+ *
+ * A Space also announces itself to whatever it's connected to with one
+ * signed `{type:'hello', pub, sig}` message on construction (fire-and-
+ * forget, same posture as `subscribeNode()`'s own subscribe request) -
+ * `sig` over the fixed `HELLO_DOMAIN` string, proving possession of the
+ * signing key without revealing anything else. A relay's own
+ * `PresenceTracker` (`@qu/space-transport`) is the intended reader: it's
+ * how the relay learns "this pubkey is on THIS connection right now,"
+ * which is what makes "only Push if the recipient is actually offline"
+ * possible (see relay.js's own doc comment). A peer-to-peer transport with
+ * no relay simply never reads this message - harmless, not required.
  */
 import * as Y from 'yjs';
 import { QuCrypto } from '@qu/core';
@@ -25,21 +52,32 @@ import { sealUpdate, verifyEnvelope, openUpdate } from './envelope.js';
 
 const REMOTE_ORIGIN = Symbol('space-core:remote-update');
 
+/** Signed by a Space on connect to prove key possession for presence purposes - see this file's own doc comment. Exported so `@qu/space-transport`'s relay verifies against the exact same bytes. */
+export const HELLO_DOMAIN = 'qu-space-hello-v1';
+
 export class Space {
   /**
-   * @param {{identity: object, members: Array<{pub: Uint8Array, xPub: Uint8Array}>, transport: object, storage?: object}} params
+   * @param {{identity: object, members: Array<{pub: Uint8Array, xPub: Uint8Array}>, transport: object, storage?: object, bus?: import('@qu/events').EventBus}} params
    *   `identity` = `{signingKey, signingPub, xPrivateKey, xPublicKey}` (Ed25519 + X25519 pairs, e.g. from QuCrypto.generateKeypair()).
    *   `members` = every space member's public keys (encryption recipients + write-ACL, kept simple for the PoC - see kind-schema.js).
    *   `storage` = optional; omitting it is the "flüchtig/memory-only" tier (see docs/v5-space-core-guide.md) - a Node still syncs live, nothing survives a reload.
+   *   `bus` = optional - see this file's own doc comment for what gets emitted on it.
    */
-  constructor({ identity, members, transport, storage = null }) {
+  constructor({ identity, members, transport, storage = null, bus = null }) {
     this._identity = identity;
     this._members = members;
     this._transport = transport;
     this._storage = storage;
+    this._bus = bus;
     /** @type {Map<string, SpaceNode>} */
     this._nodes = new Map();
     this._transport.onMessage((msg) => this._handleIncoming(msg.data));
+    this._sendHello(); // fire-and-forget, see this file's own doc comment.
+  }
+
+  async _sendHello() {
+    const sig = await QuCrypto.sign(new TextEncoder().encode(HELLO_DOMAIN), this._identity.signingKey);
+    this._transport.send({ type: 'hello', pub: this._identity.signingPub, sig });
   }
 
   _recipientXPubKeys() {
@@ -125,13 +163,19 @@ export class Space {
 
   async _handleLocalUpdate(nodeId, node, update, origin) {
     if (origin === REMOTE_ORIGIN || node._skipReSeal) return; // never re-seal/re-broadcast a write we just received or are replaying from storage.
-    const envelope = await sealUpdate(update, this._identity, this._recipientXPubKeys());
+    // A plain object origin is field.js's withNotify() carrier for a
+    // validated {notify} option (see that file's own doc comment) - any
+    // OTHER local mutation (stampMeta(), a field write with no `notify`
+    // option) leaves `origin` undefined/null, same as before this existed.
+    const notify = origin && typeof origin === 'object' ? origin.notify ?? null : null;
+    const envelope = await sealUpdate(update, this._identity, this._recipientXPubKeys(), notify);
     await this._storage?.append(nodeId, envelope);
     this._transport.send({ nodeId, envelope });
+    this._emitChangeEvents(nodeId, node, { origin: 'local', notify, authorPub: this._identity.signingPub });
   }
 
   async _handleIncoming({ nodeId, envelope, type }) {
-    if (type === 'subscribe' || !envelope) return; // a subscribe REQUEST is relay-bound, not peer-bound (see _sendSubscribeRequest) - defensive no-op if one ever reaches here anyway.
+    if (type === 'subscribe' || type === 'hello' || !envelope) return; // both are relay-bound, not peer-bound (see _sendSubscribeRequest/_sendHello) - defensive no-op if one ever reaches here anyway.
     const node = this._nodes.get(nodeId);
     if (!node) return; // not subscribed to this Node - ignore, same as QuStore's watch() only reacting to watched paths.
     const isAuthorized = this._isAuthorizedWriter(node.kindSchema);
@@ -139,6 +183,23 @@ export class Space {
     const bytes = await openUpdate(envelope, this._identity);
     Y.applyUpdate(node.doc, bytes, REMOTE_ORIGIN);
     await this._storage?.append(nodeId, envelope);
+    this._emitChangeEvents(nodeId, node, { origin: 'remote', notify: envelope.notify ?? null, authorPub: envelope.pub });
+  }
+
+  /** See this file's own top doc comment for the two topics this fires. No-op entirely when no `bus` was given (the default). */
+  _emitChangeEvents(nodeId, node, { origin, notify, authorPub }) {
+    if (!this._bus) return;
+    this._bus.emit(`space.node.${nodeId}.changed`, { nodeId, kind: node.kind, origin });
+    if (notify) {
+      this._bus.emit(`notification.${node.kind}.${notify.topic}`, {
+        nodeId,
+        kind: node.kind,
+        topic: notify.topic,
+        to: notify.to ?? [],
+        authorPub: QuCrypto.toBase64(authorPub),
+        origin,
+      });
+    }
   }
 
   getNode(id) {

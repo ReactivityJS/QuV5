@@ -42,7 +42,7 @@ export class SpaceNode {
           contentMap: this.doc.getMap('content'),
           doc: this.doc,
           name,
-          ctx: { identity: this._identity, recipientXPubKeys: this._recipientXPubKeys },
+          ctx: { identity: this._identity, recipientXPubKeys: this._recipientXPubKeys, kindSchema: this.kindSchema },
         })
       );
     }

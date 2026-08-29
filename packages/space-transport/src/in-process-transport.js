@@ -19,6 +19,8 @@ export function createInProcessHub() {
   const inboxes = new Map();
   /** @type {((fromPeerId: string, data: object) => void)|null} */
   let relayHandler = null;
+  /** @type {((peerId: string) => void)|null} */
+  let disconnectHandler = null;
 
   return {
     registerPeerInbox(peerId, onMessage) {
@@ -27,6 +29,10 @@ export function createInProcessHub() {
     registerRelay(onMessageFromPeer) {
       relayHandler = onMessageFromPeer;
     },
+    /** @param {(peerId: string) => void} handler - See ws-server-hub.js's own doc comment; here, fired by an explicit disconnect() call (tests) rather than a real socket closing. */
+    registerDisconnect(handler) {
+      disconnectHandler = handler;
+    },
     /** A peer -> the relay. */
     sendToRelay(fromPeerId, data) {
       relayHandler?.(fromPeerId, data);
@@ -34,6 +40,11 @@ export function createInProcessHub() {
     /** The relay -> one specific peer. */
     deliverTo(peerId, fromPeerId, data) {
       inboxes.get(peerId)?.(fromPeerId, data);
+    },
+    /** Simulates a peer going away (no real socket to close, in-process) - removes its inbox and notifies the relay, same as a WebSocket's 'close' event would. */
+    disconnect(peerId) {
+      inboxes.delete(peerId);
+      disconnectHandler?.(peerId);
     },
     peerIds() {
       return [...inboxes.keys()];

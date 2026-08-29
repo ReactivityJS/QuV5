@@ -23,6 +23,7 @@ export function createWsServerHub(wss) {
   /** @type {Map<string, import('ws').WebSocket>} */
   const sockets = new Map();
   let relayHandler = null;
+  let disconnectHandler = null;
 
   wss.on('connection', (ws) => {
     const peerId = `peer-${randomUUID()}`;
@@ -38,12 +39,19 @@ export function createWsServerHub(wss) {
       relayHandler?.(peerId, data);
     });
 
-    ws.on('close', () => sockets.delete(peerId));
+    ws.on('close', () => {
+      sockets.delete(peerId);
+      disconnectHandler?.(peerId);
+    });
   });
 
   return {
     registerRelay(handler) {
       relayHandler = handler;
+    },
+    /** @param {(peerId: string) => void} handler - Called once a connection closes (see PresenceTracker.disconnect()'s own caller in relay.js). */
+    registerDisconnect(handler) {
+      disconnectHandler = handler;
     },
     deliverTo(peerId, _fromPeerId, data) {
       const ws = sockets.get(peerId);

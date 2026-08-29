@@ -26,6 +26,19 @@
  *     per-item encryption as an atomic field, but many items instead of
  *     one value, so concurrent pushes from different peers merge via Yjs'
  *     own CRDT ordering instead of a bespoke append/cursor scheme.
+ *
+ * `set()`/`push()` both accept an optional `{notify}` option - see
+ * envelope.js's own doc comment for what a `notify` hint IS and why it
+ * exists (routing a content-blind relay's push decision without ever
+ * decrypting). This is where it's VALIDATED, the one place that actually
+ * has the Kind-Schema in hand: `notify.topic` must be one of this Node's
+ * `kindSchema.notifyTopics` (see kind-schema.js), or the write throws
+ * BEFORE it ever reaches Yjs/the network - a typo'd or invented topic
+ * fails loudly, locally, instead of silently producing an envelope no
+ * relay-side handler will ever match. The validated hint then rides as
+ * the local Yjs transaction's `origin` (see `withNotify()` below) purely
+ * as a carrier - `Space._handleLocalUpdate()` (space.js) is what actually
+ * reads it back off `origin` and threads it into `sealUpdate()`.
  */
 import * as Y from 'yjs';
 import { QuCrypto } from '@qu/core';
@@ -34,6 +47,27 @@ async function encryptForRecipients(plainValue, identity, recipientXPubKeys) {
   const bytes = new TextEncoder().encode(JSON.stringify(plainValue));
   const { iv, ct, to } = await QuCrypto.encrypt(bytes, recipientXPubKeys, identity.xPrivateKey);
   return { iv, ct, to, senderXPub: identity.xPublicKey };
+}
+
+/**
+ * Validates `notify.topic` against this Node's Kind-Schema allowlist (if a
+ * hint was given at all - `notify` is optional, most writes have none),
+ * then runs `mutateFn` inside a `doc.transact()` call carrying `{notify}`
+ * as the transaction's origin - the mechanism that gets it from a field
+ * write all the way to `sealUpdate()` (see this file's own top doc
+ * comment, and `Space._handleLocalUpdate()` in space.js).
+ * @param {Y.Doc} doc @param {() => void} mutateFn
+ * @param {{topic: string, to?: string[]}|undefined} notify
+ * @param {object} kindSchema
+ */
+function withNotify(doc, mutateFn, notify, kindSchema) {
+  if (notify) {
+    const allowed = kindSchema?.notifyTopics ?? [];
+    if (!allowed.includes(notify.topic)) {
+      throw new Error(`field write: notify.topic "${notify.topic}" is not declared in Kind-Schema "${kindSchema?.kind}"'s notifyTopics (${allowed.length ? allowed.join(', ') : 'none declared'})`);
+    }
+  }
+  doc.transact(mutateFn, notify ? { notify } : undefined);
 }
 
 /** @returns {*|undefined} `undefined` if the caller is not an intended recipient (still ciphertext to them). */
@@ -47,15 +81,17 @@ async function decryptEnvelopeFor(envelope, identity) {
 }
 
 class AtomicEncryptedField {
-  constructor(contentMap, key, ctx) {
+  constructor(contentMap, key, ctx, doc) {
     this._map = contentMap;
     this._key = key;
     this._ctx = ctx;
+    this._doc = doc;
   }
 
-  async set(value) {
+  /** @param {*} value @param {{notify?: {topic: string, to?: string[]}}} [options] - see this file's own doc comment. */
+  async set(value, { notify } = {}) {
     const envelope = await encryptForRecipients(value, this._ctx.identity, this._ctx.recipientXPubKeys());
-    this._map.set(this._key, envelope);
+    withNotify(this._doc, () => this._map.set(this._key, envelope), notify, this._ctx.kindSchema);
   }
 
   /** @returns {Promise<*|null|undefined>} `null` = unset. `undefined` = set, but this identity is not a recipient. */
@@ -119,14 +155,16 @@ class TextField {
 }
 
 class ListField {
-  constructor(yarray, ctx) {
+  constructor(yarray, ctx, doc) {
     this._yarray = yarray;
     this._ctx = ctx;
+    this._doc = doc;
   }
 
-  async push(value) {
+  /** @param {*} value @param {{notify?: {topic: string, to?: string[]}}} [options] - see this file's own doc comment. */
+  async push(value, { notify } = {}) {
     const envelope = await encryptForRecipients(value, this._ctx.identity, this._ctx.recipientXPubKeys());
-    this._yarray.push([envelope]);
+    withNotify(this._doc, () => this._yarray.push([envelope]), notify, this._ctx.kindSchema);
   }
 
   async toArray() {
@@ -150,11 +188,11 @@ class ListField {
  * @param {Y.Map} contentMap
  * @param {Y.Doc} doc
  * @param {string} name
- * @param {object} ctx - `{identity, recipientXPubKeys}`
+ * @param {object} ctx - `{identity, recipientXPubKeys, kindSchema}`
  */
 export function createField(type, { contentMap, doc, name, ctx }) {
-  if (type === 'atomic-encrypted') return new AtomicEncryptedField(contentMap, name, ctx);
+  if (type === 'atomic-encrypted') return new AtomicEncryptedField(contentMap, name, ctx, doc);
   if (type === 'text') return new TextField(contentMap, name);
-  if (type === 'list') return new ListField(doc.getArray(name), ctx);
+  if (type === 'list') return new ListField(doc.getArray(name), ctx, doc);
   throw new Error(`createField: unknown field type "${type}"`);
 }

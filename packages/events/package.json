@@ -1,0 +1,11 @@
+{
+  "name": "@qu/events",
+  "version": "0.1.0",
+  "description": "Qu V5: EventBus - one granular, dot-namespaced, wildcard-matching (*, **) pub/sub primitive for domain notifications, Space/Node change events, and UI events alike. Trie-based dispatch, ordered + fault-isolated handlers, three emit modes (emit/notify fire-and-forget, collect gathers return values, run sequentially transforms a shared payload).",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "license": "MIT"
+}

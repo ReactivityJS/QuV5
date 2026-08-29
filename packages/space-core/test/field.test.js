@@ -111,3 +111,51 @@ test('list field: concurrent pushes from two peers converge on the same, determi
   assert.equal(listA.length, 2);
   assert.deepEqual(listA, listB); // both peers converge on the identical order, with zero custom sort/cursor code.
 });
+
+test('a notify hint declared in the Kind-Schema is accepted and rides as the Yjs transaction origin', async () => {
+  const kind = defineKind('channel', { fields: { messages: 'list' }, notifyTopics: ['message', 'mention'] });
+  const author = await actor();
+  const doc = createDoc(kind, author.signingPub);
+  const node = new SpaceNode({ id: 'ch2', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
+
+  let capturedOrigin = null;
+  doc.on('update', (_update, origin) => {
+    capturedOrigin = origin;
+  });
+  await node.field('messages').push('hi', { notify: { topic: 'mention', to: ['somePub'] } });
+
+  assert.deepEqual(capturedOrigin, { notify: { topic: 'mention', to: ['somePub'] } });
+});
+
+test('a notify hint whose topic is NOT declared in the Kind-Schema throws, before touching Yjs at all', async () => {
+  const kind = defineKind('channel', { fields: { messages: 'list' }, notifyTopics: ['message'] });
+  const author = await actor();
+  const doc = createDoc(kind, author.signingPub);
+  const node = new SpaceNode({ id: 'ch3', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
+
+  await assert.rejects(
+    () => node.field('messages').push('hi', { notify: { topic: 'mention' } }),
+    /notify\.topic "mention" is not declared/
+  );
+  // The rejected write must not have reached the CRDT - length still 0.
+  assert.equal(node.field('messages').length, 0);
+});
+
+test('a Kind-Schema with no declared notifyTopics rejects ANY notify hint (opt-in, not silently ignored)', async () => {
+  const kind = defineKind('channel', { fields: { messages: 'list' } }); // notifyTopics omitted - defaults to []
+  const author = await actor();
+  const doc = createDoc(kind, author.signingPub);
+  const node = new SpaceNode({ id: 'ch4', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
+
+  await assert.rejects(() => node.field('messages').push('hi', { notify: { topic: 'anything' } }), /not declared/);
+});
+
+test('omitting notify entirely still works exactly as before - no {notify} option required', async () => {
+  const kind = defineKind('channel', { fields: { messages: 'list' } });
+  const author = await actor();
+  const doc = createDoc(kind, author.signingPub);
+  const node = new SpaceNode({ id: 'ch5', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
+
+  await node.field('messages').push('hi'); // no options arg at all
+  assert.equal(node.field('messages').length, 1);
+});

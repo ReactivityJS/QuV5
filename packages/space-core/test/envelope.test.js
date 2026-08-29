@@ -56,3 +56,38 @@ test('openUpdate throws for a non-recipient', async () => {
 
   await assert.rejects(() => openUpdate(envelope, outsider));
 });
+
+test('a notify hint travels on the envelope in the CLEAR (not encrypted) but is still signature-verified', async () => {
+  const author = await actor();
+  const reader = await actor();
+  const notify = { topic: 'mention', to: [QuCrypto.toBase64(reader.signingPub)] };
+  const envelope = await sealUpdate(new TextEncoder().encode('x'), author, [reader.xPublicKey], notify);
+
+  assert.deepEqual(envelope.notify, notify);
+  // Plainly readable without any decryption key - exactly what lets a content-blind relay route on it.
+  const onWire = JSON.parse(JSON.stringify(envelope, (_, v) => (v instanceof Uint8Array ? { __u8: [...v] } : v)));
+  assert.equal(onWire.notify.topic, 'mention');
+
+  const isAuthorized = (pubB64) => pubB64 === QuCrypto.toBase64(author.signingPub);
+  assert.equal(await verifyEnvelope(envelope, isAuthorized), true);
+});
+
+test('tampering with an envelope\'s notify hint in transit invalidates the signature', async () => {
+  const author = await actor();
+  const reader = await actor();
+  const envelope = await sealUpdate(new TextEncoder().encode('x'), author, [reader.xPublicKey], { topic: 'message' });
+  envelope.notify.topic = 'mention'; // an on-the-wire tamper attempt, e.g. a compromised relay trying to escalate to a louder push.
+
+  const isAuthorized = (pubB64) => pubB64 === QuCrypto.toBase64(author.signingPub);
+  assert.equal(await verifyEnvelope(envelope, isAuthorized), false);
+});
+
+test('an envelope with no notify hint is unaffected - same shape and signature validity as before notify existed', async () => {
+  const author = await actor();
+  const reader = await actor();
+  const envelope = await sealUpdate(new TextEncoder().encode('x'), author, [reader.xPublicKey]);
+
+  assert.equal('notify' in envelope, false);
+  const isAuthorized = (pubB64) => pubB64 === QuCrypto.toBase64(author.signingPub);
+  assert.equal(await verifyEnvelope(envelope, isAuthorized), true);
+});
