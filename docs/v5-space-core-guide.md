@@ -478,8 +478,16 @@ build context; `-f` is what selects this particular Dockerfile within it.
 That's a complete, runnable relay — no `QU_MEMBERS_JSON` required (see §4
 on why: it's optional, only gates `'members'`-mode Kinds, and the relay's
 own identity for federation is auto-generated/persisted under `/data`, not
-something you provide). Add it when you actually have `'members'`-mode
-Kinds:
+something you provide). Open `http://localhost:8081/` and you'll see a
+browser app: `relay-server.js` also serves one on this same port (today,
+the same `demo/web/` chat client `npm run demo:relay` serves - bundled at
+Docker BUILD TIME, not on every boot - see the Dockerfile). `POST /join`
+lets anyone reaching the port join as a new `'members'`-mode member with
+no authentication beyond well-formed keys - a deliberate current default
+("this image should be immediately usable"), turned off with
+`QU_ALLOW_JOIN=false` once you want membership fixed to `QU_MEMBERS_JSON`
+only. Add `QU_MEMBERS_JSON` when you also have your own `'members'`-mode
+Kinds beyond the demo:
 
 ```sh
 docker run -d -p 8081:8081 \
@@ -500,9 +508,10 @@ Or via the provided compose file:
 
 ```sh
 docker compose -f docker-compose.space-relay.yml up -d
-# with members and/or federation:
+# with members, federation, and/or locking down joining:
 export QU_MEMBERS_JSON='[{"pub":"...","xPub":"..."}, {"pub":"...","xPub":"..."}]'
 export QU_FEDERATE_UPSTREAM_URL='ws://another-relay-host:8081'
+export QU_ALLOW_JOIN=false
 docker compose -f docker-compose.space-relay.yml up -d
 ```
 
@@ -657,3 +666,9 @@ live with each other or with a CLI `demo:alice`/`demo:bob` in the same
 room. Point a reverse proxy at this one port for HTTPS/TLS-offloading - it
 never needs a second port, the WebSocket upgrade rides the same HTTP
 server as the page/API.
+
+The SAME app is also served by `relay-server.js`/the Docker image (§10) -
+`demo:relay` bundles at startup for a fast local edit-reload loop, the
+Docker build bundles once at build time. This is a deliberate first step
+towards a real one, not the final destination - see `relay-server.js`'s
+own "SERVES AN APP" doc comment and architecture.md.

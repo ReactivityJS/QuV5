@@ -3,8 +3,10 @@
 # Builds and runs the Qu V5 space-relay (relay-server.js) - a WebSocket
 # relay for @qu/space-core peers that mirrors every envelope it forwards
 # to disk (see relay-server.js's own doc comment) and never decrypts
-# anything. No client apps/UI are built or served here - see
-# docs/v5-space-core-guide.md for what this relay does and doesn't do.
+# anything. Also serves a browser app on the SAME port (today, demo/web/ -
+# see relay-server.js's own "SERVES AN APP" doc comment for why that's a
+# first step, not the final shape) - see docs/v5-space-core-guide.md for
+# what this relay does and doesn't do.
 #
 # Build context MUST be the REPO ROOT, not this directory - npm workspaces
 # (see the root package.json's "workspaces": ["packages/*"]) resolve
@@ -36,6 +38,10 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 COPY . .
 RUN --mount=type=cache,target=/root/.npm npm ci
+# Bundles demo/web/main.js -> demo/web/dist/bundle.js at BUILD TIME (esbuild is a regular
+# dependency, not dev-only, but doing this now means the runtime image never needs to run a
+# bundler on every boot the way `npm run demo:relay` does - see relay-server.js's own doc comment).
+RUN node demo/web/build.mjs
 RUN npm prune --omit=dev
 
 FROM node:22-alpine AS runtime

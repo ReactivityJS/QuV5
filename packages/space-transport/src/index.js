@@ -6,3 +6,4 @@ export { WsClientTransport } from './ws-client-transport.js';
 export { registerPushHandler } from './push-handler.js';
 export { federateRelay } from './federation.js';
 export { loadOrCreateIdentity, describeIdentity } from './relay-identity.js';
+export { createAppRequestHandler } from './relay-app-server.js';
