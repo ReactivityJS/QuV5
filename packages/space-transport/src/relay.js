@@ -45,6 +45,12 @@
  * pubkey is on this connection right now." Nothing about it is forwarded
  * or mirrored - it never enters `seen`.
  *
+ * A FOURTH shape flows the OTHER way - relay to peer, never peer to relay:
+ * `{type:'member-joined', pub, xPub, name?}`, broadcast to every connected
+ * peer by `addMember()` (see that function's own doc comment) the moment
+ * a new member is added. This is what makes dynamic membership REACTIVE
+ * instead of something a client has to poll for - see that doc comment.
+ *
  * PUSH ROUTING (the `notify`/`bus` pair): when a write's envelope carries
  * a `notify` hint (see `@qu/space-core`'s `envelope.js` - a small,
  * UNENCRYPTED `{topic, to?}` the AUTHOR attached, never something this
@@ -227,13 +233,32 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
    * - see `demo/relay.mjs`'s own `/join` endpoint doc comment for why that
    * is an accepted, loudly-documented demo-only tradeoff, not something to
    * copy into a production relay unmodified.
-   * @param {{pub: Uint8Array, xPub: Uint8Array}} member
+   *
+   * REACTIVE, NOT POLLED: every currently connected peer is told about the
+   * new member immediately, over the SAME WebSocket connection they
+   * already have open - `{type: 'member-joined', pub, xPub, name}`,
+   * broadcast to every `hub.peerIds()` entry the moment this runs. A
+   * `Space` on the receiving end handles this message type itself (see
+   * `@qu/space-core`'s `space.js` - it calls its own `addMember()` and
+   * emits `space.member.joined` on its `bus`), so an already-connected
+   * client's membership view updates the instant this fires, not on some
+   * client-side poll interval. Trust-wise this asks nothing new of a
+   * client: bootstrapping a Space's initial `members` list already means
+   * trusting the relay's word for who's in the Space (see e.g.
+   * `demo/web/main.js`'s own `/members.json` fetch) - this is that same
+   * trust applied continuously instead of once at page-load, not a new
+   * boundary crossed.
+   * @param {{pub: Uint8Array, xPub: Uint8Array, name?: string}} member
    */
   function addMember(member) {
     const pubB64 = QuCrypto.toBase64(member.pub);
     if (memberPubs.has(pubB64)) return; // already a member - idempotent, not an error.
     memberList.push(member);
     memberPubs.add(pubB64);
+    for (const peerId of hub.peerIds()) {
+      hub.deliverTo(peerId, 'relay', { type: 'member-joined', pub: member.pub, xPub: member.xPub, name: member.name });
+    }
+    bus?.emit('debug.relay.member.joined', { pub: pubB64, name: member.name });
   }
 
   return { seen, presence, addMember };

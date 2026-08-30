@@ -65,6 +65,42 @@ test('addMember() also lets the newly added identity send a signed hello and app
   await waitUntil(() => relay.presence.isOnline(QuCrypto.toBase64(bob.signingPub)));
 });
 
+test('addMember() reactively broadcasts to an ALREADY-CONNECTED peer\'s Space - no polling needed', async () => {
+  const alice = await actor();
+  const bob = await actor();
+  const hub = createInProcessHub();
+  const relay = createRelayForwarder({ hub, members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }], resolveKindSchema: () => noteKind });
+
+  const aliceTransport = new InProcessTransport(hub, 'alice');
+  await aliceTransport.connect();
+  const aliceBusCalls = [];
+  const aliceBus = { emit: async (topic, payload) => aliceBusCalls.push({ topic, payload }) };
+  const aliceSpace = new Space({ identity: alice, members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }], transport: aliceTransport, bus: aliceBus });
+
+  // alice is connected BEFORE bob is ever added - the point being tested.
+  relay.addMember({ pub: bob.signingPub, xPub: bob.xPublicKey, name: 'bob' });
+
+  await waitUntil(() => aliceBusCalls.some((c) => c.topic === 'space.member.joined'));
+  const joined = aliceBusCalls.find((c) => c.topic === 'space.member.joined');
+  assert.equal(joined.payload.pub, QuCrypto.toBase64(bob.signingPub));
+  assert.equal(joined.payload.xPub, QuCrypto.toBase64(bob.xPublicKey));
+  assert.equal(joined.payload.name, 'bob');
+
+  // And alice's Space can now actually encrypt-for bob - proves addMember() really ran
+  // internally (see Space's own doc comment), not just that a notification fired.
+  const bobTransport = new InProcessTransport(hub, 'bob');
+  await bobTransport.connect();
+  const bobSpace = new Space({
+    identity: bob,
+    members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }, { pub: bob.signingPub, xPub: bob.xPublicKey }],
+    transport: bobTransport,
+  });
+
+  const aliceNode = await aliceSpace.createNode(noteKind, { title: 'hi bob' }, { id: 'note-reactive' });
+  const bobNode = bobSpace.subscribeNode('note-reactive', noteKind);
+  await waitUntil(async () => (await bobNode.field('title').get()) === 'hi bob');
+});
+
 test('addMember() is idempotent - calling it twice for the same pubkey does not duplicate the member', async () => {
   const alice = await actor();
   const hub = createInProcessHub();

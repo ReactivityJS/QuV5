@@ -161,7 +161,7 @@ async function main() {
       res.end(`bad request: ${err.message}`);
       return;
     }
-    relay.addMember({ pub: pubBytes, xPub: xPubBytes });
+    relay.addMember({ pub: pubBytes, xPub: xPubBytes, name });
     // Also update THIS file's own member list (relay.addMember() only updates relay.js's internal,
     // independent copy - see that file's own doc comment) so /members.json reflects the join too,
     // otherwise other clients would never learn this member's xPub and could never encrypt-for them.

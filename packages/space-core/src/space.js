@@ -31,6 +31,17 @@
  *     (toast/browser Notification/relay-triggered push) subscribes to.
  *     `{nodeId, kind, topic, to, authorPub, origin}` - `to` is the hint's
  *     own (optional) recipient narrowing, `authorPub` is who wrote it.
+ *   - `space.member.joined` - REACTIVE dynamic membership: fires the
+ *     instant this Space receives a relay's `{type:'member-joined', pub,
+ *     xPub, name?}` broadcast (see `@qu/space-transport`'s relay.js
+ *     `addMember()`) - `{pub, xPub, name}` (base64). This Space's own
+ *     `addMember()` (see below) has ALREADY run by the time this fires, so
+ *     a handler reacting to it (e.g. re-rendering a member list) sees a
+ *     Space that's already able to encrypt-for/accept-from that member -
+ *     no separate step needed, and deliberately no polling: the transport
+ *     connection this arrives on is already open for every other message
+ *     type, so a new member is learned about exactly as promptly as a
+ *     Node update is.
  * Omitting `bus` (the default) makes a Space behave exactly as before this
  * existed - nothing is emitted, nothing else changes.
  *
@@ -224,8 +235,18 @@ export class Space {
     this._emitChangeEvents(nodeId, node, { origin: 'local', notify, authorPub: this._identity.signingPub });
   }
 
-  async _handleIncoming({ nodeId, envelope, type }) {
-    if (type === 'subscribe' || type === 'hello' || !envelope) return; // both are relay-bound, not peer-bound (see _sendSubscribeRequest/_sendHello) - defensive no-op if one ever reaches here anyway.
+  async _handleIncoming({ nodeId, envelope, type, pub, xPub, name }) {
+    if (type === 'subscribe' || type === 'hello') return; // both are relay-bound, not peer-bound (see _sendSubscribeRequest/_sendHello) - defensive no-op if one ever reaches here anyway.
+    if (type === 'member-joined') {
+      // REACTIVE membership growth - see @qu/space-transport's relay.js `addMember()` doc comment
+      // for the full "why", and this class's own doc comment for the `space.member.joined` topic.
+      // No poll, no timer: this runs the instant the relay's broadcast arrives on the already-open
+      // connection, same as any other incoming message.
+      this.addMember({ pub, xPub });
+      this._bus?.emit('space.member.joined', { pub: QuCrypto.toBase64(pub), xPub: QuCrypto.toBase64(xPub), name });
+      return;
+    }
+    if (!envelope) return;
     const node = this._nodes.get(nodeId);
     if (!node) {
       this._bus?.emit('debug.space.write.remote.ignored', { nodeId }); // not subscribed to this Node - ordinary relay fan-out, not an error, see this file's own doc comment.

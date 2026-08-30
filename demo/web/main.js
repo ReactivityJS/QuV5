@@ -208,33 +208,24 @@ async function join(name) {
   const space = new Space({ identity, members: members.map(({ pub, xPub }) => ({ pub, xPub })), transport, bus });
   const node = space.subscribeNode(ROOM, chatKind);
 
-  // POLL FOR NEW MEMBERS: a browser tab that's already connected has no other way to learn someone
-  // else joined later (see @qu/space-core's Space.addMember() doc comment - the relay's own
-  // addMember() only fixes the RELAY's half of this). Simple polling, not a push channel - fine for
-  // a demo's room-sized membership; a real app would want the relay to announce joins over the
-  // existing WebSocket connection instead of a client polling a REST endpoint.
-  setInterval(async () => {
-    const res = await fetch('/members.json').catch(() => null);
-    if (!res?.ok) return;
-    const rawMembers = await res.json();
-    let changed = false;
-    for (const m of rawMembers) {
-      // Dedup by PUBKEY, never by name - the CLI demo pre-seeds "alice"/"bob" identities, and a
-      // browser tab defaults to those same display names for interop testing, so two members can
-      // legitimately share a name while being cryptographically distinct. Comparing by name here
-      // would silently skip adding a same-named member's real key - exactly the bug this comment
-      // replaces (confirmed live: a browser "bob" joining a room the CLI's "bob" already occupied
-      // never received alice's messages, because her poll thought she already "knew bob").
-      if (members.some((known) => known.pubB64 === m.pub)) continue;
-      const pub = QuCrypto.fromBase64(m.pub);
-      const xPub = QuCrypto.fromBase64(m.xPub);
-      const fingerprint = await QuCrypto.fingerprint(pub);
-      members.push({ name: m.name, pub, pubB64: m.pub, xPub, fingerprint });
-      space.addMember({ pub, xPub });
-      changed = true;
-    }
-    if (changed) renderMembers(members, myFingerprint);
-  }, 3000);
+  // REACTIVE MEMBERSHIP, NOT POLLED: a browser tab that's already connected still learns about
+  // someone joining later - the relay broadcasts {type:'member-joined', ...} over this SAME
+  // WebSocket connection the moment it happens (see @qu/space-transport's relay.js `addMember()`),
+  // and `space` has already run its OWN addMember() by the time this fires (see @qu/space-core's
+  // Space doc comment on the `space.member.joined` topic) - this handler only needs to update the
+  // UI's own member list, the crypto/ACL side is already done.
+  bus.on('space.member.joined', async (payload) => {
+    // Dedup by PUBKEY, never by name - the CLI demo pre-seeds "alice"/"bob" identities, and a
+    // browser tab defaults to those same display names for interop testing, so two members can
+    // legitimately share a name while being cryptographically distinct. Comparing by name here
+    // would silently drop a same-named member's real entry from the UI.
+    if (members.some((known) => known.pubB64 === payload.pub)) return;
+    const pub = QuCrypto.fromBase64(payload.pub);
+    const xPub = QuCrypto.fromBase64(payload.xPub);
+    const fingerprint = await QuCrypto.fingerprint(pub);
+    members.push({ name: payload.name ?? '?', pub, pubB64: payload.pub, xPub, fingerprint });
+    renderMembers(members, myFingerprint);
+  });
 
   let printed = 0;
   let printing = Promise.resolve();
