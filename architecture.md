@@ -52,9 +52,12 @@ QuV5/
 │   ├── space-storage/   @qu/space-storage   - storage adapters (memory/durable/file) a Space or relay mounts
 │   ├── space-transport/ @qu/space-transport - Transports (in-process/WebSocket), the Relay, federation
 │   ├── space-plugins/   @qu/space-plugins   - OPTIONAL app helpers: delivery-status (write-ack + read receipts), upload outbox
-│   └── space-ui/        @qu/space-ui        - OPTIONAL vanilla-JS/DOM bindings: field bind, inline-edit, list-bind, upload-status
-├── demo/                 - runnable proofs: CLI chat, browser client, in-process auto-demo
-├── docs/                 - docs/v5-space-core-guide.md: the practical how-to companion to this file
+│   ├── space-ui/        @qu/space-ui        - OPTIONAL vanilla-JS/DOM bindings: field bind, inline-edit, list-bind, upload-status
+│   ├── app-core/        @qu/app-core        - App Runtime: Kind-Schemas for app content, content-addressed Node ids, ContentResolver, HashRouter, AppRuntime, Dev API
+│   ├── app-renderer/    @qu/app-renderer    - sanitizer, <qu-slot> resolution, style injection, renderPage() - Template+Page -> DOM
+│   └── app-shell/       @qu/app-shell       - the minimal, application-agnostic bootstrap kernel a Relay serves
+├── demo/                 - runnable proofs: CLI chat, browser client, in-process auto-demo, app-shell-demo
+├── docs/                 - docs/v5-space-core-guide.md (framework how-to), docs/app-shell-arbeitsauftrag.md (App Shell/Runtime design)
 └── architecture.md       - this file
 ```
 
@@ -418,7 +421,7 @@ notice.
 | `space.member.joined` | Space | `{pub, xPub, name}` |
 | `space.status.changed` | Space | `{status}` — from the transport's own `onStatusChange()`, §3.4 |
 | `space.node.<nodeId>.write-ack` | Space | `{nodeId, seq}` — see §3.5's WRITE-ACK |
-| `debug.space.write.local` / `.remote.accepted` / `.remote.rejected` / `.remote.ignored` | Space | write lifecycle |
+| `debug.space.write.local` / `.remote.accepted` / `.remote.rejected` / `.remote.ignored` / `.remote.undecryptable` | Space | write lifecycle — `.undecryptable`: authentic + ACL-ok, but this identity isn't a decryption recipient (e.g. history from before it joined) |
 | `debug.space.subscribe.sent` / `.unsubscribe.sent` / `.hello.sent` | Space | `{nodeId}` / `{nodeId}` / `{}` |
 | `debug.space.grant.received` / `.rejected` | Space | `{nodeId}` |
 | `debug.space.compact.sent` | Space | `{nodeId, bytes}` |
@@ -435,3 +438,118 @@ notice.
 See each source file's own doc comment (§4's table) for the exhaustive,
 authoritative version of this list — this table is a summary, not the
 source of truth.
+
+## 7. The App layer: Shell, Runtime, Content (Phase 1)
+
+Full design rationale, alternatives considered, and how each piece maps to
+the pre-existing framework primitives: **`docs/app-shell-arbeitsauftrag.md`**.
+This section is the short version.
+
+Above the framework (§1-6, unchanged, still UI/application-agnostic) sits a
+generic App layer that lets the SAME `@qu/app-shell` boot different
+applications (a CMS, a messenger, a forum, ...) purely from Qu content — the
+Relay never learns what it's transporting is "a page" or "a template," and
+`@qu/space-core` gained zero new concepts for this.
+
+- **`@qu/app-core`** (`kinds.js`, `content-id.js`, `resolver.js`,
+  `router.js`, `runtime.js`, `dev.js`, `relay-resolver.js`) — declares the
+  application-content Kind-Schemas (`qu-app` manifest, `qu-route-registry`,
+  `qu-page`, `qu-template`, `qu-style`, all ordinary `defineKind()` calls)
+  and interprets them: `deriveContentNodeId(ownerPub, kind, path)`
+  (content-id.js) extends `deriveOwnerNodeId()`'s self-certifying-id idea
+  with a `path` component, so many pages/templates/styles can exist per
+  owner — which is also WHY those three Kinds are `acl.write: 'members'`
+  rather than `'owner'`/`'named'`: `Space.createNode()` only honors a
+  caller-supplied `{id}` for `'members'`-mode Kinds (see space.js), and the
+  accepted tradeoff (documented in kinds.js/content-id.js) is that reading
+  them requires actual Space membership — the app's manifest and route
+  registry stay `'owner'`/`'named'` (one per app, self-certifying, no
+  membership gate) so an app is discoverable pre-membership. `ContentResolver`
+  wraps `Space.useNode()` with a bounded wait for sync; `AppRuntime` combines
+  it with `HashRouter` (`#/<page>/...`) into one `resolveRoute()` call; `dev.js`
+  is the Dev/Admin API that bootstraps an empty Space into a working app;
+  `relay-resolver.js`'s `createAppResolveKindSchema()` builds the
+  `resolveKindSchema(nodeId)` a relay needs to actually enforce this ACL
+  (see relay.js's own doc comment on why an unresolvable nodeId can only
+  ever fall back to flat `'members'` ACL). Zero DOM dependency.
+- **`@qu/app-renderer`** (`sanitizer.js`, `slots.js`, `styles.js`,
+  `render.js`) — turns an `AppRuntime.resolveRoute()` plan into DOM:
+  `sanitizeHtml()` strips `<script>`/`on*`/`javascript:` from any
+  Space-sourced HTML BEFORE it reaches `innerHTML` (the structural
+  enforcement that arbitrary JavaScript is never auto-executed as content —
+  Stufe 1 of docs' three-tier trust model; Stufe 3, signed Executable
+  Modules, is intentionally not built yet — nothing in the renderer calls
+  `import()` on anything Space-sourced), `resolveSlots()` fills
+  `<qu-slot name="...">` placeholders, `renderPage()` composes both plus a
+  Framework Default "not found" fallback for an unresolved route. No
+  framework, no build step — same posture `@qu/space-ui` already commits to,
+  and `@qu/app-shell` uses `@qu/space-ui`'s own bindings for anything
+  reactive rather than duplicating them.
+- **`@qu/app-shell`** (`identity.js`, `boot.js`, `shell.js`) — the ONE
+  fixed piece of application JavaScript a Relay would serve (`shell.js`'s
+  `<qu-app-shell>` custom element, a DOM mount marker, not a component
+  system). `identity.js` generates/persists a browser identity and joins a
+  relay's Space via its already-existing `POST /join`/`GET /members.json`
+  (`@qu/space-transport`'s `relay-app-server.js`) — reused, not a new "public
+  content" mechanism. `boot.js`'s `startApp()` is the DOM-aware half that
+  wires an already-constructed `Space` to `@qu/app-core`/`@qu/app-renderer`;
+  kept separate from `shell.js`'s network/`localStorage` glue specifically so
+  it stays testable with an in-process `Space` + jsdom, no live relay needed
+  (see `packages/app-shell/test/boot.test.js`, and `demo/app-shell-demo.mjs`
+  for the same proof as a runnable script — `npm run demo:app-shell`).
+
+**Wired to a real relay**: `demo/app-shell-relay.mjs` bundles `shell.js`
+(esbuild, the same way `demo/web/build.mjs` bundles `demo/web/main.js`) and
+serves it via the same `relay-app-server.js` any relay already uses —
+`npm run demo:app-shell-relay` (starts it) + `npm run demo:app-shell-install`
+(a SEPARATE process, over a real WebSocket, seeding a small demo app via
+`@qu/app-core`'s Dev API — the actual "installer command") prove this against
+a real network, real disk mirror (`createFileStore`), and a real browser
+tab, not just jsdom/in-process. `packages/space-transport/src/relay-server.js`
+itself still serves `demo/web/`, not this — pointing a PRODUCTION relay's own
+`STATIC_FILES`/`webDir` at an App Shell build is the remaining integration
+step.
+
+**Two real bugs the real-relay demo caught (both fixed, both regression-
+tested)** that the earlier in-process/jsdom-only tests could not, because
+they either shared one Space's own local state or ran fast enough to never
+hit the race:
+
+1. `kinds.js`'s `publicMeta()` — `defineKind()` always derives a
+   `'members'`-mode Kind's META-STAMP visibility as `'encrypted'`
+   (kind-schema.js), independent of what its FIELDS declare. A Node's
+   meta-stamp is its Y.Doc's very first update, sealed only for whoever was
+   a member AT CREATION TIME — and because Yjs integrates one author's
+   updates as a strictly ordered, gapless sequence (grant.js's own
+   "WRITE-BEFORE-GRANT IS A TRAP"), a visitor who joins LATER (the App
+   Shell's core use case) could never decrypt that first update and could
+   then never integrate ANY later update to that Node either, even though
+   every field on `qu-page`/`qu-template`/`qu-style` is `visibility:
+   'public'`. Content would silently, permanently never render for that
+   visitor. Fixed entirely in `@qu/app-core` (`metaVisibility` overridden to
+   `'public'` on an otherwise-unchanged, still-`'members'`-ACL Kind-Schema)
+   — no `@qu/space-core` change needed.
+2. `resolver.js`'s `resolvePage()` used to gate readiness on the `title`
+   field alone, then read `content` (a SEPARATE envelope) unconditionally —
+   fine in-process (near-zero latency hides the race) but over a real
+   network a page could be "found" and rendered before its own body text had
+   actually synced. Fixed to wait for both fields, matching the pattern
+   `resolveTemplate()`/`resolveStyle()` already used for their own single
+   field.
+
+Separately, `@qu/space-core`'s `Space._handleIncoming()`/
+`_hydrateFromStorage()` no longer let `openUpdate()` throwing for a
+legitimate "not a recipient of this envelope" case (e.g. `'encrypted'`-
+visibility history from before a peer joined — the OLD chat demo's own
+`demo-chat` Kind can hit this) escape as an uncaught exception — Node
+terminates a process on an unhandled rejection by default (>=15), so this
+used to be able to crash a real CLI client outright. See
+`debug.space.write.remote.undecryptable` (§6) and
+`packages/space-core/test/undecryptable-history.test.js`. This does NOT
+retroactively fix the underlying Yjs gap for `'encrypted'`-visibility
+content (see `demo/README.md`'s own Caveats section for the practical
+workaround) — it only stops the crash.
+
+Field-level/namespace ACL (docs §21), signed Executable Modules (§17 Stufe
+3), and publish/draft states (§26) remain explicitly future work — see
+docs/app-shell-arbeitsauftrag.md's own "Nicht-Ziele".

@@ -1,0 +1,14 @@
+{
+  "name": "@qu/app-renderer",
+  "version": "0.1.0",
+  "description": "Qu V5 App Renderer: turns a resolved Template + Page + stylesheet (see @qu/app-core's AppRuntime) into DOM. sanitizer.js strips <script>/on*-attributes/javascript: URLs from any HTML sourced from Qu content before it ever reaches the DOM (docs/app-shell-arbeitsauftrag.md §17 - content is never trusted as executable); slots.js resolves <qu-slot name=\"...\"> placeholders; styles.js injects a Style Node's CSS into the document, keyed and idempotent per Node id; render.js wires all three into one renderPage() call. No framework, no build step - same vanilla DOM posture @qu/space-ui already commits to.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  },
+  "license": "MIT"
+}

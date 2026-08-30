@@ -22,6 +22,71 @@ works end to end (signing, encryption, CRDT sync, node-level ACL, and the
 relay never seeing plaintext) - it exits non-zero if anything doesn't
 converge as expected.
 
+## App Shell: a whole app loaded from Qu content, not from code
+
+```sh
+npm run demo:app-shell
+```
+
+Runs `app-shell-demo.mjs`: an "app-admin" identity bootstraps an empty Space
+into a working app (`@qu/app-core`'s Dev API - manifest, a template with a
+`<qu-slot>`, a stylesheet, two pages, a route registry), then a completely
+separate "visitor" identity - handed nothing but the app-admin's PUBKEY -
+boots `@qu/app-shell`'s `startApp()` against a real (in-process) relay and
+renders `#/`, `#/hello`, and an unpublished route (the framework's own "not
+found" fallback), pulling template + content + stylesheet fresh from the
+Space on every hash change. Also proves a `<script>` smuggled into a page's
+content never reaches the DOM (`@qu/app-renderer`'s `sanitizeHtml()`). See
+`architecture.md` §7 and `docs/app-shell-arbeitsauftrag.md` for the full
+design - the Relay and the Shell itself never hardcode a single page,
+template, or route here.
+
+## App Shell over a REAL relay: relay + installer + a real browser
+
+The above is in-process/jsdom only. This is the real thing - two separate
+processes and a real browser tab, over a real WebSocket:
+
+**Terminal 1 - the relay:**
+
+```sh
+npm run demo:app-shell-relay
+```
+
+Bundles `@qu/app-shell`'s `shell.js` (esbuild, same as `demo/web/build.mjs`
+does for the chat demo), generates `demo/app-shell-web/index.html` with the
+real app-admin pubkey baked into `<qu-app-shell app-admin-pub="...">`, and
+starts a real WebSocket relay on `ws://localhost:8082` mirroring to
+`demo/.app-shell-data/` - not yet seeded with any content.
+
+**Terminal 2 - the installer** (a separate process, run once):
+
+```sh
+npm run demo:app-shell-install
+```
+
+Connects to the relay above as the SAME persisted `app-admin` identity
+(`demo/.app-shell-identities/app-admin.json`, shared with the relay) over a
+REAL WebSocket connection, and seeds "Qu Demo App" - a manifest, a route
+registry, one template, one stylesheet, two pages - purely via
+`@qu/app-core`'s Dev API (`createApp`/`createTemplate`/`createStyle`/
+`createPage`/`publishRoute`), then disconnects. This is the actual
+"installer command" docs §25 describes: connect, seed, done - a real,
+separate process, not a simulation.
+
+**Then open `http://localhost:8082/` in a browser.** A brand-new visitor
+identity (generated on the spot, `POST /join`s the relay - see
+`@qu/app-shell`'s `identity.js`) renders the exact same app the installer
+just seeded, having authored none of it - hash-navigate to `#/hello` and
+watch it pull a different page/content live from the Space.
+
+Building this against a real network (not just in-process) is what actually
+caught two real bugs, now fixed and regression-tested (see `architecture.md`
+§7 for the full writeup): a `'members'`-mode Kind's meta-stamp used to seal
+`'encrypted'`-only-for-the-writer regardless of its fields' own
+`visibility: 'public'` (permanently breaking any LATER-joining visitor, via
+Yjs's own gapless per-author update ordering), and `resolvePage()` used to
+consider a page "ready" before its own `content` field had actually synced.
+
 ## Real thing: two clients, one relay, three terminals
 
 **Terminal 1 - the relay:**
@@ -138,6 +203,13 @@ silent, since bob's live connection already got it.
   `@qu/space-transport`'s dedicated `./ws-client-transport` subpath, not
   its main entry, specifically to stay browser-safe (see that file's own
   doc comment on why the main entry can't be bundled for a browser).
+- `demo/app-shell-demo.mjs` - the in-process App Shell PoC, `npm run
+  demo:app-shell` (see the section above).
+- `demo/app-shell-relay.mjs` / `demo/app-shell-web/build.mjs` /
+  `demo/install-app-shell-demo.mjs` - the real-relay App Shell demo (see its
+  own section above): a relay serving a bundled `@qu/app-shell`, and a
+  separate installer process seeding it over a real WebSocket via
+  `@qu/app-core`'s Dev API.
 
 Every message is signed with the sender's Ed25519 key and end-to-end
 encrypted for every member's X25519 key before it ever reaches the relay or
@@ -166,8 +238,29 @@ and mirrors ciphertext it cannot decrypt.
   its own `addMember()` (see that method's own doc comment in
   `packages/space-core/src/space.js`) - the instant the broadcast arrives,
   no timer involved. A write IS still encrypted only for the members known
-  at the moment it's sealed, so a message sent in the same instant as a
-  join could in principle race it - by design, not a polling artifact.
+  at the moment it's sealed, so a message written before someone joins is
+  PERMANENTLY undecryptable for them (no later event can retroactively add
+  a recipient to an already-sealed envelope) - **and, because Yjs applies
+  one author's updates as a strictly ordered, gapless sequence, this isn't
+  just "that one old message stays invisible": once ONE of an author's
+  updates is skipped for a given reader, that reader can never integrate
+  ANY LATER update from that same author on that same Node either**, until
+  they get a fresh local Yjs doc for it (re-`subscribeNode()`) - see
+  `grant.js`'s own "WRITE-BEFORE-GRANT IS A TRAP" doc comment for the exact
+  same Yjs property applied to `'named'`-ACL grants. In practice this shows
+  up as "I stopped receiving messages from one specific person" after a
+  relay restart replays old `demo/.data/` history to a member who joined
+  after some of it was written, or after re-running the demo against a
+  stale `demo/.data/` from an earlier session with a different member set.
+  `Space` no longer CRASHES on this (an unhandled promise rejection used to
+  terminate the whole CLI process the instant it happened - a real,
+  now-fixed bug, see `debug.space.write.remote.undecryptable` in
+  `architecture.md` §6) but it also can't undo it: **if messages from one
+  person silently stop appearing, delete `demo/.data/` and restart
+  `demo:relay`** (a real app would instead call `Space.compactNode()` after
+  a membership change - see envelope.js's own "SNAPSHOT/COMPACTION" doc
+  comment - so every current member's copy reseals as one envelope encrypted
+  for the CURRENT member list, closing the gap for anyone who joins after).
 - **The typed display name is NOT an account** - a browser tab's identity
   is a keypair generated once per browser/profile and kept in
   `localStorage` (see `web/main.js`'s own `loadOrCreateIdentity()`); the
@@ -181,13 +274,20 @@ and mirrors ciphertext it cannot decrypt.
   "why does my phone and desktop, same name, not see each other's history"
   is answered by "they were never the same identity," not by anything
   broken in delivery.
-- **One failed message render used to silently kill ALL later ones** - both
-  `chat.mjs` and `web/main.js` print incoming messages via a
-  `printing = printing.then(...)` chain; without a `.catch()`, one throw
-  (a transient render glitch, a malformed message) left `printing`
-  permanently REJECTED, and every later `schedulePrint()` call silently
-  did nothing for the rest of the session - while sync itself, the debug
-  log, and notification toasts kept working fine (unrelated code paths),
-  making it look like delivery had gone one-directional. Fixed: the chain
-  now recovers, and a per-message `try/catch` means one bad message is
-  skipped, not a wall past which nothing after it ever prints again.
+- **One failed message render used to silently kill ALL later ones** - a
+  SEPARATE bug from the permanent-per-author gap above, easy to confuse
+  with it (same "messages just stop appearing" symptom) but with a
+  different fix: both `chat.mjs` and `web/main.js` print incoming messages
+  via a `printing = printing.then(...)` chain; without a `.catch()`, one
+  throw (a transient render glitch, a malformed message - NOT specific to
+  one author) left `printing` permanently REJECTED, and every later
+  `schedulePrint()` call silently did nothing for the rest of the session -
+  while sync itself, the debug log, and notification toasts kept working
+  fine (unrelated code paths), making it look like delivery had gone
+  one-directional. Fixed: the chain now recovers, and a per-message
+  `try/catch` means one bad message is skipped, not a wall past which
+  nothing after it ever prints again. If messages stop rendering: this
+  fix (already applied) covers "everything, from that point on, regardless
+  of sender"; the gap above covers "everything from one specific person,"
+  which is not a code fix so much as a call to `compactNode()`/deleting
+  `demo/.data/`, as described above.
