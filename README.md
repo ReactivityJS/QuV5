@@ -76,5 +76,6 @@ talking over an actual WebSocket relay, or a browser client
 docker compose -f docker-compose.space-relay.yml up -d
 ```
 
-See the guide's "Docker deployment" section for the required
-`SPACE_MEMBERS_JSON` environment variable and how to generate it.
+See the guide's "Docker deployment" section for `QU_MEMBERS_JSON` (optional -
+only needed for `'members'`-mode ACL Kinds) and how to generate it, and for
+`QU_FEDERATE_UPSTREAM_URL` to federate with another relay.

@@ -218,13 +218,25 @@ offers WebSocket compression by default.
 
 ```sh
 cd packages/space-transport
-SPACE_MEMBERS_JSON='[{"pub":"<base64>","xPub":"<base64>"},{"pub":"<base64>","xPub":"<base64>"}]' \
-SPACE_RELAY_PORT=8081 \
-SPACE_RELAY_DATA_DIR=./relay-data \
+QU_RELAY_PORT=8081 \
+QU_RELAY_DATA_DIR=./relay-data \
 node src/relay-server.js
 ```
 
-Generate the base64 keys for `SPACE_MEMBERS_JSON` like this:
+That's it — **`QU_MEMBERS_JSON` is optional**, not required. It only
+gates `'members'`-mode ACL Kinds (a genuine access-control decision only
+an operator can make — the relay has no way to invent an answer to "who's
+authorized" on its own); `'owner'`/`'named'`-ACL Kinds (§3) are
+self-certifying and work from the very first boot with zero membership
+configuration. If/when you do have `'members'`-mode Kinds, set it to a
+JSON array:
+
+```sh
+QU_MEMBERS_JSON='[{"pub":"<base64>","xPub":"<base64>"},{"pub":"<base64>","xPub":"<base64>"}]' \
+node src/relay-server.js
+```
+
+Generate the base64 keys for `QU_MEMBERS_JSON` like this:
 
 ```js
 import { QuCrypto } from '@qu/core';
@@ -232,6 +244,29 @@ const kp = await QuCrypto.generateKeypair();
 console.log(JSON.stringify({ pub: QuCrypto.toBase64(kp.publicKey), xPub: QuCrypto.toBase64(kp.xPublicKey) }));
 // SAVE kp.privateKey and kp.xPrivateKey somewhere safe for the peer that owns this identity - never send them anywhere.
 ```
+
+**The relay's own identity** (only needed to federate with another relay,
+see §9) is a completely separate thing from `QU_MEMBERS_JSON` above — it's
+not a decision anyone has to make, just a keypair that needs to exist and
+stay stable. `relay-server.js` auto-generates one on first boot and
+persists it under `QU_RELAY_DATA_DIR/relay-identity.json` (override with
+`QU_RELAY_IDENTITY_FILE`) — there is no manual keygen-then-paste step, and
+no chicken-and-egg problem to solve yourself. To read it (creating it
+first if it doesn't exist yet) without starting the WebSocket server —
+e.g. to hand this relay's pubkey to another relay/app that needs to
+recognize it:
+
+```sh
+node src/relay-server.js --print-identity
+```
+
+```json
+{ "fingerprint": "7d15-5e40-5510-35a5", "pub": "...", "xPub": "..." }
+```
+
+To federate with an upstream relay (§9), set `QU_FEDERATE_UPSTREAM_URL` to
+its `ws://`/`wss://` address — the relay becomes a subscribing peer of it
+automatically, using this same identity.
 
 `GET /healthz` returns `200 ok` once the relay is listening. `relay-server.js`
 constructs its `WebSocketServer` with `perMessageDeflate: true` already —
@@ -420,22 +455,47 @@ real write-ACL before anything happens with it.
 # From the repo root:
 docker build -f packages/space-transport/Dockerfile -t qu-space-relay .
 docker run -d -p 8081:8081 \
-  -e SPACE_MEMBERS_JSON='[{"pub":"...","xPub":"..."}, {"pub":"...","xPub":"..."}]' \
   -v qu-space-relay-data:/data \
   qu-space-relay
+```
+
+That's a complete, runnable relay — no `QU_MEMBERS_JSON` required (see §4
+on why: it's optional, only gates `'members'`-mode Kinds, and the relay's
+own identity for federation is auto-generated/persisted under `/data`, not
+something you provide). Add it when you actually have `'members'`-mode
+Kinds:
+
+```sh
+docker run -d -p 8081:8081 \
+  -e QU_MEMBERS_JSON='[{"pub":"...","xPub":"..."}, {"pub":"...","xPub":"..."}]' \
+  -v qu-space-relay-data:/data \
+  qu-space-relay
+```
+
+To read this relay's own identity (e.g. to register it as a member/
+federation peer elsewhere) without starting the WebSocket server:
+
+```sh
+docker run --rm -v qu-space-relay-data:/data qu-space-relay \
+  node packages/space-transport/src/relay-server.js --print-identity
 ```
 
 Or via the provided compose file:
 
 ```sh
-export SPACE_MEMBERS_JSON='[{"pub":"...","xPub":"..."}, {"pub":"...","xPub":"..."}]'
+docker compose -f docker-compose.space-relay.yml up -d
+# with members and/or federation:
+export QU_MEMBERS_JSON='[{"pub":"...","xPub":"..."}, {"pub":"...","xPub":"..."}]'
+export QU_FEDERATE_UPSTREAM_URL='ws://another-relay-host:8081'
 docker compose -f docker-compose.space-relay.yml up -d
 ```
 
-`SPACE_RELAY_DATA_DIR` (default `/data`, backed by the `qu-space-relay-data`
+`QU_RELAY_DATA_DIR` (default `/data`, backed by the `qu-space-relay-data`
 volume in the compose file) is where the relay mirrors every envelope it
-forwards — this is what makes offline-sender catch-up work (§6). Set it
-to an empty string to run a pure live-only relay instead.
+forwards — this is what makes offline-sender catch-up work (§6) — AND
+where its own identity file persists across restarts/redeploys. Set it
+to an empty string to run a pure live-only relay instead (its identity
+then becomes ephemeral too — a new one every restart, logged loudly).
 
 ## 11. Granular events: notifications, presence, push, and debugging
 
@@ -504,9 +564,10 @@ real WebSocket relay.
   inherent, not a gap: a newly added member can never retroactively
   decrypt a write sealed before they joined.
 - **Federation has no membership-provisioning protocol** — a federating
-  relay authenticates to its upstream with its own keypair, but if the
-  upstream Kind requires flat `'members'` ACL, that relay still has to be
-  added as a member out-of-band, same as any other member.
+  relay authenticates to its upstream with its own keypair (`--print-identity`
+  solves RETRIEVING that pubkey, see §4), but if the upstream Kind requires
+  flat `'members'` ACL, that relay still has to be added as a member
+  out-of-band, same as any other member - no automated handshake for it.
 - **No relay clustering/HA within one relay** — federation (§9) composes
   independent relay processes, but there's no hot-standby/failover for a
   single relay's own process.

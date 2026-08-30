@@ -4,14 +4,21 @@ services:
       context: .
       dockerfile: packages/space-transport/Dockerfile
     ports:
-      - "${SPACE_RELAY_PORT:-8081}:8081"
+      - "${QU_RELAY_PORT:-8081}:8081"
     environment:
-      SPACE_RELAY_PORT: "8081"
-      SPACE_RELAY_DATA_DIR: /data
-      # REQUIRED - no default, the container refuses to start without it.
-      # A JSON array of every Space member's {"pub","xPub"} (base64) -
-      # see docs/v5-space-core-guide.md for how to generate these.
-      SPACE_MEMBERS_JSON: ${SPACE_MEMBERS_JSON:?set SPACE_MEMBERS_JSON - see docs/v5-space-core-guide.md}
+      QU_RELAY_PORT: "8081"
+      QU_RELAY_DATA_DIR: /data
+      # OPTIONAL - no default needed. A JSON array of every 'members'-mode
+      # ACL peer's {"pub","xPub"} (base64) - see docs/v5-space-core-guide.md
+      # for how to generate these, and for why 'owner'/'named'-ACL Kinds
+      # need no members configured at all. Leave QU_MEMBERS_JSON unset in
+      # your .env / shell if you have none yet - the relay starts fine.
+      QU_MEMBERS_JSON: ${QU_MEMBERS_JSON:-}
+      # OPTIONAL - a ws://.../wss://... URL of another relay to federate
+      # with (see federation.js). This relay's OWN identity (auto-generated
+      # and persisted under /data on first boot - see relay-identity.js) is
+      # what authenticates it to the upstream relay.
+      QU_FEDERATE_UPSTREAM_URL: ${QU_FEDERATE_UPSTREAM_URL:-}
     volumes:
       - qu-space-relay-data:/data
     restart: unless-stopped

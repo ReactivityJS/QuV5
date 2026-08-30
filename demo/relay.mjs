@@ -3,7 +3,7 @@
  * DEMO RELAY — `npm run demo:relay`. A real WebSocket relay for the
  * text-exchange demo (see `demo/README.md`), wired the same way
  * `packages/space-transport/src/relay-server.js` is, just with its
- * `SPACE_MEMBERS_JSON` derived automatically from whatever identities
+ * `QU_MEMBERS_JSON` derived automatically from whatever identities
  * already exist under `demo/.identities/` (see `demo/lib/identity.mjs`)
  * instead of requiring it to be hand-assembled.
  *
