@@ -19,7 +19,7 @@ async function waitUntil(conditionFn, { timeout = 2000, interval = 5 } = {}) {
   throw new Error(`waitUntil: condition not met within ${timeout}ms`);
 }
 
-const chatKind = defineKind('chat', { fields: { messages: 'list' } });
+const chatKind = defineKind('chat', { fields: { messages: { shape: 'list' } } });
 
 test('a hello message emits debug.relay.hello.received and debug.relay.presence.online', async () => {
   const alice = await actor();

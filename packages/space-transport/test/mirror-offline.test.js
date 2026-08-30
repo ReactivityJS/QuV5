@@ -32,7 +32,7 @@ async function waitUntil(conditionFn, { timeout = 3000, interval = 5 } = {}) {
   throw new Error(`waitUntil: condition not met within ${timeout}ms`);
 }
 
-const noteKind = defineKind('note', { fields: { title: 'atomic-encrypted', body: 'text' } });
+const noteKind = defineKind('note', { fields: { title: { shape: 'atomic' }, body: { shape: 'text' } } });
 
 test('B receives A\'s data from the relay\'s mirror even though A is offline by the time B connects', async () => {
   const alice = await actor();

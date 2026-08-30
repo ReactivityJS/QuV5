@@ -80,7 +80,7 @@
 import * as Y from 'yjs';
 import { QuCrypto } from '@qu/core';
 import { SpaceNode, stampMeta } from './node.js';
-import { sealUpdate, verifyEnvelope, openUpdate } from './envelope.js';
+import { sealUpdate, sealPublicUpdate, verifyEnvelope, openUpdate } from './envelope.js';
 
 const REMOTE_ORIGIN = Symbol('space-core:remote-update');
 
@@ -165,7 +165,7 @@ export class Space {
       const field = node.field(name);
       if (typeof field.set === 'function') await field.set(value);
       else if (typeof field.insert === 'function') field.insert(0, value);
-      else throw new Error(`createNode: field "${name}" (type ${kindSchema.fields[name]}) has no initial-value setter`);
+      else throw new Error(`createNode: field "${name}" (shape ${kindSchema.fields[name]?.shape}) has no initial-value setter`);
     }
     return node;
   }
@@ -223,12 +223,18 @@ export class Space {
 
   async _handleLocalUpdate(nodeId, node, update, origin) {
     if (origin === REMOTE_ORIGIN || node._skipReSeal) return; // never re-seal/re-broadcast a write we just received or are replaying from storage.
-    // A plain object origin is field.js's withNotify() carrier for a
-    // validated {notify} option (see that file's own doc comment) - any
-    // OTHER local mutation (stampMeta(), a field write with no `notify`
-    // option) leaves `origin` undefined/null, same as before this existed.
+    // A plain object origin is field.js's withWriteContext()/stampMeta()'s carrier for
+    // {notify, visibility} (see those files' own doc comments) - both always set `visibility`
+    // now; `notify` is optional. Anything else (a raw doc.transact() with no origin at all,
+    // which nothing in this codebase does anymore, but a caller reaching straight for Y.Doc
+    // could) defaults to the safe 'encrypted' mode, same as this Space's behavior before
+    // visibility existed.
     const notify = origin && typeof origin === 'object' ? origin.notify ?? null : null;
-    const envelope = await sealUpdate(update, this._identity, this._recipientXPubKeys(), notify);
+    const visibility = origin && typeof origin === 'object' ? origin.visibility ?? 'encrypted' : 'encrypted';
+    const envelope =
+      visibility === 'public'
+        ? await sealPublicUpdate(update, this._identity, notify)
+        : await sealUpdate(update, this._identity, this._recipientXPubKeys(), notify);
     await this._storage?.append(nodeId, envelope);
     this._transport.send({ nodeId, envelope });
     this._bus?.emit('debug.space.write.local', { nodeId, kind: node.kind, bytes: update.length, notify });

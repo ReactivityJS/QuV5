@@ -25,7 +25,7 @@ test('atomic-encrypted field: recipient decrypts, non-recipient gets undefined (
   const author = await actor();
   const reader = await actor();
   const outsider = await actor();
-  const noteKind = defineKind('note', { fields: { title: 'atomic-encrypted' } });
+  const noteKind = defineKind('note', { fields: { title: { shape: 'atomic' } } });
 
   const doc = createDoc(noteKind, author.signingPub);
   const node = new SpaceNode({ id: 'n1', kindSchema: noteKind, doc, identity: author, recipientXPubKeys: () => [reader.xPublicKey] });
@@ -43,7 +43,7 @@ test('atomic-encrypted field: recipient decrypts, non-recipient gets undefined (
 });
 
 test('text field: concurrent character-level edits from two peers converge to the same content', async () => {
-  const kind = defineKind('note', { fields: { body: 'text' } });
+  const kind = defineKind('note', { fields: { body: { shape: 'text' } } });
   const author = await actor();
 
   const docA = createDoc(kind, author.signingPub);
@@ -66,7 +66,7 @@ test('text field: concurrent character-level edits from two peers converge to th
 });
 
 test('text field: observe() delivers Yjs\' own insert/delete delta, not a full-value re-render signal', async () => {
-  const kind = defineKind('note', { fields: { body: 'text' } });
+  const kind = defineKind('note', { fields: { body: { shape: 'text' } } });
   const author = await actor();
   const doc = createDoc(kind, author.signingPub);
   const node = new SpaceNode({ id: 'n3', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
@@ -84,7 +84,7 @@ test('text field: observe() delivers Yjs\' own insert/delete delta, not a full-v
 });
 
 test('list field: concurrent pushes from two peers converge on the same, deterministically-ordered array - no cursor/pagination logic needed', async () => {
-  const kind = defineKind('channel', { fields: { messages: 'list' } });
+  const kind = defineKind('channel', { fields: { messages: { shape: 'list' } } });
   const author = await actor();
   const reader = await actor();
 
@@ -113,7 +113,7 @@ test('list field: concurrent pushes from two peers converge on the same, determi
 });
 
 test('a notify hint declared in the Kind-Schema is accepted and rides as the Yjs transaction origin', async () => {
-  const kind = defineKind('channel', { fields: { messages: 'list' }, notifyTopics: ['message', 'mention'] });
+  const kind = defineKind('channel', { fields: { messages: { shape: 'list' } }, notifyTopics: ['message', 'mention'] });
   const author = await actor();
   const doc = createDoc(kind, author.signingPub);
   const node = new SpaceNode({ id: 'ch2', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
@@ -124,11 +124,11 @@ test('a notify hint declared in the Kind-Schema is accepted and rides as the Yjs
   });
   await node.field('messages').push('hi', { notify: { topic: 'mention', to: ['somePub'] } });
 
-  assert.deepEqual(capturedOrigin, { notify: { topic: 'mention', to: ['somePub'] } });
+  assert.deepEqual(capturedOrigin, { notify: { topic: 'mention', to: ['somePub'] }, visibility: 'encrypted' });
 });
 
 test('a notify hint whose topic is NOT declared in the Kind-Schema throws, before touching Yjs at all', async () => {
-  const kind = defineKind('channel', { fields: { messages: 'list' }, notifyTopics: ['message'] });
+  const kind = defineKind('channel', { fields: { messages: { shape: 'list' } }, notifyTopics: ['message'] });
   const author = await actor();
   const doc = createDoc(kind, author.signingPub);
   const node = new SpaceNode({ id: 'ch3', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
@@ -142,7 +142,7 @@ test('a notify hint whose topic is NOT declared in the Kind-Schema throws, befor
 });
 
 test('a Kind-Schema with no declared notifyTopics rejects ANY notify hint (opt-in, not silently ignored)', async () => {
-  const kind = defineKind('channel', { fields: { messages: 'list' } }); // notifyTopics omitted - defaults to []
+  const kind = defineKind('channel', { fields: { messages: { shape: 'list' } } }); // notifyTopics omitted - defaults to []
   const author = await actor();
   const doc = createDoc(kind, author.signingPub);
   const node = new SpaceNode({ id: 'ch4', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
@@ -151,7 +151,7 @@ test('a Kind-Schema with no declared notifyTopics rejects ANY notify hint (opt-i
 });
 
 test('omitting notify entirely still works exactly as before - no {notify} option required', async () => {
-  const kind = defineKind('channel', { fields: { messages: 'list' } });
+  const kind = defineKind('channel', { fields: { messages: { shape: 'list' } } });
   const author = await actor();
   const doc = createDoc(kind, author.signingPub);
   const node = new SpaceNode({ id: 'ch5', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });

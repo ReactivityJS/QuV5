@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuCrypto } from '@qu/core';
-import { sealUpdate, verifyEnvelope, openUpdate } from '../src/envelope.js';
+import { sealUpdate, sealPublicUpdate, verifyEnvelope, openUpdate } from '../src/envelope.js';
 
 async function actor() {
   const kp = await QuCrypto.generateKeypair();
@@ -90,4 +90,57 @@ test('an envelope with no notify hint is unaffected - same shape and signature v
   assert.equal('notify' in envelope, false);
   const isAuthorized = (pubB64) => pubB64 === QuCrypto.toBase64(author.signingPub);
   assert.equal(await verifyEnvelope(envelope, isAuthorized), true);
+});
+
+test('sealUpdate() stamps mode: "encrypted"', async () => {
+  const author = await actor();
+  const reader = await actor();
+  const envelope = await sealUpdate(new TextEncoder().encode('x'), author, [reader.xPublicKey]);
+  assert.equal(envelope.mode, 'encrypted');
+});
+
+test('sealPublicUpdate() -> verifyEnvelope() -> openUpdate() round-trips WITHOUT any decryption key, and the plaintext is genuinely on the wire', async () => {
+  const author = await actor();
+  const update = new TextEncoder().encode('a public yjs update payload');
+
+  const envelope = await sealPublicUpdate(update, author);
+  assert.equal(envelope.mode, 'public');
+  assert.equal('iv' in envelope, false);
+  assert.equal('ct' in envelope, false);
+  assert.equal('to' in envelope, false);
+  assert.equal('senderXPub' in envelope, false);
+
+  // The envelope is a plain, structurally-cloneable object - simulate it crossing a wire/disk boundary.
+  const onWire = JSON.parse(JSON.stringify(envelope, (_, v) => (v instanceof Uint8Array ? { __u8: [...v] } : v)));
+  const revived = JSON.parse(JSON.stringify(onWire), (_, v) => (v && v.__u8 ? new Uint8Array(v.__u8) : v));
+
+  // Unlike encrypted mode, the plaintext IS genuinely present on the wire - that's the whole point.
+  assert.equal(JSON.stringify(onWire).includes('a public yjs update payload'), false); // still byte-array-encoded, not a literal substring, but...
+  assert.deepEqual(revived.data, update); // ...the actual bytes are there, unencrypted, for anyone to read.
+
+  const isAuthorized = (pubB64) => pubB64 === QuCrypto.toBase64(author.signingPub);
+  assert.equal(await verifyEnvelope(revived, isAuthorized), true);
+
+  // openUpdate() needs NO recipient identity at all for public mode - a relay, or a total stranger, can call this.
+  const opened = await openUpdate(revived);
+  assert.deepEqual(opened, update);
+});
+
+test('verifyEnvelope() rejects a tampered public-mode envelope (data OR notify altered)', async () => {
+  const author = await actor();
+  const isAuthorized = (pubB64) => pubB64 === QuCrypto.toBase64(author.signingPub);
+
+  const envelope1 = await sealPublicUpdate(new TextEncoder().encode('x'), author);
+  envelope1.data[0] ^= 0xff;
+  assert.equal(await verifyEnvelope(envelope1, isAuthorized), false);
+
+  const envelope2 = await sealPublicUpdate(new TextEncoder().encode('x'), author, { topic: 'message' });
+  envelope2.notify.topic = 'mention';
+  assert.equal(await verifyEnvelope(envelope2, isAuthorized), false);
+});
+
+test('verifyEnvelope() still rejects a public-mode envelope from a signer not on the write-ACL', async () => {
+  const author = await actor();
+  const envelope = await sealPublicUpdate(new TextEncoder().encode('x'), author);
+  assert.equal(await verifyEnvelope(envelope, () => false), false);
 });

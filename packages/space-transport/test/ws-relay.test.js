@@ -29,7 +29,7 @@ async function waitUntil(conditionFn, { timeout = 3000, interval = 5 } = {}) {
   throw new Error(`waitUntil: condition not met within ${timeout}ms`);
 }
 
-const noteKind = defineKind('note', { fields: { title: 'atomic-encrypted' } });
+const noteKind = defineKind('note', { fields: { title: { shape: 'atomic' } } });
 
 test('two peers sync a Node through a real WebSocket relay on a real port', async () => {
   const alice = await actor();

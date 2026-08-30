@@ -30,15 +30,15 @@ export class SpaceNode {
 
   /**
    * @param {string} name - Must be declared in this Node's Kind-Schema.
-   * @returns {import('./field.js').AtomicEncryptedField|import('./field.js').TextField|import('./field.js').ListField}
+   * @returns {import('./field.js').AtomicField|import('./field.js').TextField|import('./field.js').ListField}
    */
   field(name) {
-    const type = this.kindSchema.fields[name];
-    if (!type) throw new Error(`SpaceNode(${this.kind}).field: "${name}" is not declared in this Kind-Schema`);
+    const decl = this.kindSchema.fields[name];
+    if (!decl) throw new Error(`SpaceNode(${this.kind}).field: "${name}" is not declared in this Kind-Schema`);
     if (!this._fields.has(name)) {
       this._fields.set(
         name,
-        createField(type, {
+        createField(decl, {
           contentMap: this.doc.getMap('content'),
           doc: this.doc,
           name,
@@ -49,10 +49,10 @@ export class SpaceNode {
     return this._fields.get(name);
   }
 
-  /** Every Kind-Schema field name that is `'atomic-encrypted'` or `'text'` (the two `content` map keys). Excludes `'list'` fields, which live as their own top-level Y.Array, not inside `content`. */
+  /** Every Kind-Schema field name whose shape is `'atomic'` or `'text'` (the two `content` map keys). Excludes `'list'` fields, which live as their own top-level Y.Array, not inside `content`. */
   fieldNames() {
     return Object.entries(this.kindSchema.fields)
-      .filter(([, type]) => type !== 'list')
+      .filter(([, decl]) => decl.shape !== 'list')
       .map(([name]) => name);
   }
 
@@ -77,25 +77,33 @@ export class SpaceNode {
 export function stampMeta(doc, kindSchema, ownerPub) {
   // One doc.transact() so meta AND every 'text' field's placeholder become
   // a SINGLE atomic Yjs update (one signed envelope) - a Node's creation
-  // is one atomic fact, not an observable partial state.
-  doc.transact(() => {
-    const meta = doc.getMap('meta');
-    meta.set('kind', kindSchema.kind);
-    meta.set('ownerPub', ownerPub);
-    meta.set('ts', Date.now());
+  // is one atomic fact, not an observable partial state. `visibility:
+  // kindSchema.metaVisibility` (see kind-schema.js: 'public' for
+  // 'owner'/'named' Kinds, 'encrypted' for 'members' Kinds, unchanged from
+  // pre-existing behavior) is how Space._handleLocalUpdate() learns which
+  // envelope mode this creation write seals with - same mechanism field.js
+  // uses for every other write, see that file's own doc comment.
+  doc.transact(
+    () => {
+      const meta = doc.getMap('meta');
+      meta.set('kind', kindSchema.kind);
+      meta.set('ownerPub', ownerPub);
+      meta.set('ts', Date.now());
 
-    // Pre-create every 'text' field's underlying Y.Text HERE, as part of
-    // Node creation, so the CREATOR is always the one who originates that
-    // Y.Map key - never a later reader. field.js's TextField deliberately
-    // never auto-creates on access: if a subscribing peer read a
-    // not-yet-synced text field before this arrived and created its OWN
-    // competing Y.Text for the same key, Yjs' per-key conflict resolution
-    // would silently orphan one of the two instances, and a field handle
-    // that had already cached the orphaned one would keep reading/writing
-    // a detached object forever - a real bug hit while building this PoC.
-    const content = doc.getMap('content');
-    for (const [name, type] of Object.entries(kindSchema.fields)) {
-      if (type === 'text') content.set(name, new Y.Text());
-    }
-  });
+      // Pre-create every 'text' field's underlying Y.Text HERE, as part of
+      // Node creation, so the CREATOR is always the one who originates that
+      // Y.Map key - never a later reader. field.js's TextField deliberately
+      // never auto-creates on access: if a subscribing peer read a
+      // not-yet-synced text field before this arrived and created its OWN
+      // competing Y.Text for the same key, Yjs' per-key conflict resolution
+      // would silently orphan one of the two instances, and a field handle
+      // that had already cached the orphaned one would keep reading/writing
+      // a detached object forever - a real bug hit while building this PoC.
+      const content = doc.getMap('content');
+      for (const [name, decl] of Object.entries(kindSchema.fields)) {
+        if (decl.shape === 'text') content.set(name, new Y.Text());
+      }
+    },
+    { visibility: kindSchema.metaVisibility }
+  );
 }

@@ -49,7 +49,7 @@ async function waitUntil(conditionFn, { timeout = 1000, interval = 5 } = {}) {
   throw new Error(`waitUntil: condition not met within ${timeout}ms`);
 }
 
-const chatKind = defineKind('chat', { fields: { messages: 'list' }, notifyTopics: ['message', 'mention'] });
+const chatKind = defineKind('chat', { fields: { messages: { shape: 'list' } }, notifyTopics: ['message', 'mention'] });
 
 test('a local write with no notify hint emits ONLY the generic space.node.<id>.changed event', async () => {
   const alice = await actor();

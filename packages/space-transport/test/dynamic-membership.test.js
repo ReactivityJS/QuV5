@@ -18,7 +18,7 @@ async function waitUntil(conditionFn, { timeout = 2000, interval = 5 } = {}) {
   throw new Error(`waitUntil: condition not met within ${timeout}ms`);
 }
 
-const noteKind = defineKind('note', { fields: { title: 'atomic-encrypted' } });
+const noteKind = defineKind('note', { fields: { title: { shape: 'atomic' } } });
 
 test('a relay constructed with one member rejects a write from a second, not-yet-added identity', async () => {
   const alice = await actor();

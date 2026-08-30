@@ -46,6 +46,24 @@
  * relay's blindness, and a sender who wants to spam a member they're
  * already in a Space with has cheaper ways to do it than a fake `notify`
  * hint (they could just also write more, real, honestly-tagged messages).
+ *
+ * ENVELOPE v2 — TWO MODES, one signature rule ("sign exactly the bytes
+ * that get transported, nothing more"):
+ *   - `sealUpdate()` (`mode: 'encrypted'`) - everything above, unchanged.
+ *   - `sealPublicUpdate()` (`mode: 'public'`) - for Kind-Schema fields
+ *     declared `visibility: 'public'` (see kind-schema.js): the raw Yjs
+ *     update travels as PLAINTEXT (`data`), signed directly (no `iv`/`ct`/
+ *     `to`/`senderXPub` - there is no ciphertext, so nothing to encrypt
+ *     for). Anyone - relay, other clients, total strangers - can verify
+ *     authenticity without a decryption key, which is the whole point: a
+ *     `~pub`-owned identity Node's `pub`/`epub` fields need to be
+ *     discoverable by someone who has never been in a Space with the
+ *     owner before (see kind-schema.js's own doc comment on why
+ *     `visibility: 'public'` exists at all).
+ * Both modes stamp `mode` onto the envelope so `verifyEnvelope()`/
+ * `openUpdate()` below need to branch on exactly one thing to handle
+ * either kind uniformly - no second code path anywhere else that has to
+ * know which mode it's looking at.
  */
 import { QuCrypto } from '@qu/core';
 
@@ -68,6 +86,7 @@ export async function sealUpdate(update, sender, recipientXPubKeys, notify = nul
   const sigInput = concatBytes(concatBytes(iv, ct), notifyBytes);
   const sig = await QuCrypto.sign(sigInput, sender.signingKey);
   return {
+    mode: 'encrypted',
     iv,
     ct,
     to, // [{pub: X25519 recipient pubkey, key: wrapped content key}]
@@ -80,12 +99,39 @@ export async function sealUpdate(update, sender, recipientXPubKeys, notify = nul
 }
 
 /**
+ * The `mode: 'public'` counterpart to `sealUpdate()` - see this file's own
+ * "ENVELOPE v2" doc comment. No `recipientXPubKeys` parameter: there is no
+ * encryption step, so no one to wrap a content key for.
+ * @param {Uint8Array} update - Raw bytes from `doc.on('update', ...)`.
+ * @param {object} sender - `{signingKey, signingPub}` (only the Ed25519 half is needed - no X25519 encryption happens here).
+ * @param {{topic: string, to?: string[]}|null} [notify]
+ * @returns {Promise<object>}
+ */
+export async function sealPublicUpdate(update, sender, notify = null) {
+  const notifyBytes = encodeNotify(notify);
+  const sigInput = concatBytes(update, notifyBytes);
+  const sig = await QuCrypto.sign(sigInput, sender.signingKey);
+  return {
+    mode: 'public',
+    data: update, // plaintext - see this file's own doc comment.
+    sig,
+    pub: sender.signingPub,
+    ts: Date.now(),
+    ...(notify ? { notify } : {}),
+  };
+}
+
+/**
  * Verifies an envelope's write signature (including its `notify` hint, if
- * any - see this file's own doc comment). Requires ONLY the signer's
- * public key - never a decryption key. A relay (see @qu/space-transport's
+ * any - see this file's own doc comment), for EITHER mode. Requires ONLY
+ * the signer's public key - never a decryption key, even for an
+ * `encrypted`-mode envelope. A relay (see @qu/space-transport's
  * RelayForwarder) calls exactly this and nothing else, which is what makes
- * it structurally unable to read content: it never even receives an
- * X25519 private key to attempt decryption with.
+ * it structurally unable to read `encrypted`-mode content: it never even
+ * receives an X25519 private key to attempt decryption with. (A
+ * `public`-mode envelope has no such protection by design - see this
+ * file's own doc comment - `verifyEnvelope()` returning `true` for one
+ * means exactly "authentic," never "confidential.")
  * @param {object} envelope
  * @param {(pubBase64: string) => boolean} isAuthorizedWriter - Kind-Schema's write-ACL check.
  * @returns {Promise<boolean>}
@@ -94,7 +140,8 @@ export async function verifyEnvelope(envelope, isAuthorizedWriter) {
   const pubB64 = QuCrypto.toBase64(envelope.pub);
   if (!isAuthorizedWriter(pubB64)) return false;
   const notifyBytes = encodeNotify(envelope.notify ?? null);
-  const sigInput = concatBytes(concatBytes(envelope.iv, envelope.ct), notifyBytes);
+  const sigInput =
+    envelope.mode === 'public' ? concatBytes(envelope.data, notifyBytes) : concatBytes(concatBytes(envelope.iv, envelope.ct), notifyBytes);
   return QuCrypto.verify(sigInput, envelope.sig, envelope.pub);
 }
 
@@ -106,16 +153,23 @@ function encodeNotify(notify) {
 }
 
 /**
- * Decrypts an already-signature-verified envelope back into the raw update
- * bytes for `Y.applyUpdate()`. Only a peer holding the matching X25519
- * private key (i.e. an actual space member) can do this - a relay never
- * can, by construction (see verifyEnvelope's doc comment above).
+ * Returns the raw update bytes for `Y.applyUpdate()`, for an
+ * already-signature-verified envelope of EITHER mode - the one place
+ * calling code asks "give me the bytes" without needing to know or care
+ * which mode produced them.
+ *
+ * `encrypted` mode: only a peer holding the matching X25519 private key
+ * (i.e. an actual space member) can do this - a relay never can, by
+ * construction (see verifyEnvelope's doc comment above).
+ * `public` mode: no decryption key needed or checked - `envelope.data` IS
+ * the plaintext, for anyone, by design (see this file's own doc comment).
  * @param {object} envelope
- * @param {{xPrivateKey: Uint8Array, xPublicKey: Uint8Array}} recipient
+ * @param {{xPrivateKey: Uint8Array, xPublicKey: Uint8Array}} [recipient] - Required for `encrypted` mode, ignored for `public`.
  * @returns {Promise<Uint8Array>}
- * @throws if `recipient` is not among the envelope's intended recipients.
+ * @throws if `mode: 'encrypted'` and `recipient` is not among the envelope's intended recipients.
  */
 export async function openUpdate(envelope, recipient) {
+  if (envelope.mode === 'public') return envelope.data;
   const myPubB64 = QuCrypto.toBase64(recipient.xPublicKey);
   const entry = envelope.to.find((t) => QuCrypto.toBase64(t.pub) === myPubB64);
   if (!entry) throw new Error('openUpdate: recipient is not an intended reader of this envelope');

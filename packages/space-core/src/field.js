@@ -1,44 +1,56 @@
 /**
- * FIELD — typed accessors over one Node's Yjs shared types, dispatched by
- * Kind-Schema field type (see kind-schema.js). This is where the
- * per-field-type encryption split actually lives:
+ * FIELD — typed accessors over one Node's Yjs shared types, dispatched by a
+ * Kind-Schema field declaration's `shape` (see kind-schema.js). This is
+ * where the per-field encryption split actually lives:
  *
- *   'atomic-encrypted': the plaintext is encrypted (QuCrypto.encrypt, same
- *     recipient-envelope shape QuStore's `#seal()` already uses) BEFORE it
- *     ever becomes a Y.Map value. The resulting Yjs update - and therefore
- *     any storage/transport envelope built from it - carries only
- *     ciphertext. `get()` decrypts locally; a non-recipient's `get()`
+ *   'atomic' + visibility 'encrypted' (the historical default): the
+ *     plaintext is encrypted (QuCrypto.encrypt, same recipient-envelope
+ *     shape QuStore's `#seal()` already used) BEFORE it ever becomes a
+ *     Y.Map value. `get()` decrypts locally; a non-recipient's `get()`
  *     returns `undefined` (still-ciphertext, unreadable), not an error -
  *     the value is genuinely present in the CRDT, just opaque to them.
  *
+ *   'atomic' + visibility 'public': the RAW value sits in the Y.Map,
+ *     unencrypted - no field-level wrapping, no envelope-level wrapping
+ *     either (see envelope.js's `sealPublicUpdate()`). `get()` never
+ *     returns `undefined` for this visibility - there is no "not a
+ *     recipient" concept when everyone already is one, by design.
+ *
  *   'text': backed by a real Y.Text, edited character-by-character. Yjs'
  *     merge algorithm operates directly on the plaintext ops, so this
- *     field's value is NOT pre-encrypted the way an atomic field's is -
- *     doing so would collapse concurrent character-level edits into
- *     "whoever wrote last overwrites the opaque blob," destroying the one
- *     property Y.Text exists for. Confidentiality for this field type is
- *     therefore enforced one layer out, at the envelope (see envelope.js):
- *     plaintext exists only locally, in the RAM of an actively-editing,
- *     authorized member - exactly like every other E2EE collaborative
- *     editor (this was a deliberate, discussed tradeoff, not an oversight).
+ *     field's value is NEVER pre-encrypted at the field level, for EITHER
+ *     visibility - doing so would collapse concurrent character-level
+ *     edits into "whoever wrote last overwrites the opaque blob,"
+ *     destroying the one property Y.Text exists for. Confidentiality for
+ *     `visibility: 'encrypted'` text is therefore enforced one layer out,
+ *     at the envelope: plaintext exists only locally, in the RAM of an
+ *     actively-editing, authorized member - exactly like every other E2EE
+ *     collaborative editor (a deliberate, discussed tradeoff, not an
+ *     oversight). `visibility: 'public'` text (e.g. a public wiki page
+ *     body) skips that outer wrapping too - genuinely plaintext end to end.
  *
- *   'list': a top-level Y.Array of small QuCrypto-encrypted items - same
- *     per-item encryption as an atomic field, but many items instead of
- *     one value, so concurrent pushes from different peers merge via Yjs'
- *     own CRDT ordering instead of a bespoke append/cursor scheme.
+ *   'list': a top-level Y.Array of items - `visibility: 'encrypted'` items
+ *     are individually QuCrypto-encrypted (same shape as an atomic field);
+ *     `visibility: 'public'` items are the raw pushed value. Concurrent
+ *     pushes from different peers merge via Yjs' own CRDT ordering either
+ *     way - no bespoke append/cursor scheme needed.
  *
- * `set()`/`push()` both accept an optional `{notify}` option - see
- * envelope.js's own doc comment for what a `notify` hint IS and why it
- * exists (routing a content-blind relay's push decision without ever
- * decrypting). This is where it's VALIDATED, the one place that actually
- * has the Kind-Schema in hand: `notify.topic` must be one of this Node's
- * `kindSchema.notifyTopics` (see kind-schema.js), or the write throws
- * BEFORE it ever reaches Yjs/the network - a typo'd or invented topic
- * fails loudly, locally, instead of silently producing an envelope no
- * relay-side handler will ever match. The validated hint then rides as
- * the local Yjs transaction's `origin` (see `withNotify()` below) purely
- * as a carrier - `Space._handleLocalUpdate()` (space.js) is what actually
- * reads it back off `origin` and threads it into `sealUpdate()`.
+ * WHERE VISIBILITY ACTUALLY TAKES EFFECT ON THE WIRE: every mutating call
+ * here wraps its Yjs mutation in `doc.transact(fn, {notify, visibility})` -
+ * `Space._handleLocalUpdate()` (space.js) reads `visibility` back off that
+ * transaction's origin to decide `sealUpdate()` (encrypted) vs.
+ * `sealPublicUpdate()` (public) for the envelope this write produces. A
+ * field never talks to envelope.js directly - this is the one, sole
+ * mechanism by which a field's declared visibility becomes an actual
+ * envelope mode, and it is the SAME mechanism for all three shapes.
+ *
+ * `set()`/`push()`/text edits all accept an optional `{notify}` (atomic/
+ * list only - see this file's own git history for why text never grew
+ * this) - see envelope.js's own doc comment for what a `notify` hint IS
+ * and why it exists. Validated here, the one place that actually has the
+ * Kind-Schema in hand: `notify.topic` must be one of this Node's
+ * `kindSchema.notifyTopics`, or the write throws BEFORE it ever reaches
+ * Yjs/the network.
  */
 import * as Y from 'yjs';
 import { QuCrypto } from '@qu/core';
@@ -50,24 +62,23 @@ async function encryptForRecipients(plainValue, identity, recipientXPubKeys) {
 }
 
 /**
- * Validates `notify.topic` against this Node's Kind-Schema allowlist (if a
- * hint was given at all - `notify` is optional, most writes have none),
- * then runs `mutateFn` inside a `doc.transact()` call carrying `{notify}`
- * as the transaction's origin - the mechanism that gets it from a field
- * write all the way to `sealUpdate()` (see this file's own top doc
- * comment, and `Space._handleLocalUpdate()` in space.js).
+ * Validates `notify.topic` (if given) against this Node's Kind-Schema
+ * allowlist, then runs `mutateFn` inside a `doc.transact()` call carrying
+ * `{notify, visibility}` as the transaction's origin - see this file's own
+ * top doc comment for why `visibility` rides here too (it's how
+ * `Space._handleLocalUpdate()` picks the right envelope mode).
  * @param {Y.Doc} doc @param {() => void} mutateFn
- * @param {{topic: string, to?: string[]}|undefined} notify
+ * @param {{notify?: {topic: string, to?: string[]}, visibility: 'encrypted'|'public'}} writeContext
  * @param {object} kindSchema
  */
-function withNotify(doc, mutateFn, notify, kindSchema) {
+function withWriteContext(doc, mutateFn, { notify, visibility }, kindSchema) {
   if (notify) {
     const allowed = kindSchema?.notifyTopics ?? [];
     if (!allowed.includes(notify.topic)) {
       throw new Error(`field write: notify.topic "${notify.topic}" is not declared in Kind-Schema "${kindSchema?.kind}"'s notifyTopics (${allowed.length ? allowed.join(', ') : 'none declared'})`);
     }
   }
-  doc.transact(mutateFn, notify ? { notify } : undefined);
+  doc.transact(mutateFn, { notify, visibility });
 }
 
 /** @returns {*|undefined} `undefined` if the caller is not an intended recipient (still ciphertext to them). */
@@ -80,26 +91,28 @@ async function decryptEnvelopeFor(envelope, identity) {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
-class AtomicEncryptedField {
-  constructor(contentMap, key, ctx, doc) {
+class AtomicField {
+  constructor(contentMap, key, ctx, doc, visibility) {
     this._map = contentMap;
     this._key = key;
     this._ctx = ctx;
     this._doc = doc;
+    this._visibility = visibility;
   }
 
   /** @param {*} value @param {{notify?: {topic: string, to?: string[]}}} [options] - see this file's own doc comment. */
   async set(value, { notify } = {}) {
-    const envelope = await encryptForRecipients(value, this._ctx.identity, this._ctx.recipientXPubKeys());
-    withNotify(this._doc, () => this._map.set(this._key, envelope), notify, this._ctx.kindSchema);
+    const stored = this._visibility === 'public' ? value : await encryptForRecipients(value, this._ctx.identity, this._ctx.recipientXPubKeys());
+    withWriteContext(this._doc, () => this._map.set(this._key, stored), { notify, visibility: this._visibility }, this._ctx.kindSchema);
   }
 
-  /** @returns {Promise<*|null|undefined>} `null` = unset. `undefined` = set, but this identity is not a recipient. */
+  /** @returns {Promise<*|null|undefined>} `null` = unset. `undefined` = set, but (encrypted-visibility only) this identity is not a recipient. */
   async get() {
+    if (this._visibility === 'public') return this._map.get(this._key) ?? null;
     return decryptEnvelopeFor(this._map.get(this._key), this._ctx.identity);
   }
 
-  /** True the moment ciphertext exists for this key, before any decryption is attempted. */
+  /** True the moment a value exists for this key, before any decryption is attempted. */
   isSet() {
     return this._map.has(this._key);
   }
@@ -121,9 +134,12 @@ class TextField {
   // content map's CURRENT value for this key, fresh, every time. Caching
   // would risk holding a stale/detached Y.Text if two peers ever raced to
   // create the same key (the bug this design avoids by construction).
-  constructor(contentMap, key) {
+  constructor(contentMap, key, doc, visibility, kindSchema) {
     this._map = contentMap;
     this._key = key;
+    this._doc = doc;
+    this._visibility = visibility;
+    this._kindSchema = kindSchema;
   }
 
   /** Direct handle to the underlying Y.Text - bind ProseMirror/Quill straight to this, no wrapper needed. Throws if this Node's creation envelope (which always carries every 'text' field's placeholder) has not synced yet. */
@@ -138,11 +154,11 @@ class TextField {
   }
 
   insert(index, text) {
-    this.ytext.insert(index, text);
+    withWriteContext(this._doc, () => this.ytext.insert(index, text), { visibility: this._visibility }, this._kindSchema);
   }
 
   delete(index, length) {
-    this.ytext.delete(index, length);
+    withWriteContext(this._doc, () => this.ytext.delete(index, length), { visibility: this._visibility }, this._kindSchema);
   }
 
   /** @param {(delta: Array<object>) => void} callback - Yjs' own insert/retain/delete delta, for atomic UI patching (see docs/v5-space-core-guide.md's <qu-text>). */
@@ -155,21 +171,22 @@ class TextField {
 }
 
 class ListField {
-  constructor(yarray, ctx, doc) {
+  constructor(yarray, ctx, doc, visibility) {
     this._yarray = yarray;
     this._ctx = ctx;
     this._doc = doc;
+    this._visibility = visibility;
   }
 
   /** @param {*} value @param {{notify?: {topic: string, to?: string[]}}} [options] - see this file's own doc comment. */
   async push(value, { notify } = {}) {
-    const envelope = await encryptForRecipients(value, this._ctx.identity, this._ctx.recipientXPubKeys());
-    withNotify(this._doc, () => this._yarray.push([envelope]), notify, this._ctx.kindSchema);
+    const stored = this._visibility === 'public' ? value : await encryptForRecipients(value, this._ctx.identity, this._ctx.recipientXPubKeys());
+    withWriteContext(this._doc, () => this._yarray.push([stored]), { notify, visibility: this._visibility }, this._ctx.kindSchema);
   }
 
   async toArray() {
-    const decrypted = await Promise.all(this._yarray.toArray().map((envelope) => decryptEnvelopeFor(envelope, this._ctx.identity)));
-    return decrypted;
+    if (this._visibility === 'public') return this._yarray.toArray();
+    return Promise.all(this._yarray.toArray().map((envelope) => decryptEnvelopeFor(envelope, this._ctx.identity)));
   }
 
   get length() {
@@ -184,15 +201,16 @@ class ListField {
 }
 
 /**
- * @param {'atomic-encrypted'|'text'|'list'} type
+ * @param {{shape: 'atomic'|'text'|'list', visibility: 'encrypted'|'public'}} fieldDecl
  * @param {Y.Map} contentMap
  * @param {Y.Doc} doc
  * @param {string} name
  * @param {object} ctx - `{identity, recipientXPubKeys, kindSchema}`
  */
-export function createField(type, { contentMap, doc, name, ctx }) {
-  if (type === 'atomic-encrypted') return new AtomicEncryptedField(contentMap, name, ctx, doc);
-  if (type === 'text') return new TextField(contentMap, name);
-  if (type === 'list') return new ListField(doc.getArray(name), ctx, doc);
-  throw new Error(`createField: unknown field type "${type}"`);
+export function createField(fieldDecl, { contentMap, doc, name, ctx }) {
+  const { shape, visibility } = fieldDecl;
+  if (shape === 'atomic') return new AtomicField(contentMap, name, ctx, doc, visibility);
+  if (shape === 'text') return new TextField(contentMap, name, doc, visibility, ctx.kindSchema);
+  if (shape === 'list') return new ListField(doc.getArray(name), ctx, doc, visibility);
+  throw new Error(`createField: unknown shape "${shape}"`);
 }

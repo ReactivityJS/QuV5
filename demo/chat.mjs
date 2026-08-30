@@ -38,7 +38,7 @@ function parseArgs(argv) {
 }
 
 // MUST match relay.mjs's own defineKind() call - both processes need the identical Kind-Schema shape.
-const chatKind = defineKind('demo-chat', { fields: { messages: 'list' }, notifyTopics: ['message', 'mention'] });
+const chatKind = defineKind('demo-chat', { fields: { messages: { shape: 'list' } }, notifyTopics: ['message', 'mention'] });
 
 async function main() {
   const { name, relay, room, dir } = parseArgs(process.argv.slice(2));

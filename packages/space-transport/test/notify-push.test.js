@@ -27,7 +27,7 @@ async function waitUntil(conditionFn, { timeout = 2000, interval = 5 } = {}) {
   throw new Error(`waitUntil: condition not met within ${timeout}ms`);
 }
 
-const chatKind = defineKind('chat', { fields: { messages: 'list' }, notifyTopics: ['message', 'mention'] });
+const chatKind = defineKind('chat', { fields: { messages: { shape: 'list' } }, notifyTopics: ['message', 'mention'] });
 
 test('a CONNECTED recipient: relay.notify carries online:true, and the push handler does NOT push', async () => {
   const alice = await actor();

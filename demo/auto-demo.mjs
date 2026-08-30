@@ -48,7 +48,7 @@ async function waitUntil(conditionFn, { timeout = 2000, interval = 5 } = {}) {
   throw new Error(`waitUntil: condition not met within ${timeout}ms`);
 }
 
-const chatKind = defineKind('demo-chat', { fields: { messages: 'list' }, notifyTopics: ['message', 'mention'] });
+const chatKind = defineKind('demo-chat', { fields: { messages: { shape: 'list' } }, notifyTopics: ['message', 'mention'] });
 const ROOM = 'auto-demo-room';
 
 async function main() {

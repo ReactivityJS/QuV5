@@ -23,7 +23,7 @@ import { EventBus, createDebugLogger } from '@qu/events';
 
 const ROOM = 'demo-room';
 // MUST match demo/chat.mjs's and demo/relay.mjs's own defineKind() call - all three need the identical Kind-Schema shape.
-const chatKind = defineKind('demo-chat', { fields: { messages: 'list' }, notifyTopics: ['message', 'mention'] });
+const chatKind = defineKind('demo-chat', { fields: { messages: { shape: 'list' } }, notifyTopics: ['message', 'mention'] });
 
 const el = {
   setup: document.getElementById('setup'),

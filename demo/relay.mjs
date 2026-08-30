@@ -46,7 +46,7 @@ import { buildWebBundle } from './web/build.mjs';
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), 'web');
 
 // MUST match chat.mjs's and web/main.js's own defineKind() call - all three processes need the identical Kind-Schema shape.
-const chatKind = defineKind('demo-chat', { fields: { messages: 'list' }, notifyTopics: ['message', 'mention'] });
+const chatKind = defineKind('demo-chat', { fields: { messages: { shape: 'list' } }, notifyTopics: ['message', 'mention'] });
 
 function parseArgs(argv) {
   const opts = { port: 8081, dir: DEFAULT_IDENTITY_DIR, data: new URL('.data/', import.meta.url).pathname };
