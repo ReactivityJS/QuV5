@@ -133,6 +133,11 @@ export class Space {
     this._bus?.emit('debug.space.hello.sent', {});
   }
 
+  /** This Space's own identity, `{signingKey, signingPub, xPrivateKey, xPublicKey}` - read-only, for framework-level add-ons (e.g. alias.js's `publishAlias()`) that need it without reaching into a "private" field. */
+  get identity() {
+    return this._identity;
+  }
+
   _recipientXPubKeys() {
     return this._members.map((m) => m.xPub);
   }
