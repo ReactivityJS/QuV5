@@ -27,10 +27,19 @@
  *     `online: false`, and the push handler (a separate, swappable plugin
  *     - see @qu/space-transport's push-handler.js) actually "pushes" (logs,
  *     in this demo - a real deployment would send Web Push here).
+ *   - OWNER-NODE IDENTITY DISCOVERY (part 2, below): a self-certifying
+ *     `acl.write: 'owner'` Node with `visibility: 'public'` fields (see
+ *     `@qu/space-core`'s kind-schema.js) - alice publishes a public profile
+ *     with ZERO relay-side membership provisioning, and a totally
+ *     unrelated peer ("carol", never a space `member`, never previously
+ *     connected to anyone) discovers and reads it knowing only alice's
+ *     pubkey - the exact "identity bootstrapping via pubkey lookup"
+ *     scenario the `visibility: 'public'` design exists for.
  */
 import { QuCrypto } from '@qu/core';
 import { defineKind, Space } from '@qu/space-core';
 import { createInProcessHub, InProcessTransport, createRelayForwarder, registerPushHandler } from '@qu/space-transport';
+import { createMemoryStore } from '@qu/space-storage';
 import { EventBus } from '@qu/events';
 
 async function actor(name) {
@@ -49,6 +58,13 @@ async function waitUntil(conditionFn, { timeout = 2000, interval = 5 } = {}) {
 }
 
 const chatKind = defineKind('demo-chat', { fields: { messages: { shape: 'list' } }, notifyTopics: ['message', 'mention'] });
+const profileKind = defineKind('demo-profile', {
+  fields: {
+    alias: { shape: 'atomic', visibility: 'public' }, // discoverable by anyone who knows alice's pubkey - no Space membership needed.
+    epub: { shape: 'atomic', visibility: 'public' }, // her X25519 pubkey, likewise public - see kind-schema.js's own doc comment on why 'owner' Nodes need this.
+  },
+  acl: { write: 'owner' },
+});
 const ROOM = 'auto-demo-room';
 
 async function main() {
@@ -65,7 +81,15 @@ async function main() {
 
   const hub = createInProcessHub();
   const relayBus = new EventBus(); // the RELAY's own bus - presence-gated push routing only, never content (see relay.js).
-  const relay = createRelayForwarder({ hub, members, resolveKindSchema: () => chatKind, bus: relayBus });
+  // resolveKindSchema routes by nodeId: a self-certifying owner-Node id always starts with "~"
+  // (see kind-schema.js's deriveOwnerNodeId()) - everything else in this demo is the fixed chat room.
+  const relay = createRelayForwarder({
+    hub,
+    members,
+    resolveKindSchema: (nodeId) => (nodeId.startsWith('~') ? profileKind : chatKind),
+    storage: createMemoryStore(), // so part 2's outsider can catch up on alice's profile after the fact, not just live.
+    bus: relayBus,
+  });
   let pushSent = () => {};
   const pushLogged = new Promise((resolve) => {
     pushSent = resolve;
@@ -127,7 +151,36 @@ async function main() {
   console.log(`\n${aliceView.length === 3 ? '✅' : '❌'} Alle drei Nachrichten sind bei Alice angekommen und entschlüsselt.`);
   console.log(`${relayNeverSawPlaintext ? '✅' : '❌'} Der Relay hat zu keinem Zeitpunkt Klartext gesehen (${relay.seen.length} weitergeleitete Envelopes).`);
 
-  if (aliceView.length !== 3 || !relayNeverSawPlaintext) process.exitCode = 1;
+  // --- Part 2: an owner-Node with public fields - identity discovery via pubkey alone ---
+  console.log('\n=== Teil 2: Owner-Node mit öffentlichen Feldern (Identity Discovery) ===\n');
+
+  const profileNode = await aliceSpace.createNode(profileKind, {
+    alias: 'alice_the_demo_user',
+    epub: QuCrypto.toBase64(alice.xPublicKey),
+  });
+  console.log(`Alice veröffentlicht ihr Profil unter der selbst-zertifizierenden Node-ID: ${profileNode.id}`);
+  console.log('(diese ID ist eine reine Funktion von Alice\'s Pubkey + Kind - jeder kann sie unabhängig nachrechnen)');
+
+  // Carol is a stranger: not in `members`, never connected to this relay before, and knows
+  // NOTHING about alice except her public signing key (exactly how a real pubkey-based identity
+  // lookup would start).
+  const carol = await actor('carol');
+  const carolTransport = new InProcessTransport(hub, 'carol-outsider');
+  await carolTransport.connect();
+  const carolSpace = new Space({ identity: carol, members: [], transport: carolTransport });
+
+  const discoveredNodeId = profileNode.id; // in real usage, carol would compute this herself via deriveOwnerNodeId(alicePub, 'demo-profile').
+  const discovered = carolSpace.subscribeNode(discoveredNodeId, profileKind);
+  await waitUntil(async () => (await discovered.field('alias').get()) !== null);
+
+  const discoveredAlias = await discovered.field('alias').get();
+  const discoveredEpub = await discovered.field('epub').get();
+  console.log(`Carol (kein Space-Member, kannte nur Alice's Pubkey) liest: alias="${discoveredAlias}", epub="${discoveredEpub.slice(0, 16)}…"`);
+
+  const identityDiscoveryOk = discoveredAlias === 'alice_the_demo_user' && discoveredEpub === QuCrypto.toBase64(alice.xPublicKey);
+  console.log(`${identityDiscoveryOk ? '✅' : '❌'} Carol hat Alice's öffentliches Profil korrekt gelesen, ohne jemals Space-Mitglied gewesen zu sein.`);
+
+  if (aliceView.length !== 3 || !relayNeverSawPlaintext || !identityDiscoveryOk) process.exitCode = 1;
 }
 
 main().catch((err) => {
