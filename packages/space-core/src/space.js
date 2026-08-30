@@ -81,6 +81,8 @@ import * as Y from 'yjs';
 import { QuCrypto } from '@qu/core';
 import { SpaceNode, stampMeta } from './node.js';
 import { sealUpdate, sealPublicUpdate, verifyEnvelope, openUpdate } from './envelope.js';
+import { deriveOwnerNodeId } from './kind-schema.js';
+import { signGrant, verifyGrant } from './grant.js';
 
 const REMOTE_ORIGIN = Symbol('space-core:remote-update');
 
@@ -103,6 +105,8 @@ export class Space {
     this._bus = bus;
     /** @type {Map<string, SpaceNode>} */
     this._nodes = new Map();
+    /** @type {Map<string, Set<string>>} nodeId -> Set<base64 Ed25519 pubkey> - 'named'-mode write-ACL state, 100% derived from verified `grant` messages (see grant.js), never invented. */
+    this._grants = new Map();
     this._transport.onMessage((msg) => this._handleIncoming(msg.data));
     this._sendHello(); // fire-and-forget, see this file's own doc comment.
   }
@@ -142,18 +146,81 @@ export class Space {
     this._members.push(member);
   }
 
-  _isAuthorizedWriter(kindSchema) {
-    const writerPubs = new Set(this._members.map((m) => QuCrypto.toBase64(m.pub)));
-    return (pubB64) => writerPubs.has(pubB64); // kindSchema.acl.write === 'members' is the only mode the PoC supports.
+  /**
+   * Returns this Node's write-ACL check, shaped exactly like
+   * `verifyEnvelope()` wants: `(pubBase64) => boolean|Promise<boolean>`.
+   * Branches on `kindSchema.acl.write` (see kind-schema.js's own doc
+   * comment on the three modes):
+   *   - `'members'` - unchanged from before this Task: any current Space
+   *     member (`this._members`), a flat, synchronous Set lookup.
+   *   - `'owner'`/`'named'` - self-certifying: a signer is authorized iff
+   *     `deriveOwnerNodeId(signerPub, kindSchema.kind) === nodeId` (proves
+   *     THIS Node's own id cryptographically commits to them, independent
+   *     of `this._members` entirely - an owner never needs to be
+   *     "added" anywhere to write their own Node) OR - `'named'` only -
+   *     their pubkey appears in `this._grants.get(nodeId)`, which is
+   *     populated ONLY by `_handleIncoming()` verifying an actual signed
+   *     `grant` message (see grant.js), never trusted from anywhere else.
+   * @param {object} kindSchema
+   * @param {string} nodeId
+   */
+  _isAuthorizedWriter(kindSchema, nodeId) {
+    if (kindSchema?.acl?.write !== 'owner' && kindSchema?.acl?.write !== 'named') {
+      const writerPubs = new Set(this._members.map((m) => QuCrypto.toBase64(m.pub)));
+      return (pubB64) => writerPubs.has(pubB64);
+    }
+    return async (pubB64) => {
+      const ownerNodeId = await deriveOwnerNodeId(QuCrypto.fromBase64(pubB64), kindSchema.kind);
+      if (ownerNodeId === nodeId) return true;
+      if (kindSchema.acl.write === 'named') return this._grants.get(nodeId)?.has(pubB64) ?? false;
+      return false;
+    };
+  }
+
+  /**
+   * Authorizes `granteePub` to write to the `'named'`-ACL Node `nodeId`
+   * (of the given `kind`) - only meaningful when THIS identity is that
+   * Node's actual owner; a grant signed by anyone else is verifiably
+   * worthless (see grant.js's own doc comment) and every honest
+   * relay/Space will reject it on arrival, so calling this as a
+   * non-owner just wastes a message, it does not "work anyway."
+   *
+   * Applies the grant to THIS Space's own `_grants` state immediately
+   * (so the owner's own subsequent writes/reads already reflect it,
+   * without waiting for a relay to echo it back - relay.js's own
+   * broadcast deliberately excludes the sender, same pattern as
+   * `handleWrite()`'s forward loop), then sends the same signed message
+   * over the transport for the relay (and, via its broadcast, every
+   * other connected peer's Space) to independently verify and adopt.
+   * @param {string} nodeId
+   * @param {string} kind
+   * @param {Uint8Array} granteePub
+   */
+  async grantWriter(nodeId, kind, granteePub) {
+    const message = await signGrant({ nodeId, kind, granteePub }, this._identity);
+    await this._applyGrant(message);
+    this._transport.send(message);
+  }
+
+  async _applyGrant(message) {
+    if (!(await verifyGrant(message))) return false;
+    const granteePubB64 = QuCrypto.toBase64(message.granteePub);
+    if (!this._grants.has(message.nodeId)) this._grants.set(message.nodeId, new Set());
+    this._grants.get(message.nodeId).add(granteePubB64);
+    return true;
   }
 
   /**
    * @param {object} kindSchema - From defineKind()/KindRegistry.
    * @param {Record<string, *>} initialFields - Only 'atomic-encrypted'/'text' fields (list fields start empty; use `.field(name).push()`).
-   * @param {{id?: string}} [options]
+   * @param {{id?: string}} [options] - `id` is IGNORED for an `'owner'`/`'named'`-ACL kindSchema:
+   *   its Node id is never a caller's choice, it is `deriveOwnerNodeId(this._identity.signingPub,
+   *   kindSchema.kind)` (see kind-schema.js) - self-certifying by construction, so there is
+   *   nothing to pass. For `'members'`-ACL kinds, omitting `id` picks a random one, same as before.
    * @returns {Promise<SpaceNode>}
    */
   async createNode(kindSchema, initialFields = {}, { id = crypto.randomUUID() } = {}) {
+    if (kindSchema.acl.write !== 'members') id = await deriveOwnerNodeId(this._identity.signingPub, kindSchema.kind);
     // _attach() FIRST, so the update listener is already registered before
     // stampMeta()'s mutation happens - see stampMeta()'s doc comment for
     // why doing this the other way round permanently breaks sync for
@@ -202,7 +269,7 @@ export class Space {
     const doc = new Y.Doc();
     const node = this._attach(id, kindSchema, doc, { skipReSeal: true });
     const envelopes = await this._storage.load(id);
-    const isAuthorized = this._isAuthorizedWriter(kindSchema);
+    const isAuthorized = this._isAuthorizedWriter(kindSchema, id);
     for (const envelope of envelopes) {
       if (!(await verifyEnvelope(envelope, isAuthorized))) continue; // tampered/foreign entry in the log - skip, never trust storage blindly.
       const bytes = await openUpdate(envelope, this._identity);
@@ -241,8 +308,18 @@ export class Space {
     this._emitChangeEvents(nodeId, node, { origin: 'local', notify, authorPub: this._identity.signingPub });
   }
 
-  async _handleIncoming({ nodeId, envelope, type, pub, xPub, name }) {
+  async _handleIncoming(message) {
+    const { nodeId, envelope, type, pub, xPub, name } = message;
     if (type === 'subscribe' || type === 'hello') return; // both are relay-bound, not peer-bound (see _sendSubscribeRequest/_sendHello) - defensive no-op if one ever reaches here anyway.
+    if (type === 'grant') {
+      // See grant.js's own doc comment: verified independently here, never trusted just because
+      // it arrived - a relay (or a malicious peer on a peer-to-peer transport) forwarding a
+      // forged/mismatched grant is caught by _applyGrant()'s verifyGrant() call, same as any
+      // other unauthenticated-until-verified control message this Space accepts.
+      const applied = await this._applyGrant(message);
+      this._bus?.emit(applied ? 'debug.space.grant.received' : 'debug.space.grant.rejected', { nodeId: message.nodeId });
+      return;
+    }
     if (type === 'member-joined') {
       // REACTIVE membership growth - see @qu/space-transport's relay.js `addMember()` doc comment
       // for the full "why", and this class's own doc comment for the `space.member.joined` topic.
@@ -258,7 +335,7 @@ export class Space {
       this._bus?.emit('debug.space.write.remote.ignored', { nodeId }); // not subscribed to this Node - ordinary relay fan-out, not an error, see this file's own doc comment.
       return;
     }
-    const isAuthorized = this._isAuthorizedWriter(node.kindSchema);
+    const isAuthorized = this._isAuthorizedWriter(node.kindSchema, nodeId);
     if (!(await verifyEnvelope(envelope, isAuthorized))) {
       // envelope.pub is guaranteed well-formed here: verifyEnvelope() already base64-encoded it internally without throwing.
       this._bus?.emit('debug.space.write.remote.rejected', { nodeId, authorPub: QuCrypto.toBase64(envelope.pub) });

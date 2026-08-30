@@ -51,6 +51,24 @@
  * a new member is added. This is what makes dynamic membership REACTIVE
  * instead of something a client has to poll for - see that doc comment.
  *
+ * A FIFTH shape, GRANTS (`'named'`-mode write-ACL only - see
+ * `@qu/space-core`'s kind-schema.js on the three `acl.write` modes):
+ * `{type:'grant', nodeId, kind, ownerPub, granteePub, sig}`, sent by
+ * `Space.grantWriter()` and verified here with `verifyGrant()` (see
+ * `@qu/space-core`'s grant.js) BEFORE this relay adds `granteePub` to
+ * `grants` (this relay's own `nodeId -> Set<granteePubB64>`, 100% derived
+ * from verified grants, mirroring `Space`'s identically-shaped `_grants`)
+ * or forwards it onward - a forged grant (wrong owner, tampered
+ * `granteePub`, bad signature) is dropped exactly like a forged write,
+ * never trusted just because it arrived over an already-open connection.
+ * Once verified, it is REACTIVELY broadcast to every OTHER connected peer
+ * (same "no polling" shape as `member-joined` above) so every other
+ * `Space`'s own `_grants` learns the same fact independently - a relay
+ * restart loses this state exactly like it loses `presence`, which is
+ * fine: a `grant` is re-sent by the owner whenever they next add the
+ * writer's Space to a fresh session, same as `hello`/`subscribe` are
+ * re-sent on every reconnect already.
+ *
  * PUSH ROUTING (the `notify`/`bus` pair): when a write's envelope carries
  * a `notify` hint (see `@qu/space-core`'s `envelope.js` - a small,
  * UNENCRYPTED `{topic, to?}` the AUTHOR attached, never something this
@@ -79,10 +97,11 @@
  *     / `.replayed` (`{nodeId, count}`).
  *   - `debug.relay.hello.received` / `.rejected` (`{reason}`).
  *   - `debug.relay.presence.online` / `.offline` (`{pub}`).
+ *   - `debug.relay.grant.received` (`{nodeId, granteePub}`) / `.rejected` (`{nodeId}`).
  * A relay never has a decryption key regardless of whether `bus` is wired
  * up - none of this exposes anything `seen`/`emitNotify()` don't already.
  */
-import { verifyEnvelope } from '@qu/space-core';
+import { verifyEnvelope, deriveOwnerNodeId, verifyGrant } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
 import { PresenceTracker } from './presence-tracker.js';
 
@@ -99,6 +118,9 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
   const memberPubs = new Set(memberList.map((m) => QuCrypto.toBase64(m.pub)));
   const isSpaceMember = (pubB64) => memberPubs.has(pubB64);
 
+  /** @type {Map<string, Set<string>>} nodeId -> Set<base64 Ed25519 pubkey> - 'named'-mode write-ACL state, 100% derived from verified `grant` messages (see grant.js) - see this file's own "GRANTS" doc comment below. */
+  const grants = new Map();
+
   /** @type {Array<{nodeId: string, envelope: object}>} Every envelope this relay ever handled, ciphertext/signature only - for tests to assert "no plaintext ever passed through here." */
   const seen = [];
 
@@ -109,6 +131,10 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     }
     if (message?.type === 'subscribe') {
       await handleSubscribe(fromPeerId, message);
+      return;
+    }
+    if (message?.type === 'grant') {
+      await handleGrant(fromPeerId, message);
       return;
     }
     await handleWrite(fromPeerId, message);
@@ -166,13 +192,72 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     bus?.emit('debug.relay.subscribe.replayed', { nodeId, count: envelopes.length });
   }
 
+  /**
+   * See this file's own "GRANTS" doc comment. Verified with `verifyGrant()`
+   * BEFORE anything here trusts it - a relay never adds a pubkey to
+   * `grants` on the strength of the message merely arriving, only on the
+   * strength of an owner's actual signature over it, exactly as strict as
+   * verifying a write's own signature.
+   */
+  async function handleGrant(fromPeerId, message) {
+    const { nodeId } = message ?? {};
+    if (!(await verifyGrant(message))) {
+      bus?.emit('debug.relay.grant.rejected', { nodeId });
+      return;
+    }
+    const granteePubB64 = QuCrypto.toBase64(message.granteePub);
+    if (!grants.has(nodeId)) grants.set(nodeId, new Set());
+    grants.get(nodeId).add(granteePubB64);
+    bus?.emit('debug.relay.grant.received', { nodeId, granteePub: granteePubB64 });
+
+    // Reactive, same pattern as addMember()'s 'member-joined' broadcast: every OTHER already-
+    // connected peer's own Space needs this exact grant too, to accept the new writer's future
+    // remote writes locally (see @qu/space-core's space.js `_isAuthorizedWriter()`/`_applyGrant()`).
+    for (const peerId of hub.peerIds()) {
+      if (peerId === fromPeerId) continue; // the owner already applied this to their own Space in grantWriter() - no need to echo it back.
+      hub.deliverTo(peerId, fromPeerId, message);
+    }
+  }
+
+  /**
+   * Builds this Node's write-ACL check for `verifyEnvelope()` - mirrors
+   * `@qu/space-core`'s own `Space._isAuthorizedWriter()` exactly (same
+   * three `acl.write` modes, see kind-schema.js), just relay-side: a
+   * `'members'` Kind is still gated on this relay's flat `memberList` (the
+   * PoC's only mode for that kind), while `'owner'`/`'named'` is 100%
+   * self-certifying/grant-derived - notably NOT gated on `memberList` at
+   * all, so an owner never needs to be registered as a "member" anywhere
+   * to write their own Node (see kind-schema.js's own doc comment on why
+   * that's the whole point of `deriveOwnerNodeId()`). A known, accepted
+   * scope boundary for now: such a not-otherwise-a-member owner's `hello`/
+   * `subscribe` requests still gate on `isSpaceMember` below, so presence/
+   * push and mirrored-history catch-up don't yet extend to them - revisit
+   * when subscriber-tracking (a later task) reshapes that gate anyway.
+   *
+   * `kindSchema?.acl?.write` anything OTHER than exactly `'owner'`/`'named'`
+   * (including a relay like `relay-server.js`'s own that deliberately never
+   * resolves a real Kind-Schema at all, see that file's own doc comment) is
+   * treated as `'members'` - the flat, always-available fallback ACL every
+   * relay can enforce with zero Kind-Schema knowledge, matching this
+   * relay's exact behavior before this Task existed.
+   */
+  function buildWriteAcl(kindSchema, nodeId) {
+    if (kindSchema?.acl?.write !== 'owner' && kindSchema?.acl?.write !== 'named') return isSpaceMember;
+    return async (pubB64) => {
+      const ownerNodeId = await deriveOwnerNodeId(QuCrypto.fromBase64(pubB64), kindSchema.kind);
+      if (ownerNodeId === nodeId) return true;
+      if (kindSchema.acl.write === 'named') return grants.get(nodeId)?.has(pubB64) ?? false;
+      return false;
+    };
+  }
+
   async function handleWrite(fromPeerId, { nodeId, envelope }) {
     const kindSchema = resolveKindSchema(nodeId);
     if (!kindSchema) {
       bus?.emit('debug.relay.write.rejected', { nodeId, reason: 'unknown-node' });
       return; // unknown Node - nothing to route to.
     }
-    if (!(await verifyEnvelope(envelope, isSpaceMember))) {
+    if (!(await verifyEnvelope(envelope, buildWriteAcl(kindSchema, nodeId)))) {
       bus?.emit('debug.relay.write.rejected', { nodeId, reason: 'bad-signature' });
       return; // bad/foreign signature - drop, never forwarded or mirrored.
     }

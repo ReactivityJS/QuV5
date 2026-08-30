@@ -133,12 +133,15 @@ export async function sealPublicUpdate(update, sender, notify = null) {
  * file's own doc comment - `verifyEnvelope()` returning `true` for one
  * means exactly "authentic," never "confidential.")
  * @param {object} envelope
- * @param {(pubBase64: string) => boolean} isAuthorizedWriter - Kind-Schema's write-ACL check.
+ * @param {(pubBase64: string) => boolean|Promise<boolean>} isAuthorizedWriter - Kind-Schema's
+ *   write-ACL check. May be sync (`'members'` mode - a flat Set lookup) or async (`'owner'`/
+ *   `'named'` mode - `deriveOwnerNodeId()` involves a SHA-256 digest, see kind-schema.js) - always
+ *   `await`ed here so callers never need to care which.
  * @returns {Promise<boolean>}
  */
 export async function verifyEnvelope(envelope, isAuthorizedWriter) {
   const pubB64 = QuCrypto.toBase64(envelope.pub);
-  if (!isAuthorizedWriter(pubB64)) return false;
+  if (!(await isAuthorizedWriter(pubB64))) return false;
   const notifyBytes = encodeNotify(envelope.notify ?? null);
   const sigInput =
     envelope.mode === 'public' ? concatBytes(envelope.data, notifyBytes) : concatBytes(concatBytes(envelope.iv, envelope.ct), notifyBytes);

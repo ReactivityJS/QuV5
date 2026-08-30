@@ -46,7 +46,7 @@ test('B receives A\'s data from the relay\'s mirror even though A is offline by 
   const httpServer = createServer();
   const wss = new WebSocketServer({ server: httpServer });
   const hub = createWsServerHub(wss);
-  createRelayForwarder({ hub, members, resolveKindSchema: () => true, storage: relayMirror });
+  createRelayForwarder({ hub, members, resolveKindSchema: () => noteKind, storage: relayMirror });
   await new Promise((resolve) => httpServer.listen(0, resolve));
   const url = `ws://127.0.0.1:${httpServer.address().port}`;
 
@@ -86,7 +86,7 @@ test('a relay with no storage adapter (pure live pass-through) does not answer s
   const httpServer = createServer();
   const wss = new WebSocketServer({ server: httpServer });
   const hub = createWsServerHub(wss);
-  createRelayForwarder({ hub, members, resolveKindSchema: () => true }); // no `storage` - live-only relay, by choice.
+  createRelayForwarder({ hub, members, resolveKindSchema: () => noteKind }); // no `storage` - live-only relay, by choice.
   await new Promise((resolve) => httpServer.listen(0, resolve));
   const url = `ws://127.0.0.1:${httpServer.address().port}`;
 
@@ -123,7 +123,7 @@ test('the exact relay-server.js shape (real disk file store, relay process resta
       const httpServer = createServer();
       const wss = new WebSocketServer({ server: httpServer });
       const hub = createWsServerHub(wss);
-      createRelayForwarder({ hub, members, resolveKindSchema: () => true, storage: createFileStore(dataDir) });
+      createRelayForwarder({ hub, members, resolveKindSchema: () => noteKind, storage: createFileStore(dataDir) });
       await new Promise((resolve) => httpServer.listen(0, resolve));
       const url = `ws://127.0.0.1:${httpServer.address().port}`;
 
@@ -141,7 +141,7 @@ test('the exact relay-server.js shape (real disk file store, relay process resta
     const httpServer2 = createServer();
     const wss2 = new WebSocketServer({ server: httpServer2 });
     const hub2 = createWsServerHub(wss2);
-    createRelayForwarder({ hub: hub2, members, resolveKindSchema: () => true, storage: createFileStore(dataDir) });
+    createRelayForwarder({ hub: hub2, members, resolveKindSchema: () => noteKind, storage: createFileStore(dataDir) });
     await new Promise((resolve) => httpServer2.listen(0, resolve));
     const url2 = `ws://127.0.0.1:${httpServer2.address().port}`;
 

@@ -42,7 +42,7 @@ test('two peers sync a Node through a real WebSocket relay on a real port', asyn
   const httpServer = createServer();
   const wss = new WebSocketServer({ server: httpServer });
   const hub = createWsServerHub(wss);
-  const relay = createRelayForwarder({ hub, members, resolveKindSchema: () => true });
+  const relay = createRelayForwarder({ hub, members, resolveKindSchema: () => noteKind });
 
   await new Promise((resolve) => httpServer.listen(0, resolve)); // port 0 = OS picks a free port
   const port = httpServer.address().port;

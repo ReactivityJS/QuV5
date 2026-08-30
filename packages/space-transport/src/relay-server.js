@@ -42,7 +42,14 @@
  * (`resolveKindSchema: () => true` below) - it forwards/mirrors any Node
  * id, gated only by the envelope's write signature being one of `members`,
  * not by a per-Kind ACL (the space-wide `members` list IS the write-ACL
- * for every Kind in this PoC - see kind-schema.js's own doc comment).
+ * for every Kind in this PoC - see kind-schema.js's own doc comment). A
+ * direct consequence (see relay.js's own `buildWriteAcl()` doc comment):
+ * an `acl.write: 'owner'`/`'named'` Kind's self-certifying/grant-based ACL
+ * needs the REAL Kind-Schema (specifically its `kind` string, for
+ * `deriveOwnerNodeId()`) to enforce - a relay stood up this way can only
+ * ever fall back to flat `members` ACL, never `'owner'`/`'named'`. Run
+ * `createRelayForwarder()` directly with a real `resolveKindSchema` (as
+ * every test in `test/` does) to get that enforcement.
  */
 import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
