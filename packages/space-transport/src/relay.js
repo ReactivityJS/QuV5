@@ -209,14 +209,20 @@
  */
 import { verifyEnvelope, deriveOwnerNodeId, verifyGrant } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
+import { createMemoryStore } from '@qu/space-storage';
 import { PresenceTracker } from './presence-tracker.js';
 
 const HELLO_DOMAIN = 'qu-space-hello-v1'; // MUST match @qu/space-core's own HELLO_DOMAIN (space.js) - duplicated as a literal rather than imported, to keep this package's only @qu/space-core dependency at "the same version, not a live shared module" (matches this file's own already-existing `verifyEnvelope` import boundary).
 
 /**
- * @param {{hub: object, members: Array<{pub: Uint8Array}>, resolveKindSchema: (nodeId: string) => object, storage?: object, bus?: import('@qu/events').EventBus, presence?: PresenceTracker}} params
+ * @param {{hub: object, members: Array<{pub: Uint8Array}>, resolveKindSchema: (nodeId: string) => object, storage?: object, volatileStorage?: object, bus?: import('@qu/events').EventBus, presence?: PresenceTracker}} params
+ *   `volatileStorage` - see this file's own "PERSISTENCE TIERS" doc comment: the mirror for any Kind whose Kind-Schema declares `persistence: 'volatile'` (e.g. `@qu/space-core`'s `presenceKind`), regardless of what `storage` above is. Defaults to a private `@qu/space-storage` `createMemoryStore()` - a fresh one per `createRelayForwarder()` call, never shared across relay instances by accident.
  */
-export function createRelayForwarder({ hub, members, resolveKindSchema, storage = null, bus = null, presence = new PresenceTracker() }) {
+export function createRelayForwarder({ hub, members, resolveKindSchema, storage = null, volatileStorage = createMemoryStore(), bus = null, presence = new PresenceTracker() }) {
+  /** See this file's own "PERSISTENCE TIERS" doc comment. */
+  function storageFor(kindSchema) {
+    return kindSchema?.persistence === 'volatile' ? volatileStorage : storage;
+  }
   // A local, mutable copy - addMember() (see the returned API, and this
   // file's own "DYNAMIC MEMBERSHIP" doc comment below) appends to THIS
   // array/Set, never to the caller's original `members` argument.
@@ -326,8 +332,9 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     subscribers.get(nodeId).add(fromPeerId);
     bus?.emit('debug.relay.subscribe.received', { nodeId, pub: pubB64 });
 
-    if (!storage) return; // nothing to catch up on - but the subscription itself is tracked either way, live pushes still reach this peer from here on.
-    const envelopes = await storage.load(nodeId);
+    const nodeStorage = storageFor(kindSchema);
+    if (!nodeStorage) return; // nothing to catch up on - but the subscription itself is tracked either way, live pushes still reach this peer from here on.
+    const envelopes = await nodeStorage.load(nodeId);
     for (const envelope of envelopes) {
       hub.deliverTo(fromPeerId, 'relay', { nodeId, envelope });
     }
@@ -452,17 +459,18 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     bus?.emit('debug.relay.write.received', { nodeId, kind: kindSchema.kind });
 
     seen.push({ nodeId, envelope });
-    if (storage) {
+    const nodeStorage = storageFor(kindSchema);
+    if (nodeStorage) {
       // A `snapshot: true` envelope (see @qu/space-core's envelope.js "SNAPSHOT/COMPACTION" doc
       // comment) REPLACES this Node's entire mirrored log instead of appending to it - the actual
       // fix for a mirror that otherwise grows forever, even past content Yjs itself already
       // garbage-collected in memory. Authorized identically to any other write (verifyEnvelope()
       // above already ran the SAME ACL check) - no separate "who may compact" concept exists.
       if (envelope.snapshot) {
-        await storage.replace(nodeId, [envelope]);
+        await nodeStorage.replace(nodeId, [envelope]);
         mirrorCount.set(nodeId, 1);
       } else {
-        await storage.append(nodeId, envelope); // the mirror - present even if the author disconnects the instant after this line runs.
+        await nodeStorage.append(nodeId, envelope); // the mirror - present even if the author disconnects the instant after this line runs.
         mirrorCount.set(nodeId, (mirrorCount.get(nodeId) ?? 0) + 1);
       }
       bus?.emit('debug.relay.write.mirrored', { nodeId, snapshot: envelope.snapshot === true });

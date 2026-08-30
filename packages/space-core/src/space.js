@@ -129,19 +129,50 @@ const REMOTE_ORIGIN = Symbol('space-core:remote-update');
 /** Signed by a Space on connect to prove key possession for presence purposes - see this file's own doc comment. Exported so `@qu/space-transport`'s relay verifies against the exact same bytes. */
 export const HELLO_DOMAIN = 'qu-space-hello-v1';
 
+/**
+ * The zero-config default for a `persistence: 'volatile'` Kind's storage
+ * (see kind-schema.js's own doc comment) when a caller doesn't hand
+ * `Space` a `volatileStorage` of their own - same tiny in-memory shape as
+ * `@qu/space-storage`'s `createMemoryStore()` (this file can't import that
+ * package directly: `@qu/space-storage` itself depends on `@qu/space-core`,
+ * so the dependency would be circular) - a caller who wants volatile Kinds
+ * to live somewhere OTHER than plain process memory (e.g. a browser's
+ * `sessionStorage`, cleared when the tab closes rather than the process
+ * exiting) passes their own adapter as `volatileStorage` instead; this is
+ * only ever the fallback for "didn't ask for anything specific."
+ */
+function createInMemoryVolatileStore() {
+  const log = new Map();
+  return {
+    async append(nodeId, envelope) {
+      const list = log.get(nodeId) ?? [];
+      list.push(envelope);
+      log.set(nodeId, list);
+    },
+    async load(nodeId) {
+      return [...(log.get(nodeId) ?? [])];
+    },
+    async replace(nodeId, envelopes) {
+      log.set(nodeId, [...envelopes]);
+    },
+  };
+}
+
 export class Space {
   /**
-   * @param {{identity: object, members: Array<{pub: Uint8Array, xPub: Uint8Array}>, transport: object, storage?: object, bus?: import('@qu/events').EventBus}} params
+   * @param {{identity: object, members: Array<{pub: Uint8Array, xPub: Uint8Array}>, transport: object, storage?: object, volatileStorage?: object, bus?: import('@qu/events').EventBus}} params
    *   `identity` = `{signingKey, signingPub, xPrivateKey, xPublicKey}` (Ed25519 + X25519 pairs, e.g. from QuCrypto.generateKeypair()).
    *   `members` = every space member's public keys (encryption recipients + write-ACL, kept simple for the PoC - see kind-schema.js).
-   *   `storage` = optional; omitting it is the "flüchtig/memory-only" tier (see docs/v5-space-core-guide.md) - a Node still syncs live, nothing survives a reload.
+   *   `storage` = optional; omitting it is the "flüchtig/memory-only" tier (see docs/v5-space-core-guide.md) - a Node still syncs live, nothing survives a reload. Used for every Kind EXCEPT a `persistence: 'volatile'` one (see `_storageFor()` below).
+   *   `volatileStorage` = optional; the storage used for a `persistence: 'volatile'` Kind (e.g. `presenceKind`, see `presence.js`) regardless of what `storage` above is - defaults to a private in-memory adapter if omitted. Pass your own (e.g. a `sessionStorage`-backed one in a browser) to control exactly how/where "ephemeral" data lives, same swappable-adapter idea `storage` already offers for durable data.
    *   `bus` = optional - see this file's own doc comment for what gets emitted on it.
    */
-  constructor({ identity, members, transport, storage = null, bus = null }) {
+  constructor({ identity, members, transport, storage = null, volatileStorage = createInMemoryVolatileStore(), bus = null }) {
     this._identity = identity;
     this._members = [...members]; // own copy - addMember() (see below) must never mutate the caller's own array out from under them.
     this._transport = transport;
     this._storage = storage;
+    this._volatileStorage = volatileStorage;
     this._bus = bus;
     /** @type {Map<string, SpaceNode>} */
     this._nodes = new Map();
@@ -425,14 +456,26 @@ export class Space {
         ? await sealPublicUpdate(snapshotBytes, this._identity, null, true)
         : await sealUpdate(snapshotBytes, this._identity, this._recipientXPubKeys(), null, true);
 
-    await this._storage?.replace(id, [envelope]);
+    await this._storageFor(kindSchema)?.replace(id, [envelope]);
     this._transport.send({ nodeId: id, envelope });
     this._bus?.emit('debug.space.compact.sent', { nodeId: id, bytes: snapshotBytes.length });
   }
 
+  /**
+   * Which storage adapter a Kind's writes go through - see kind-schema.js's
+   * own `persistence` doc comment. `'volatile'` ALWAYS resolves to
+   * something (a caller-supplied `volatileStorage` or the private default
+   * created in this file's own constructor) - only the `'durable'` (the
+   * default, unnamed) tier can be `null` (the pre-existing "flüchtig/
+   * memory-only whole Space" behavior, unchanged).
+   */
+  _storageFor(kindSchema) {
+    return kindSchema?.persistence === 'volatile' ? this._volatileStorage : this._storage;
+  }
+
   /** Replays a Node's envelope history from storage (see @qu/space-storage) - the "durable persistence survives a reload" path. */
   async loadNode(id, kindSchema) {
-    if (!this._storage) throw new Error('Space.loadNode: no storage adapter mounted');
+    if (!this._storageFor(kindSchema)) throw new Error('Space.loadNode: no storage adapter mounted');
     const doc = new Y.Doc();
     const node = this._attach(id, kindSchema, doc, { skipReSeal: true });
     await this._hydrateFromStorage(id, kindSchema, doc);
@@ -442,7 +485,7 @@ export class Space {
 
   /** Shared by `loadNode()` and `useNode()`: applies every already-verified-on-write envelope this Space's OWN storage holds for `id` into `doc`, oldest first. Never trusts storage blindly - a tampered/foreign entry is skipped, same as any other unverified envelope. */
   async _hydrateFromStorage(id, kindSchema, doc) {
-    const envelopes = await this._storage.load(id);
+    const envelopes = await this._storageFor(kindSchema).load(id);
     const isAuthorized = this._isAuthorizedWriter(kindSchema, id);
     for (const envelope of envelopes) {
       if (!(await verifyEnvelope(envelope, isAuthorized))) continue;
@@ -494,7 +537,7 @@ export class Space {
     if (!node) {
       const doc = new Y.Doc();
       node = this._attach(id, kindSchema, doc, { skipReSeal: true });
-      if (this._storage) await this._hydrateFromStorage(id, kindSchema, doc);
+      if (this._storageFor(kindSchema)) await this._hydrateFromStorage(id, kindSchema, doc);
       node._skipReSeal = false;
       await this._sendSubscribeRequest(id); // awaited (unlike subscribeNode()'s own fire-and-forget) - useNode() already returns a Promise, so a caller awaiting it can rely on the subscribe request having actually left by the time it resolves.
     }
@@ -534,7 +577,7 @@ export class Space {
       visibility === 'public'
         ? await sealPublicUpdate(update, this._identity, notify)
         : await sealUpdate(update, this._identity, this._recipientXPubKeys(), notify);
-    await this._storage?.append(nodeId, envelope);
+    await this._storageFor(node.kindSchema)?.append(nodeId, envelope);
     this._transport.send({ nodeId, envelope });
     this._bus?.emit('debug.space.write.local', { nodeId, kind: node.kind, bytes: update.length, notify });
     this._emitChangeEvents(nodeId, node, { origin: 'local', notify, authorPub: this._identity.signingPub });
@@ -587,8 +630,8 @@ export class Space {
     // REPLACES this Space's own local storage log for the Node instead of appending to it - the
     // same compaction that just happened for the relay's mirror also has to happen for every
     // OTHER peer's own durable copy, or the point of compacting would only ever apply to one place.
-    if (envelope.snapshot) await this._storage?.replace(nodeId, [envelope]);
-    else await this._storage?.append(nodeId, envelope);
+    if (envelope.snapshot) await this._storageFor(node.kindSchema)?.replace(nodeId, [envelope]);
+    else await this._storageFor(node.kindSchema)?.append(nodeId, envelope);
     this._bus?.emit('debug.space.write.remote.accepted', { nodeId, kind: node.kind, authorPub: QuCrypto.toBase64(envelope.pub), bytes: bytes.length });
     this._emitChangeEvents(nodeId, node, { origin: 'remote', notify: envelope.notify ?? null, authorPub: envelope.pub });
   }

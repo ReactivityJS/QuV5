@@ -80,22 +80,45 @@
  * actually emits documented in exactly one place. Omit entirely for a Kind
  * that never attaches notify hints (the default) - `notify` is then
  * rejected outright, not silently dropped.
+ *
+ * `persistence` (optional, default `'durable'`) says WHICH storage tier a
+ * write to a Node of this Kind mirrors/hydrates through - `'durable'` keeps
+ * using whatever adapter a `Space`/relay was configured with (unchanged
+ * from before this existed), `'volatile'` routes it to a SEPARATE,
+ * memory-only adapter instead (see space.js's `_storageFor()` and
+ * `@qu/space-transport`'s relay.js "PERSISTENCE TIERS" doc comment) - never
+ * to disk, gone the moment the process holding it exits. This is the same
+ * "the storage adapter decides durability" idea `@qu/space-storage`'s own
+ * memory/durable/file adapters already embody at the whole-space level,
+ * now selectable PER KIND: a Kind whose data is inherently short-lived and
+ * high-churn (a presence/typing signal, see `presence.js`) declares
+ * `persistence: 'volatile'` and gets that behavior through the EXACT SAME
+ * write/subscribe/mirror code path every other Kind uses - never a
+ * bespoke protocol message, never something the transport layer treats
+ * differently. A caller who wants even DURABLE Kinds to only last as long
+ * as, say, a browser tab does so by handing `Space` a `sessionStorage`-
+ * backed adapter as `storage` itself - this flag is about which of a
+ * caller's OWN two adapters a Kind uses, not a hardcoded lifetime.
  */
 import { QuCrypto } from '@qu/core';
 
 const SHAPES = new Set(['atomic', 'text', 'list']);
 const VISIBILITIES = new Set(['encrypted', 'public']);
 const ACL_MODES = new Set(['members', 'owner', 'named']);
+const PERSISTENCE_MODES = new Set(['durable', 'volatile']);
 
 /** Prefix for a self-certifying owner/named Node id - see `deriveOwnerNodeId()`. Deliberately the same "~" convention Qu's earlier path-based identity Nodes used. */
 const OWNER_NODE_PREFIX = '~';
 
 /**
  * @param {string} kind
- * @param {{fields: Record<string, {shape: 'atomic'|'text'|'list', visibility?: 'encrypted'|'public'}>, acl?: {write?: 'members'|'owner'|'named'}, notifyTopics?: string[]}} def
+ * @param {{fields: Record<string, {shape: 'atomic'|'text'|'list', visibility?: 'encrypted'|'public'}>, acl?: {write?: 'members'|'owner'|'named'}, notifyTopics?: string[], persistence?: 'durable'|'volatile'}} def
  */
-export function defineKind(kind, { fields, acl = { write: 'members' }, notifyTopics = [] }) {
+export function defineKind(kind, { fields, acl = { write: 'members' }, notifyTopics = [], persistence = 'durable' }) {
   if (!kind || typeof kind !== 'string') throw new Error('defineKind: "kind" must be a non-empty string');
+  if (!PERSISTENCE_MODES.has(persistence)) {
+    throw new Error(`defineKind("${kind}"): persistence must be one of ${[...PERSISTENCE_MODES].join(' | ')}, got "${persistence}"`);
+  }
 
   const normalizedFields = {};
   for (const [name, decl] of Object.entries(fields ?? {})) {
@@ -124,6 +147,7 @@ export function defineKind(kind, { fields, acl = { write: 'members' }, notifyTop
     fields: Object.freeze(normalizedFields),
     acl: Object.freeze({ ...acl }),
     notifyTopics: Object.freeze([...notifyTopics]),
+    persistence,
     // A 'members'-Kind Node's meta stays 'encrypted' (pre-existing behavior, unchanged); an 'owner'/'named'
     // identity Node's meta is 'public' automatically - see this file's own doc comment.
     metaVisibility: acl.write === 'members' ? 'encrypted' : 'public',
