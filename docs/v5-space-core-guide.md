@@ -454,10 +454,26 @@ real write-ACL before anything happens with it.
 ```sh
 # From the repo root:
 docker build -f packages/space-transport/Dockerfile -t qu-space-relay .
+
+# Or directly from GitHub, no local clone needed - context is the WHOLE
+# repo at that ref, -f just points at the Dockerfile within it:
+docker build -f packages/space-transport/Dockerfile -t qu-space-relay \
+  https://github.com/ReactivityJS/QuV5.git#main
+
 docker run -d -p 8081:8081 \
   -v qu-space-relay-data:/data \
   qu-space-relay
 ```
+
+**Do NOT** use Docker's git `#ref:subdir` context shortcut here (e.g.
+`...QuV5.git#main:packages/space-transport/`) — that makes
+`packages/space-transport/` itself the entire build context, so every
+repo-root-relative path in the Dockerfile breaks, AND npm workspaces can
+no longer resolve `@qu/core`/`@qu/space-core`/`@qu/space-storage` as local
+sibling packages (they aren't published to the npm registry). This is
+inherent to building a workspace-dependent package out of a monorepo, not
+a path bug fixable in the Dockerfile — the repo root must always be the
+build context; `-f` is what selects this particular Dockerfile within it.
 
 That's a complete, runnable relay — no `QU_MEMBERS_JSON` required (see §4
 on why: it's optional, only gates `'members'`-mode Kinds, and the relay's

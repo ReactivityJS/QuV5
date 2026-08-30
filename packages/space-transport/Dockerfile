@@ -6,9 +6,31 @@
 # anything. No client apps/UI are built or served here - see
 # docs/v5-space-core-guide.md for what this relay does and doesn't do.
 #
-# Build from the REPO ROOT (npm workspaces need the whole tree to resolve
-# @qu/core/@qu/space-* via their workspace symlinks):
+# Build context MUST be the REPO ROOT, not this directory - npm workspaces
+# (see the root package.json's "workspaces": ["packages/*"]) resolve
+# @qu/core/@qu/space-* as LOCAL sibling packages, not from the npm
+# registry (they aren't published there) - `npm ci` needs the whole tree
+# present in the build context to do that at all, and every COPY/CMD path
+# below is written relative to repo root on purpose.
+#
+# Locally, from the repo root:
 #   docker build -f packages/space-transport/Dockerfile -t qu-space-relay .
+#
+# Directly from GitHub, no local clone needed - context is the WHOLE repo
+# at that ref, `-f` just points at this Dockerfile within it:
+#   docker build -f packages/space-transport/Dockerfile -t qu-space-relay \
+#     https://github.com/ReactivityJS/QuV5.git#main
+#
+# DO NOT use Docker's git "#ref:subdir" context syntax with this
+# directory, e.g. `...QuV5.git#main:packages/space-transport/` - that
+# makes THIS DIRECTORY the entire build context, so every repo-root-
+# relative path below (and npm's own workspace resolution) breaks: the
+# sibling `@qu/core`/`@qu/space-core`/`@qu/space-storage` packages, and
+# even this Dockerfile's own `COPY .../docker-entrypoint.sh` line, simply
+# aren't there to find. This is an inherent property of building a
+# workspace-dependent package's image out of a monorepo, not something
+# fixable by adjusting paths in this file alone - the two commands above
+# are the only supported way to build this image.
 
 FROM node:22-alpine AS builder
 WORKDIR /app
