@@ -1,0 +1,20 @@
+{
+  "name": "@qu/app-core",
+  "version": "0.1.0",
+  "description": "Qu V5 App Runtime core: the Kind-Schemas for application content (qu-app manifest, qu-route-registry, qu-page, qu-template, qu-style), content-addressed Node ids, ContentResolver, a hash Router, AppRuntime (wires resolver+router+@qu/app-renderer together), and a small Dev/Admin API to bootstrap an empty Space into a working app. Built entirely on @qu/space-core's public API - never a Space/relay-side special case.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/space-core": "^0.1.0"
+  },
+  "devDependencies": {
+    "@qu/space-storage": "^0.1.0",
+    "@qu/space-transport": "^0.1.0",
+    "jsdom": "^25.0.1"
+  },
+  "license": "MIT"
+}

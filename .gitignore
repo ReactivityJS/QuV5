@@ -6,6 +6,11 @@ dist/
 # demo runtime state - private keys and mirrored chat data, local-only
 demo/.identities/
 demo/.data/
+demo/.app-shell-identities/
+demo/.app-shell-data/
+
+# generated at demo/app-shell-relay.mjs startup (real app-admin pubkey baked in) - see demo/app-shell-web/build.mjs
+demo/app-shell-web/index.html
 
 # relay deployment data (see docs/v5-space-core-guide.md §5)
 relay-data/

@@ -1,0 +1,22 @@
+{
+  "name": "@qu/app-shell",
+  "version": "0.1.0",
+  "description": "Qu V5 App Shell: the minimal, application-agnostic bootstrap kernel (docs/app-shell-arbeitsauftrag.md §3/§4) that a Relay serves as its whole static app. identity.js generates/loads a browser identity and joins a relay's Space; boot.js runs the boot sequence (identity -> Space -> @qu/app-core's AppRuntime -> @qu/app-renderer render, on every hash route change); shell.js is the single <qu-app-shell> custom element index.html mounts - a DOM marker + lifecycle hook, not a component system. Knows no concrete page, template, or application; everything else is loaded from the Qu Space.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./shell": "./src/shell.js"
+  },
+  "dependencies": {
+    "@qu/app-core": "^0.1.0",
+    "@qu/app-renderer": "^0.1.0",
+    "@qu/core": "^0.1.0",
+    "@qu/space-core": "^0.1.0",
+    "@qu/space-transport": "^0.1.0"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,30 @@
+<!--
+  THE MINIMAL, APPLICATION-AGNOSTIC ENTRY POINT a Relay serves (docs/
+  app-shell-arbeitsauftrag.md §3): no concrete page, template, or app
+  content - only the App Shell's own mountpoint and its ONE fixed script.
+  `app-admin-pub` is the one thing that says WHICH application's content to
+  load from the Space (see @qu/app-core's kinds.js's own doc comment on why
+  that's a pubkey, not a name) - set per deployment, never hardcoded in the
+  shell itself. `relay-url` defaults to this same origin's WebSocket
+  endpoint if omitted (see ../src/shell.js).
+
+  A real deployment bundles src/shell.js the same way demo/web/build.mjs
+  already bundles demo/web/main.js today (see @qu/space-transport's
+  relay-server.js "SERVES AN APP" doc comment) and points STATIC_FILES at
+  the result - this file is the reference markup for that bundle's own
+  index.html, not itself wired into the relay yet (see this repo's own
+  docs/app-shell-arbeitsauftrag.md §3 for that next step).
+-->
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Qu</title>
+  </head>
+  <body>
+    <qu-app-shell app-admin-pub="REPLACE-WITH-THE-APP-OWNER-PUBKEY-BASE64"></qu-app-shell>
+
+    <script type="module" src="/qu/app-shell.js"></script>
+  </body>
+</html>

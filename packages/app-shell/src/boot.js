@@ -1,0 +1,34 @@
+/**
+ * BOOT — the back half of the boot sequence (docs/app-shell-arbeitsauftrag.md
+ * §4, from "App Manifest laden" onward): wires an already-constructed
+ * `Space` to `@qu/app-core`'s `AppRuntime`/`HashRouter` and
+ * `@qu/app-renderer`'s `renderPage()`, so every hash-route change re-resolves
+ * and re-renders. The FRONT half of the boot sequence (Identity -> Space ->
+ * Storage -> Transport/Relay - docs' own diagram) is deliberately NOT this
+ * function's job: it needs real network/`localStorage` glue (see
+ * `identity.js`/`shell.js`), which would make this untestable without a
+ * live relay. Callers (a real browser via `shell.js`, or a test/demo via an
+ * in-process `Space`) construct the `Space` however is appropriate for
+ * them and hand it here - this function knows nothing about HOW it was
+ * built, only that it behaves like one.
+ */
+import { AppRuntime, HashRouter } from '@qu/app-core';
+import { renderPage } from '@qu/app-renderer';
+
+/**
+ * @param {{space: import('@qu/space-core').Space, appAdminPub: Uint8Array, mountEl: Element, window: {location: object, document: Document, addEventListener: Function, removeEventListener: Function}, styleId?: string, resolveTimeout?: number}} params
+ *   `resolveTimeout` - how long to wait for a route's content to sync before giving up and rendering the "not found" fallback (see @qu/app-core's `ContentResolver`'s own `timeout` param); defaults to that resolver's own default.
+ * @returns {{runtime: AppRuntime, router: HashRouter}} - `router.stop()` tears down the hashchange listener; nothing else here needs explicit cleanup.
+ */
+export function startApp({ space, appAdminPub, mountEl, window, styleId, resolveTimeout }) {
+  const runtime = new AppRuntime(space, { appAdminPub });
+  const router = new HashRouter({
+    window,
+    onChange: async (route) => {
+      const plan = await runtime.resolveRoute(route, resolveTimeout ? { timeout: resolveTimeout } : undefined);
+      renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+    },
+  });
+  router.start();
+  return { runtime, router };
+}

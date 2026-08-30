@@ -94,6 +94,12 @@
  *   - `debug.space.write.remote.ignored` - an incoming envelope arrived for
  *     a Node this Space never subscribed to (ordinary relay fan-out, not
  *     an error) and was silently ignored, `{nodeId}`.
+ *   - `debug.space.write.remote.undecryptable` - an incoming envelope was
+ *     authentic and ACL-authorized (passed `verifyEnvelope()`) but this
+ *     identity isn't among ITS OWN recipient list (`openUpdate()` throwing -
+ *     see envelope.js's own doc comment) - routinely expected for history
+ *     sealed before this identity became a Space member, never applied to
+ *     the doc, `{nodeId}`.
  *   - `debug.space.subscribe.sent` / `debug.space.unsubscribe.sent` /
  *     `debug.space.hello.sent` - the signed control messages this Space
  *     sends on its own, `{nodeId}` / `{nodeId}` / `{}`.
@@ -483,16 +489,36 @@ export class Space {
     return node;
   }
 
-  /** Shared by `loadNode()` and `useNode()`: applies every already-verified-on-write envelope this Space's OWN storage holds for `id` into `doc`, oldest first. Never trusts storage blindly - a tampered/foreign entry is skipped, same as any other unverified envelope. */
+  /**
+   * Shared by `loadNode()` and `useNode()`: applies every already-verified-on-write envelope this
+   * Space's OWN storage holds for `id` into `doc`, oldest first. Never trusts storage blindly - a
+   * tampered/foreign entry is skipped, same as any other unverified envelope.
+   *
+   * An AUTHENTIC, ACL-authorized envelope this identity simply isn't a decryption RECIPIENT of
+   * (`openUpdate()` throwing - see that function's own doc comment) is likewise skipped, not
+   * fatal: this happens routinely for history sealed before this identity became a Space member -
+   * exactly the same "not a recipient -> skip" outcome `field.js`'s own `AtomicField.get()` already
+   * gives per-field, just at the whole-envelope level. Skipping here specifically (a `for` loop
+   * over possibly many envelopes) matters more than at `_handleIncoming()`'s own single-envelope
+   * call site below: an uncaught throw here would abort hydrating every envelope AFTER the
+   * unreadable one too, not just that one - a real, previously-unhandled bug this Task fixes.
+   */
   async _hydrateFromStorage(id, kindSchema, doc) {
     const envelopes = await this._storageFor(kindSchema).load(id);
     const isAuthorized = this._isAuthorizedWriter(kindSchema, id);
+    let skipped = 0;
     for (const envelope of envelopes) {
       if (!(await verifyEnvelope(envelope, isAuthorized))) continue;
-      const bytes = await openUpdate(envelope, this._identity);
+      let bytes;
+      try {
+        bytes = await openUpdate(envelope, this._identity);
+      } catch {
+        skipped++;
+        continue;
+      }
       Y.applyUpdate(doc, bytes, REMOTE_ORIGIN);
     }
-    this._bus?.emit('debug.space.load', { nodeId: id, envelopeCount: envelopes.length });
+    this._bus?.emit('debug.space.load', { nodeId: id, envelopeCount: envelopes.length, skipped });
   }
 
   /**
@@ -624,7 +650,20 @@ export class Space {
       this._bus?.emit('debug.space.write.remote.rejected', { nodeId, authorPub: QuCrypto.toBase64(envelope.pub) });
       return; // bad/foreign signature - reject before it ever touches the CRDT.
     }
-    const bytes = await openUpdate(envelope, this._identity);
+    let bytes;
+    try {
+      bytes = await openUpdate(envelope, this._identity);
+    } catch {
+      // Authentic, ACL-authorized write this identity simply isn't a decryption RECIPIENT of -
+      // e.g. history sealed before this identity became a Space member (the writer's own
+      // recipient list at write time never included it - see envelope.js's own doc comment on
+      // `openUpdate()` throwing for exactly this case). Expected, not an error: skip it, same
+      // "not a recipient -> not applied" outcome `_hydrateFromStorage()`'s own loop above now
+      // gives too. Previously UNCAUGHT here - a real bug (an unhandled rejection on every such
+      // envelope, and the write silently never reaching this peer's own doc with no diagnostic).
+      this._bus?.emit('debug.space.write.remote.undecryptable', { nodeId });
+      return;
+    }
     Y.applyUpdate(node.doc, bytes, REMOTE_ORIGIN);
     // A `snapshot: true` envelope (see envelope.js's own "SNAPSHOT/COMPACTION" doc comment)
     // REPLACES this Space's own local storage log for the Node instead of appending to it - the
