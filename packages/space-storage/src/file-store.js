@@ -13,12 +13,13 @@
  * that motivated that module for the WebSocket wire, applies identically
  * to a JSON file on disk.
  *
- * Deliberately simple for this PoC: append-only, no compaction, no
- * concurrent-writer locking (fine for one relay process owning its own
- * data directory, the only deployment shape this PoC targets - see the
- * guide's "known gaps" section for what a production version would add).
+ * Deliberately simple for this PoC: append-only outside of an explicit
+ * `replace()` call (see below), no concurrent-writer locking (fine for one
+ * relay process owning its own data directory, the only deployment shape
+ * this PoC targets - see the guide's "known gaps" section for what a
+ * production version would add).
  */
-import { mkdir, appendFile, readFile } from 'node:fs/promises';
+import { mkdir, appendFile, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { encodeForWire, decodeFromWire } from '@qu/space-core';
 
@@ -53,6 +54,13 @@ export function createFileStore(dataDir) {
         .split('\n')
         .filter(Boolean)
         .map((line) => decodeFromWire(JSON.parse(line)));
+    },
+
+    /** Compaction: OVERWRITES `nodeId`'s entire file with `envelopes` (typically one `snapshot: true` envelope - see @qu/space-core's envelope.js "SNAPSHOT/COMPACTION" doc comment) - the one place this adapter does anything other than append. */
+    async replace(nodeId, envelopes) {
+      await mkdir(dataDir, { recursive: true });
+      const lines = envelopes.map((envelope) => `${JSON.stringify(encodeForWire(envelope))}\n`).join('');
+      await writeFile(fileFor(nodeId), lines, 'utf8');
     },
   };
 }

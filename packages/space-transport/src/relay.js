@@ -127,8 +127,10 @@
  * relay handles, not just the ones that end up notify-routed:
  *   - `debug.relay.write.received` / `.rejected` (`{nodeId, reason}`,
  *     `reason` one of `'unknown-node'`/`'bad-signature'`) / `.forwarded`
- *     (`{nodeId, toPeerIds}`) / `.mirrored` (`{nodeId}`, only when a
- *     `storage` adapter is configured).
+ *     (`{nodeId, toPeerIds}`) / `.mirrored` (`{nodeId, snapshot}`, only when
+ *     a `storage` adapter is configured - `snapshot: true` means this
+ *     envelope REPLACED the Node's whole mirrored log, see "SNAPSHOT/
+ *     COMPACTION" in @qu/space-core's envelope.js).
  *   - `debug.relay.subscribe.received` / `.rejected` (`{nodeId, reason}`)
  *     / `.replayed` (`{nodeId, count}`).
  *   - `debug.relay.unsubscribe.received` (`{nodeId, pub}`) / `.rejected`
@@ -361,8 +363,14 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
 
     seen.push({ nodeId, envelope });
     if (storage) {
-      await storage.append(nodeId, envelope); // the mirror - present even if the author disconnects the instant after this line runs.
-      bus?.emit('debug.relay.write.mirrored', { nodeId });
+      // A `snapshot: true` envelope (see @qu/space-core's envelope.js "SNAPSHOT/COMPACTION" doc
+      // comment) REPLACES this Node's entire mirrored log instead of appending to it - the actual
+      // fix for a mirror that otherwise grows forever, even past content Yjs itself already
+      // garbage-collected in memory. Authorized identically to any other write (verifyEnvelope()
+      // above already ran the SAME ACL check) - no separate "who may compact" concept exists.
+      if (envelope.snapshot) await storage.replace(nodeId, [envelope]);
+      else await storage.append(nodeId, envelope); // the mirror - present even if the author disconnects the instant after this line runs.
+      bus?.emit('debug.relay.write.mirrored', { nodeId, snapshot: envelope.snapshot === true });
     }
 
     const toPeerIds = [];

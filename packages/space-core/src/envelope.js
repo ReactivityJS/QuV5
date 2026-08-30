@@ -64,6 +64,42 @@
  * `openUpdate()` below need to branch on exactly one thing to handle
  * either kind uniformly - no second code path anywhere else that has to
  * know which mode it's looking at.
+ *
+ * SNAPSHOT/COMPACTION (the `snapshot` flag, both `seal*()` functions'
+ * last param): NOT a third envelope shape - a snapshot is sealed with the
+ * exact same `sealUpdate()`/`sealPublicUpdate()` as any other write, the
+ * ONLY difference being what bytes it carries (a Yjs FULL-STATE encoding,
+ * see `Space.compactNode()` in space.js, instead of one incremental
+ * update) and this one extra signed bit. `Y.applyUpdate()` neither knows
+ * nor cares whether an update is incremental or full-state - applying
+ * either to a doc that already has some/all of that history is always
+ * safe (Yjs dedupes by per-client clock, silently ignoring anything
+ * already integrated) - so `snapshot` changes nothing about how a RECEIVER
+ * integrates the bytes. What it DOES change is what a STORAGE ADAPTER
+ * does with it: ordinarily a write is `storage.append()`ed onto a Node's
+ * unbounded envelope log; a `snapshot: true` envelope is instead
+ * `storage.replace()`d - the ENTIRE prior log for that Node is discarded
+ * in favor of this one envelope, which by construction reconstructs the
+ * exact same current state a fresh reader would converge to anyway (see
+ * `@qu/space-storage`'s three adapters, and `@qu/space-transport`'s
+ * relay.js `handleWrite()`). This is the actual fix for the real,
+ * previously-documented gap in this framework's deletion story: Yjs
+ * itself already garbage-collects a deleted item's CONTENT from a live,
+ * `gc: true` `Y.Doc`'s own memory (the default for every `Y.Doc` in this
+ * codebase) - but every sealed envelope that ever carried that deleted
+ * content remains sitting in storage/a relay's mirror FOREVER until
+ * something produces and propagates a compaction snapshot past it.
+ *
+ * Because `verifyEnvelope()` runs unchanged for a snapshot (same
+ * `isAuthorizedWriter` check as any other write - see kind-schema.js's
+ * ACL modes), authorizing WHO may compact a Node needs no new mechanism:
+ * exactly whoever may already write to a Node may also snapshot it - a
+ * `'members'`-mode Kind, any member; `'owner'`/`'named'`, the owner (or a
+ * named grantee). This does subtly change what a signature MEANS for that
+ * one envelope, worth being explicit about: an ordinary write's signature
+ * says "I produced this specific change"; a snapshot's says "I attest
+ * this is a faithful merge of everything up to now" - a real, accepted
+ * shift in what's being claimed, not a bug.
  */
 import { QuCrypto } from '@qu/core';
 
@@ -80,10 +116,11 @@ import { QuCrypto } from '@qu/core';
  *   the @mentioned ones); omitted/empty means "every other space member."
  * @returns {Promise<object>} A plain, structurally-cloneable envelope - safe to hand to a Transport or a Storage adapter as-is.
  */
-export async function sealUpdate(update, sender, recipientXPubKeys, notify = null) {
+export async function sealUpdate(update, sender, recipientXPubKeys, notify = null, snapshot = false) {
   const { iv, ct, to } = await QuCrypto.encrypt(update, recipientXPubKeys, sender.xPrivateKey);
   const notifyBytes = encodeNotify(notify);
-  const sigInput = concatBytes(concatBytes(iv, ct), notifyBytes);
+  const snapshotBytes = encodeSnapshotFlag(snapshot);
+  const sigInput = concatBytes(concatBytes(concatBytes(iv, ct), notifyBytes), snapshotBytes);
   const sig = await QuCrypto.sign(sigInput, sender.signingKey);
   return {
     mode: 'encrypted',
@@ -95,6 +132,7 @@ export async function sealUpdate(update, sender, recipientXPubKeys, notify = nul
     pub: sender.signingPub, // Ed25519 - who to verify the signature against
     ts: Date.now(),
     ...(notify ? { notify } : {}), // present only when the write actually attached one - see this file's own doc comment.
+    ...(snapshot ? { snapshot: true } : {}), // present only for a compaction snapshot - see this file's own "SNAPSHOT/COMPACTION" doc comment.
   };
 }
 
@@ -105,11 +143,13 @@ export async function sealUpdate(update, sender, recipientXPubKeys, notify = nul
  * @param {Uint8Array} update - Raw bytes from `doc.on('update', ...)`.
  * @param {object} sender - `{signingKey, signingPub}` (only the Ed25519 half is needed - no X25519 encryption happens here).
  * @param {{topic: string, to?: string[]}|null} [notify]
+ * @param {boolean} [snapshot=false] - see this file's own "SNAPSHOT/COMPACTION" doc comment.
  * @returns {Promise<object>}
  */
-export async function sealPublicUpdate(update, sender, notify = null) {
+export async function sealPublicUpdate(update, sender, notify = null, snapshot = false) {
   const notifyBytes = encodeNotify(notify);
-  const sigInput = concatBytes(update, notifyBytes);
+  const snapshotBytes = encodeSnapshotFlag(snapshot);
+  const sigInput = concatBytes(concatBytes(update, notifyBytes), snapshotBytes);
   const sig = await QuCrypto.sign(sigInput, sender.signingKey);
   return {
     mode: 'public',
@@ -118,6 +158,7 @@ export async function sealPublicUpdate(update, sender, notify = null) {
     pub: sender.signingPub,
     ts: Date.now(),
     ...(notify ? { notify } : {}),
+    ...(snapshot ? { snapshot: true } : {}),
   };
 }
 
@@ -143,9 +184,17 @@ export async function verifyEnvelope(envelope, isAuthorizedWriter) {
   const pubB64 = QuCrypto.toBase64(envelope.pub);
   if (!(await isAuthorizedWriter(pubB64))) return false;
   const notifyBytes = encodeNotify(envelope.notify ?? null);
+  const snapshotBytes = encodeSnapshotFlag(envelope.snapshot === true);
   const sigInput =
-    envelope.mode === 'public' ? concatBytes(envelope.data, notifyBytes) : concatBytes(concatBytes(envelope.iv, envelope.ct), notifyBytes);
+    envelope.mode === 'public'
+      ? concatBytes(concatBytes(envelope.data, notifyBytes), snapshotBytes)
+      : concatBytes(concatBytes(concatBytes(envelope.iv, envelope.ct), notifyBytes), snapshotBytes);
   return QuCrypto.verify(sigInput, envelope.sig, envelope.pub);
+}
+
+/** A single tamper-evident byte marking a `snapshot` envelope (see this file's own "SNAPSHOT/COMPACTION" doc comment) - `false`/absent encodes to zero bytes, same "signs identically to before this feature existed" property `encodeNotify()` below has. Deliberately part of the SIGNED bytes, not a bare unsigned flag on the outer `{nodeId, envelope}` write message: a relay (or anyone else forwarding it) must not be able to make an ordinary incremental update look like a full-state snapshot (which a storage adapter treats as license to DISCARD everything older for that Node - see relay.js's own handling) without an authorized writer's actual signature over that exact claim. */
+function encodeSnapshotFlag(snapshot) {
+  return snapshot ? new Uint8Array([1]) : new Uint8Array(0);
 }
 
 /** Canonical (stable key order), UTF-8 encoding of a `notify` hint for the signature - `null`/absent encodes to zero bytes, so an envelope with no hint signs identically to before this feature existed. */

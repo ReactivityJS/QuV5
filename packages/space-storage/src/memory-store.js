@@ -22,5 +22,9 @@ export function createMemoryStore() {
     async load(nodeId) {
       return [...(log.get(nodeId) ?? [])];
     },
+    /** Compaction: discards the ENTIRE prior log for `nodeId` in favor of `envelopes` (typically one `snapshot: true` envelope - see @qu/space-core's envelope.js "SNAPSHOT/COMPACTION" doc comment). Never called with an unverified envelope - callers (Space/relay) verify first, same as `append()`. */
+    async replace(nodeId, envelopes) {
+      log.set(nodeId, [...envelopes]);
+    },
   };
 }

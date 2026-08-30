@@ -75,6 +75,8 @@
  *     sends on its own, `{nodeId}` / `{nodeId}` / `{}`.
  *   - `debug.space.grant.received` / `.rejected` - an incoming `grant`
  *     control message (see grant.js) was verified and applied, or wasn't, `{nodeId}`.
+ *   - `debug.space.compact.sent` - this Space compacted a Node it owns/may
+ *     write to (see `compactNode()`), `{nodeId, bytes}`.
  * Deliberately NOT instrumented: plain local reads (`field.get()`/
  * `toArray()`) - they touch no network/storage and aren't where a sync bug
  * usually hides; this stays scoped to what actually crosses a process
@@ -319,6 +321,76 @@ export class Space {
     this._bus?.emit('debug.space.unsubscribe.sent', { nodeId: id });
   }
 
+  /**
+   * COMPACTION — replaces `id`'s ENTIRE stored envelope history (this
+   * Space's own storage AND, once the resulting envelope propagates,
+   * every other subscriber's storage and the relay's own mirror - see
+   * relay.js's `handleWrite()`) with a single envelope holding the Node's
+   * current, garbage-collected state. See envelope.js's own "SNAPSHOT/
+   * COMPACTION" doc comment for the full design and WHY this is needed
+   * even though Yjs already GCs deleted content from a live `Y.Doc`'s own
+   * memory automatically - the gap this closes is storage/mirror growth,
+   * not the live doc.
+   *
+   * Re-applies the Node's current full state into a FRESH `Y.Doc({gc:
+   * true})` rather than just calling `Y.encodeStateAsUpdate(node.doc)`
+   * directly - a standard, defensive Yjs idiom to force a complete GC
+   * pass regardless of exactly when the live doc's own incremental GC
+   * last ran, rather than relying on that timing.
+   *
+   * Authorization needs no new mechanism: the resulting envelope is
+   * sealed and verified EXACTLY like any other write to this Node (same
+   * `_isAuthorizedWriter()` check on the receiving end) - whoever may
+   * already write to a Node may also compact it, nothing more.
+   *
+   * Only supported for a Kind whose meta AND every field share the SAME
+   * `visibility` - a single compaction envelope bundles the WHOLE Node
+   * (meta + every field) into one envelope, which (unlike an ordinary
+   * per-field write, see kind-schema.js's own doc comment on why THAT
+   * never has a "half-public, half-encrypted" problem) genuinely can't
+   * represent a Node whose fields disagree on visibility. Throws rather
+   * than silently picking one field's visibility for the whole Node,
+   * which could leak an 'encrypted' field's plaintext (if 'public' were
+   * chosen) or needlessly hide a 'public' field from non-members (if
+   * 'encrypted' were chosen). A REAL, accepted consequence worth being
+   * explicit about: `kindSchema.metaVisibility` is ALWAYS `'encrypted'`
+   * for an `acl.write: 'members'` Kind (see kind-schema.js), regardless of
+   * any individual field's own visibility - so a `'members'`-mode Kind can
+   * only ever be compacted whole if EVERY one of its fields is ALSO
+   * `'encrypted'` (the common/default case). A `'members'`-mode Kind with
+   * even one `'public'`-visibility field can never satisfy this check;
+   * such a Kind's fields still sync/persist correctly, they simply can't
+   * be compacted as one unit under this design.
+   * @param {string} id
+   */
+  async compactNode(id) {
+    const node = this._nodes.get(id);
+    if (!node) throw new Error(`Space.compactNode: Node "${id}" is not attached - subscribe/create/use it first`);
+    const kindSchema = node.kindSchema;
+    const visibilities = new Set([kindSchema.metaVisibility, ...Object.values(kindSchema.fields).map((f) => f.visibility)]);
+    if (visibilities.size > 1) {
+      throw new Error(
+        `Space.compactNode: Kind "${kindSchema.kind}" mixes visibilities across its meta/fields (${[...visibilities].join(', ')}) - ` +
+          'compaction needs a single envelope for the whole Node, which only a uniform-visibility Kind can safely provide.'
+      );
+    }
+    const visibility = [...visibilities][0];
+
+    const gcDoc = new Y.Doc({ gc: true });
+    Y.applyUpdate(gcDoc, Y.encodeStateAsUpdate(node.doc));
+    const snapshotBytes = Y.encodeStateAsUpdate(gcDoc);
+    gcDoc.destroy();
+
+    const envelope =
+      visibility === 'public'
+        ? await sealPublicUpdate(snapshotBytes, this._identity, null, true)
+        : await sealUpdate(snapshotBytes, this._identity, this._recipientXPubKeys(), null, true);
+
+    await this._storage?.replace(id, [envelope]);
+    this._transport.send({ nodeId: id, envelope });
+    this._bus?.emit('debug.space.compact.sent', { nodeId: id, bytes: snapshotBytes.length });
+  }
+
   /** Replays a Node's envelope history from storage (see @qu/space-storage) - the "durable persistence survives a reload" path. */
   async loadNode(id, kindSchema) {
     if (!this._storage) throw new Error('Space.loadNode: no storage adapter mounted');
@@ -464,7 +536,12 @@ export class Space {
     }
     const bytes = await openUpdate(envelope, this._identity);
     Y.applyUpdate(node.doc, bytes, REMOTE_ORIGIN);
-    await this._storage?.append(nodeId, envelope);
+    // A `snapshot: true` envelope (see envelope.js's own "SNAPSHOT/COMPACTION" doc comment)
+    // REPLACES this Space's own local storage log for the Node instead of appending to it - the
+    // same compaction that just happened for the relay's mirror also has to happen for every
+    // OTHER peer's own durable copy, or the point of compacting would only ever apply to one place.
+    if (envelope.snapshot) await this._storage?.replace(nodeId, [envelope]);
+    else await this._storage?.append(nodeId, envelope);
     this._bus?.emit('debug.space.write.remote.accepted', { nodeId, kind: node.kind, authorPub: QuCrypto.toBase64(envelope.pub), bytes: bytes.length });
     this._emitChangeEvents(nodeId, node, { origin: 'remote', notify: envelope.notify ?? null, authorPub: envelope.pub });
   }

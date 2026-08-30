@@ -24,6 +24,10 @@ export function createDurableStore(backingStore = new Map()) {
     async load(nodeId) {
       return [...(backingStore.get(nodeId) ?? [])];
     },
+    /** Compaction: discards the ENTIRE prior log for `nodeId` in favor of `envelopes` (typically one `snapshot: true` envelope - see @qu/space-core's envelope.js "SNAPSHOT/COMPACTION" doc comment). */
+    async replace(nodeId, envelopes) {
+      backingStore.set(nodeId, [...envelopes]);
+    },
     /** Exposed so a test can assert on the raw, still-sealed rows - proving no plaintext ever reached "disk". */
     _backingStore: backingStore,
   };

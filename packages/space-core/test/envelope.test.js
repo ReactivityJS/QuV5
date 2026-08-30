@@ -144,3 +144,38 @@ test('verifyEnvelope() still rejects a public-mode envelope from a signer not on
   const envelope = await sealPublicUpdate(new TextEncoder().encode('x'), author);
   assert.equal(await verifyEnvelope(envelope, () => false), false);
 });
+
+test('an ordinary (non-snapshot) envelope signs IDENTICALLY to before the snapshot flag existed', async () => {
+  const author = await actor();
+  const reader = await actor();
+  const encEnvelope = await sealUpdate(new TextEncoder().encode('x'), author, [reader.xPublicKey]);
+  assert.equal('snapshot' in encEnvelope, false);
+  const pubEnvelope = await sealPublicUpdate(new TextEncoder().encode('x'), author);
+  assert.equal('snapshot' in pubEnvelope, false);
+});
+
+test('sealUpdate(..., snapshot=true) stamps snapshot: true and verifies; a tamper attempt that flips it off invalidates the signature', async () => {
+  const author = await actor();
+  const reader = await actor();
+  const isAuthorized = (pubB64) => pubB64 === QuCrypto.toBase64(author.signingPub);
+
+  const envelope = await sealUpdate(new TextEncoder().encode('full-state bytes'), author, [reader.xPublicKey], null, true);
+  assert.equal(envelope.snapshot, true);
+  assert.equal(await verifyEnvelope(envelope, isAuthorized), true);
+
+  delete envelope.snapshot; // a relay/MITM trying to make a real snapshot look like an ordinary incremental update (or vice versa).
+  assert.equal(await verifyEnvelope(envelope, isAuthorized), false);
+});
+
+test('sealPublicUpdate(..., snapshot=true) stamps snapshot: true and verifies; flipping it on for an envelope that was never one invalidates the signature', async () => {
+  const author = await actor();
+  const isAuthorized = (pubB64) => pubB64 === QuCrypto.toBase64(author.signingPub);
+
+  const envelope = await sealPublicUpdate(new TextEncoder().encode('full-state bytes'), author, null, true);
+  assert.equal(envelope.snapshot, true);
+  assert.equal(await verifyEnvelope(envelope, isAuthorized), true);
+
+  const ordinary = await sealPublicUpdate(new TextEncoder().encode('full-state bytes'), author);
+  ordinary.snapshot = true; // forging "this was a legitimate compaction" onto an envelope that never claimed to be one.
+  assert.equal(await verifyEnvelope(ordinary, isAuthorized), false);
+});
