@@ -1,26 +1,17 @@
 /**
- * APP SHELL WEB BUNDLE BUILD — bundles `packages/app-shell/src/shell.js`
- * (the ONE fixed piece of application JavaScript a Relay serves - see that
- * file's own doc comment) into `demo/app-shell-web/dist/bundle.js`, and
- * generates `demo/app-shell-web/index.html` with the running demo's real
- * app-admin pubkey baked into `<qu-app-shell app-admin-pub="...">` - the
- * one thing that tells this otherwise-generic Shell which application to
- * load (docs/app-shell-arbeitsauftrag.md §5). Same "no separate frontend
- * build step" posture `demo/web/build.mjs` already established for the
- * chat demo - `app-shell-relay.mjs` calls this at startup.
- *
- * `packages/app-shell/public/index.html` is the STATIC reference markup
- * (its own doc comment says as much) - this is the one place that turns it
- * into something an actual relay can serve, by substituting in a REAL
- * pubkey and pointing the script tag at `/bundle.js` (the path
- * `@qu/space-transport`'s `relay-app-server.js` STATIC_FILES map already
- * serves, unmodified, for the chat demo too).
+ * APP SHELL WEB BUNDLE BUILD (demo) — thin wrapper around `@qu/app-shell`'s
+ * own `build.mjs` (`buildAppShellBundle()`/`renderIndexHtml()` - see that
+ * file's own doc comment for the full "why split into two pieces"), just
+ * writing the result into `demo/app-shell-web/` and baking in the DEMO's
+ * own persisted `app-admin` identity. The production entrypoint
+ * (`packages/app-shell/relay-server.js`) uses the exact same two functions
+ * directly, reading `QU_APP_ADMIN_PUB` instead of a demo identity file -
+ * this is not a separate implementation, only a separate CALLER.
  */
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
-import * as esbuild from 'esbuild';
-import { QuCrypto } from '@qu/core';
+import { buildAppShellBundle, renderIndexHtml } from '@qu/app-shell/build';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -29,35 +20,9 @@ const here = dirname(fileURLToPath(import.meta.url));
  * @returns {Promise<{outfile: string, indexFile: string}>}
  */
 export async function buildAppShellWebBundle({ appAdminPub }) {
-  const outfile = join(here, 'dist', 'bundle.js');
-  await esbuild.build({
-    entryPoints: [join(dirname(dirname(here)), 'packages', 'app-shell', 'src', 'shell.js')],
-    outfile,
-    bundle: true,
-    format: 'esm',
-    platform: 'browser',
-    target: 'es2022',
-    sourcemap: true,
-    logLevel: 'silent', // app-shell-relay.mjs prints its own one-line summary instead - see below.
-  });
-
+  const { outfile } = await buildAppShellBundle({ outDir: join(here, 'dist') });
   const indexFile = join(here, 'index.html');
-  const html = `<!doctype html>
-<html lang="de">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Qu App Shell Demo</title>
-  </head>
-  <body>
-    <qu-app-shell app-admin-pub="${QuCrypto.toBase64(appAdminPub)}"></qu-app-shell>
-
-    <script type="module" src="/bundle.js"></script>
-  </body>
-</html>
-`;
-  await writeFile(indexFile, html, 'utf8');
-
+  await writeFile(indexFile, renderIndexHtml({ appAdminPub }), 'utf8');
   return { outfile, indexFile };
 }
 

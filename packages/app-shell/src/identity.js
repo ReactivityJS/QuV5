@@ -1,11 +1,33 @@
 /**
- * IDENTITY / JOIN — the App Shell's own bootstrap identity, generated once
- * per browser/profile and kept only in caller-supplied `storage`
- * (`localStorage` in a real browser - see `shell.js`), never sent anywhere
- * but its PUBLIC halves. Same mechanism `demo/web/main.js`'s own
+ * IDENTITY / JOIN — the App Shell's own bootstrap identity: ONE keypair per
+ * browser/profile, generated once and kept only in caller-supplied
+ * `storage` (`localStorage` in a real browser - see `shell.js`), never sent
+ * anywhere but its PUBLIC halves. Same mechanism `demo/web/main.js`'s own
  * `loadOrCreateIdentity()`/join flow already established for the chat demo
  * client - generalized here so any App Shell deployment can reuse it,
  * rather than reinventing it per app.
+ *
+ * DELIBERATELY CENTRAL, NOT PER-APP: `shell.js` reads `IDENTITY_STORAGE_KEY`
+ * below - a SINGLE fixed key, not derived from `app-admin-pub`/the current
+ * app's manifest in any way - so a browser visiting several DIFFERENT
+ * `qu-app` apps served from the SAME origin (a "Quniverse"-style platform
+ * hosting many apps behind one relay, docs/app-shell-arbeitsauftrag.md's
+ * own leitmotiv) uses the SAME identity for all of them, exactly the way a
+ * person is one identity across many Spaces elsewhere in this framework
+ * (see `@qu/space-core`'s `alias.js` for the one place that DOES want
+ * per-Space unlinkability, and deliberately derives a separate keypair for
+ * it - the opposite of what a platform's own visitor identity wants). This
+ * is what avoids "per-app identity conflicts": there is only ever one
+ * identity to reconcile, whether the Shell boots a single app or many.
+ * A caller who genuinely wants per-app-isolated identities can still pass
+ * a different `key` to `loadOrCreateIdentity()` directly - this file
+ * doesn't hardcode using `IDENTITY_STORAGE_KEY`, `shell.js` does.
+ *
+ * SCOPE OF "central": `localStorage` is per-ORIGIN - this centralizes
+ * identity across every app one relay/origin serves, not across separate
+ * relays/domains. Genuine cross-origin identity portability (the same
+ * person, a different relay entirely) needs explicit export/import and is
+ * real, separate work, not something this file does today.
  *
  * `joinSpace()` calls the relay's OWN, already-existing `POST /join`/
  * `GET /members.json` endpoints (`@qu/space-transport`'s
@@ -17,6 +39,9 @@
  * new "public content" ACL mode.
  */
 import { QuCrypto } from '@qu/core';
+
+/** The one, central `localStorage` key `shell.js` loads/creates this browser's identity under - see this file's own doc comment on why it's a single fixed key, not per-app. */
+export const IDENTITY_STORAGE_KEY = 'qu-identity';
 
 /**
  * @param {{getItem: (key: string) => string|null, setItem: (key: string, value: string) => void}} storage - e.g. `localStorage`.

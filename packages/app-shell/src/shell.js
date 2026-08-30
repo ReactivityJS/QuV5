@@ -26,10 +26,8 @@
 import { QuCrypto } from '@qu/core';
 import { Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport/ws-client-transport';
-import { loadOrCreateIdentity, joinSpace } from './identity.js';
+import { loadOrCreateIdentity, joinSpace, IDENTITY_STORAGE_KEY } from './identity.js';
 import { startApp } from './boot.js';
-
-const IDENTITY_STORAGE_KEY = 'quv5-app-shell-identity';
 
 export class QuAppShell extends HTMLElement {
   async connectedCallback() {

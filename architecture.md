@@ -51,11 +51,11 @@ QuV5/
 │   ├── space-core/      @qu/space-core      - Space/Node/Field, envelopes, Kind-Schema, ACL, alias identities
 │   ├── space-storage/   @qu/space-storage   - storage adapters (memory/durable/file) a Space or relay mounts
 │   ├── space-transport/ @qu/space-transport - Transports (in-process/WebSocket), the Relay, federation
-│   ├── space-plugins/   @qu/space-plugins   - OPTIONAL app helpers: delivery-status (write-ack + read receipts), upload outbox
+│   ├── space-plugins/   @qu/space-plugins   - OPTIONAL app helpers: delivery-status (write-ack + read receipts), upload outbox, auto-compact-on-join
 │   ├── space-ui/        @qu/space-ui        - OPTIONAL vanilla-JS/DOM bindings: field bind, inline-edit, list-bind, upload-status
 │   ├── app-core/        @qu/app-core        - App Runtime: Kind-Schemas for app content, content-addressed Node ids, ContentResolver, HashRouter, AppRuntime, Dev API
 │   ├── app-renderer/    @qu/app-renderer    - sanitizer, <qu-slot> resolution, style injection, renderPage() - Template+Page -> DOM
-│   └── app-shell/       @qu/app-shell       - the minimal, application-agnostic bootstrap kernel a Relay serves
+│   └── app-shell/       @qu/app-shell       - the minimal, application-agnostic bootstrap kernel a Relay serves; also its OWN production relay-server.js/Dockerfile (separate from @qu/space-transport's)
 ├── demo/                 - runnable proofs: CLI chat, browser client, in-process auto-demo, app-shell-demo
 ├── docs/                 - docs/v5-space-core-guide.md (framework how-to), docs/app-shell-arbeitsauftrag.md (App Shell/Runtime design)
 └── architecture.md       - this file
@@ -498,17 +498,33 @@ Relay never learns what it's transporting is "a page" or "a template," and
   (see `packages/app-shell/test/boot.test.js`, and `demo/app-shell-demo.mjs`
   for the same proof as a runnable script — `npm run demo:app-shell`).
 
-**Wired to a real relay**: `demo/app-shell-relay.mjs` bundles `shell.js`
-(esbuild, the same way `demo/web/build.mjs` bundles `demo/web/main.js`) and
-serves it via the same `relay-app-server.js` any relay already uses —
-`npm run demo:app-shell-relay` (starts it) + `npm run demo:app-shell-install`
-(a SEPARATE process, over a real WebSocket, seeding a small demo app via
-`@qu/app-core`'s Dev API — the actual "installer command") prove this against
-a real network, real disk mirror (`createFileStore`), and a real browser
-tab, not just jsdom/in-process. `packages/space-transport/src/relay-server.js`
-itself still serves `demo/web/`, not this — pointing a PRODUCTION relay's own
-`STATIC_FILES`/`webDir` at an App Shell build is the remaining integration
-step.
+**Wired to a real relay, including production**: `demo/app-shell-relay.mjs`
+bundles `shell.js` (esbuild, the same way `demo/web/build.mjs` bundles
+`demo/web/main.js`) and serves it via the same `relay-app-server.js` any
+relay already uses — `npm run demo:app-shell-relay` (starts it) +
+`npm run demo:app-shell-install` (a SEPARATE process, over a real
+WebSocket, seeding a small demo app via `@qu/app-core`'s Dev API — the
+actual "installer command") prove this against a real network, real disk
+mirror (`createFileStore`), and a real browser tab, not just jsdom/
+in-process. For production, `packages/app-shell/relay-server.js` (its own
+`Dockerfile`, its own `docker compose --profile app-shell up`, see
+`docs/v5-space-core-guide.md` §10's own "App Shell deployment" subsection)
+composes the exact same `@qu/space-transport` primitives
+`packages/space-transport/src/relay-server.js` does, configured via
+`QU_APP_ADMIN_PUB` (a PUBLIC key only — the private key never touches this
+relay, docs §19's Admin Identity model). It is a genuinely SEPARATE
+entrypoint/image, not a change to `relay-server.js` itself: `@qu/space-transport`
+must never depend on an application-layer package like `@qu/app-shell`/
+`@qu/app-core` — "Relay bleibt Application-blind" (§1) has to stay true of
+that file unconditionally, so `relay-server.js` keeps serving `demo/web/`
+exactly as before, completely unaware `@qu/app-shell` exists; run the two
+relays side by side (different ports/Spaces) to get both. `@qu/app-shell`'s
+own `identity.js`/`shell.js` deliberately use ONE fixed `localStorage` key
+(`IDENTITY_STORAGE_KEY`, `'qu-identity'`) for a browser's visitor
+identity, not one derived per `app-admin-pub` — so a platform serving
+several different `qu-app` apps from the same origin shares one identity
+across all of them by design (see `identity.js`'s own doc comment for the
+exact scope — per-origin, not cross-origin).
 
 **Two real bugs the real-relay demo caught (both fixed, both regression-
 tested)** that the earlier in-process/jsdom-only tests could not, because
@@ -547,8 +563,18 @@ used to be able to crash a real CLI client outright. See
 `debug.space.write.remote.undecryptable` (§6) and
 `packages/space-core/test/undecryptable-history.test.js`. This does NOT
 retroactively fix the underlying Yjs gap for `'encrypted'`-visibility
-content (see `demo/README.md`'s own Caveats section for the practical
-workaround) — it only stops the crash.
+content (a real, reported bug: a browser tab's identity is keyed by the
+typed display name, so RENAMING is a brand-new identity joining late,
+which used to mean that peer would never again see a message from anyone
+who was already chatting — not just the messages predating the rename) —
+`@qu/space-plugins`' new `autoCompactOnJoin(space, bus, nodeIds)` is the
+actual fix: it watches `space.member.joined` and calls the pre-existing
+`Space.compactNode()` on every registered Node, so an existing member's
+copy recompacts (re-encrypted for whoever is a member NOW) the instant
+someone new joins — closing the gap for everything written from that point
+on. Wired into both `demo/chat.mjs` and `demo/web/main.js`; see
+`packages/space-plugins/test/auto-compact.test.js` for the regression
+proof and `demo/README.md`'s Caveats section for the full mechanics.
 
 Field-level/namespace ACL (docs §21), signed Executable Modules (§17 Stufe
 3), and publish/draft states (§26) remain explicitly future work — see

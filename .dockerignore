@@ -3,5 +3,10 @@ node_modules
 **/node_modules
 demo/.identities
 demo/.data
+demo/.app-shell-identities
+demo/.app-shell-data
 demo/web/dist
+demo/app-shell-web/dist
+demo/app-shell-web/index.html
+packages/app-shell/dist-web
 *.log

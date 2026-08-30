@@ -20,6 +20,7 @@ import { QuCrypto } from '@qu/core';
 import { defineKind, Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport/ws-client-transport';
 import { EventBus, createDebugLogger } from '@qu/events';
+import { autoCompactOnJoin } from '@qu/space-plugins';
 
 const ROOM = 'demo-room';
 // MUST match demo/chat.mjs's and demo/relay.mjs's own defineKind() call - all three need the identical Kind-Schema shape.
@@ -218,6 +219,15 @@ async function join(name) {
 
   const space = new Space({ identity, members: members.map(({ pub, xPub }) => ({ pub, xPub })), transport, bus });
   const node = space.subscribeNode(ROOM, chatKind);
+  // Closes a real gap, not a hypothetical one: `demo-chat`'s `messages` field is
+  // `visibility: 'encrypted'` (the default) - a member who joins the room AFTER some messages
+  // already exist can never decrypt those, and because Yjs integrates one author's updates as a
+  // strictly ordered, gapless sequence, could then never receive ANY later message from that
+  // author either (see @qu/space-plugins' auto-compact.js). A changed display name IS a new
+  // identity (loadOrCreateIdentity() above is keyed by name) - this is exactly what made renaming
+  // yourself look like "I stopped receiving messages." Recompacts the room the instant this Space
+  // learns someone new joined, re-encrypted for whoever is a member NOW.
+  autoCompactOnJoin(space, bus, [ROOM]);
 
   // REACTIVE MEMBERSHIP, NOT POLLED: a browser tab that's already connected still learns about
   // someone joining later - the relay broadcasts {type:'member-joined', ...} over this SAME
@@ -253,7 +263,7 @@ async function join(name) {
         const all = await node.field('messages').toArray();
         for (; printed < all.length; printed++) {
           const m = all[printed];
-          if (m === undefined) continue; // ciphertext we're not a recipient of - shouldn't happen, we're always a member here.
+          if (m === undefined) continue; // ciphertext we're not a recipient of - a message from before we joined that hasn't been recompacted yet (see autoCompactOnJoin() above), not an error.
           try {
             appendMessage(m, myFingerprint);
           } catch (err) {

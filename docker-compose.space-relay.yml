@@ -29,5 +29,34 @@ services:
       - qu-space-relay-data:/data
     restart: unless-stopped
 
+  # The generic-app counterpart (docs/app-shell-arbeitsauftrag.md, architecture.md §7) - a SEPARATE
+  # relay/Space/port serving @qu/app-shell instead of the hardcoded chat demo above. Opt-in via the
+  # "app-shell" Compose profile so `docker compose up` alone still starts ONLY qu-space-relay,
+  # unchanged: `docker compose --profile app-shell up -d` starts both.
+  qu-app-shell-relay:
+    profiles: ["app-shell"]
+    build:
+      context: .
+      dockerfile: packages/app-shell/Dockerfile
+    ports:
+      - "${QU_APP_SHELL_RELAY_PORT:-8082}:8081"
+    environment:
+      QU_RELAY_PORT: "8081"
+      QU_RELAY_DATA_DIR: /data
+      # REQUIRED for this relay to actually serve an app (a PUBLIC key only - see relay-server.js's
+      # own "ADMIN IDENTITY" doc comment; the container starts fine without it, serving a setup page
+      # at / instead). Generate an app-admin identity yourself (QuCrypto.generateKeypair() from
+      # @qu/core) and set its base64 signing pubkey here.
+      QU_APP_ADMIN_PUB: ${QU_APP_ADMIN_PUB:-}
+      # REQUIRED (once you have QU_APP_ADMIN_PUB) for the app-admin to actually be able to write
+      # qu-page/qu-template/qu-style content - see @qu/app-core's kinds.js on why those are
+      # 'members'-ACL. At minimum: [{"pub":"<same as QU_APP_ADMIN_PUB>","xPub":"<its X25519 pubkey>"}].
+      QU_MEMBERS_JSON: ${QU_APP_SHELL_MEMBERS_JSON:-}
+      QU_ALLOW_JOIN: ${QU_APP_SHELL_ALLOW_JOIN:-}
+    volumes:
+      - qu-app-shell-relay-data:/data
+    restart: unless-stopped
+
 volumes:
   qu-space-relay-data:
+  qu-app-shell-relay-data:

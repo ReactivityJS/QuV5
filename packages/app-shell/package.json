@@ -6,14 +6,19 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./shell": "./src/shell.js"
+    "./shell": "./src/shell.js",
+    "./build": "./build.mjs"
   },
   "dependencies": {
     "@qu/app-core": "^0.1.0",
     "@qu/app-renderer": "^0.1.0",
     "@qu/core": "^0.1.0",
     "@qu/space-core": "^0.1.0",
-    "@qu/space-transport": "^0.1.0"
+    "@qu/space-storage": "^0.1.0",
+    "@qu/space-transport": "^0.1.0",
+    "@qu/events": "^0.1.0",
+    "esbuild": "^0.25.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "jsdom": "^25.0.1"
