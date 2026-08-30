@@ -1,0 +1,15 @@
+{
+  "name": "@qu/space-plugins",
+  "version": "0.1.0",
+  "description": "Qu V5: small, optional, reusable app helpers built entirely on @qu/space-core's public API - never a Space/relay-side special case. delivery-status.js tracks a write's local -> relay-synced -> read lifecycle (write-ack + a durable per-reader read-receipts Node); upload-outbox.js is a local-save-then-sync queue for (multiple) file uploads with retry, driven by a caller-supplied local blob store and upload() function. Every app doesn't need to reinvent these.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/space-core": "^0.1.0"
+  },
+  "license": "MIT"
+}
