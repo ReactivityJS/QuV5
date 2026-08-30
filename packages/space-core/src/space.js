@@ -53,8 +53,32 @@
  *     connection this arrives on is already open for every other message
  *     type, so a new member is learned about exactly as promptly as a
  *     Node update is.
+ *   - `space.status.changed` - `{status}`, straight from the transport's
+ *     own `onStatusChange()` if it has one (see e.g. `@qu/space-transport`'s
+ *     `WsClientTransport` - `InProcessTransport` has none, so this never
+ *     fires there): `'connected'`/`'disconnected'`/`'reconnecting'`/
+ *     `'reconnected'` - a UI's own "you're offline"/"reconnecting…" banner
+ *     reads this feed directly, no separate connectivity API needed.
+ * Custom presence status and "member X is typing" are DELIBERATELY not a
+ * feed documented here - see `presence.js`'s own doc comment: they're
+ * ordinary Node writes (`presenceKind`, `acl.write: 'owner'`,
+ * `persistence: 'volatile'`), so they emit the exact SAME `space.node.
+ * <nodeId>.changed` this doc comment already describes, nothing special.
+ *
+ * RESYNC ON RECONNECT: the same `onStatusChange` wiring that emits
+ * `space.status.changed` also re-sends `hello` and re-subscribes every
+ * currently attached Node (`this._nodes`) on `'connected'`/`'reconnected'` -
+ * a relay answers each re-`subscribe` by replaying its full mirror for that
+ * Node (see relay.js's `handleSubscribe()`), so whatever changed while this
+ * Space was offline (this peer's own queued writes included - see
+ * `WsClientTransport`'s own send-queue doc comment) arrives the same way
+ * initial catch-up already does. No separate "diff" protocol needed: Yjs
+ * updates are idempotent to re-apply, so replaying already-known history
+ * is harmless, just occasionally redundant - `compactNode()` is the
+ * existing answer for keeping that redundant history small.
  * Omitting `bus` (the default) makes a Space behave exactly as before this
- * existed - nothing is emitted, nothing else changes.
+ * existed - nothing is emitted, nothing else changes. Resync itself does
+ * NOT depend on `bus` - it runs regardless, `bus` only reports it.
  *
  * The SAME `bus` also gets a `debug.space.*` family, purely for optional
  * debugging/observability (see `@qu/events`' `createDebugLogger()`) - every
@@ -126,6 +150,7 @@ export class Space {
     /** @type {Map<string, number>} nodeId -> active reference count - see `useNode()`'s own doc comment below. */
     this._refCounts = new Map();
     this._transport.onMessage((msg) => this._handleIncoming(msg.data));
+    this._transport.onStatusChange?.((update) => this._handleTransportStatus(update));
     this._sendHello(); // fire-and-forget, see this file's own doc comment.
   }
 
@@ -133,6 +158,20 @@ export class Space {
     const sig = await QuCrypto.sign(new TextEncoder().encode(HELLO_DOMAIN), this._identity.signingKey);
     this._transport.send({ type: 'hello', pub: this._identity.signingPub, sig });
     this._bus?.emit('debug.space.hello.sent', {});
+  }
+
+  /**
+   * See this file's own "RESYNC ON RECONNECT" doc comment: the transport's
+   * `onStatusChange()` (optional - only `WsClientTransport` has one today)
+   * drives both the `space.status.changed` bus event AND the actual resync
+   * work, so a caller with no `bus` at all still gets working reconnect
+   * behavior, not just a missed notification.
+   */
+  _handleTransportStatus({ status }) {
+    this._bus?.emit('space.status.changed', { status });
+    if (status !== 'connected' && status !== 'reconnected') return;
+    this._sendHello();
+    for (const nodeId of this._nodes.keys()) this._sendSubscribeRequest(nodeId);
   }
 
   /** This Space's own identity, `{signingKey, signingPub, xPrivateKey, xPublicKey}` - read-only, for framework-level add-ons (e.g. alias.js's `publishAlias()`) that need it without reaching into a "private" field. */
@@ -504,6 +543,14 @@ export class Space {
   async _handleIncoming(message) {
     const { nodeId, envelope, type, pub, xPub, name } = message;
     if (type === 'subscribe' || type === 'unsubscribe' || type === 'hello') return; // all three are relay-bound, not peer-bound (see _sendSubscribeRequest/unsubscribeNode/_sendHello) - defensive no-op if one ever reaches here anyway.
+    if (type === 'write-ack') {
+      // See @qu/space-transport's relay.js "WRITE-ACK" doc comment - `seq` is this Node's mirror
+      // size after the ack-triggering write landed, a cheap, storage-derived "your write reached
+      // the relay's durable mirror" signal distinct from a live peer applying it (which arrives as
+      // an ordinary `space.node.<nodeId>.changed` with `origin: 'remote'` on THEIR Space, not this one).
+      this._bus?.emit(`space.node.${message.nodeId}.write-ack`, { nodeId: message.nodeId, seq: message.seq });
+      return;
+    }
     if (type === 'grant') {
       // See grant.js's own doc comment: verified independently here, never trusted just because
       // it arrived - a relay (or a malicious peer on a peer-to-peer transport) forwarding a
