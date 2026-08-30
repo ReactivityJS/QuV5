@@ -105,6 +105,27 @@
  * writer's Space to a fresh session, same as `hello`/`subscribe` are
  * re-sent on every reconnect already.
  *
+ * FEDERATION (`ingestFederated()` + the `relay.write.local` bus event, see
+ * federation.js's own doc comment for the full mechanism): a relay
+ * federates with another relay by being a SUBSCRIBING PEER to it -
+ * exactly the same `hello`/`subscribe` shapes any ordinary `Space` client
+ * sends, over an ordinary Transport connection, nothing relay-specific in
+ * the wire protocol at all. `ingestFederated(nodeId, envelope)` is the
+ * one integration point: an envelope obtained from upstream is verified
+ * and routed through the EXACT same `acceptWrite()` path a local peer's
+ * write takes (mirrored, forwarded to THIS relay's own local subscribers,
+ * notify-routed) - an upstream relay is trusted no more than a single
+ * local peer would be, never automatically. The other direction (a local
+ * write reaching a federated Node upstream too) is driven by the
+ * `relay.write.local` event `acceptWrite()` fires for every LOCALLY-
+ * originated write (never for one `ingestFederated()` just brought in,
+ * which is what stops an infinite upstream<->downstream ping-pong without
+ * needing a separate dedup mechanism) - `federateRelay()` is the only
+ * intended subscriber of it. Demand-driven end to end: nothing is fetched
+ * from upstream until a local peer's OWN `subscribe` request for a Node
+ * this relay doesn't already have proves there is real local interest -
+ * see federation.js for exactly how that trigger is wired.
+ *
  * PUSH ROUTING (the `notify`/`bus` pair): when a write's envelope carries
  * a `notify` hint (see `@qu/space-core`'s `envelope.js` - a small,
  * UNENCRYPTED `{topic, to?}` the AUTHOR attached, never something this
@@ -359,6 +380,27 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
       bus?.emit('debug.relay.write.rejected', { nodeId, reason: 'bad-signature' });
       return; // bad/foreign signature - drop, never forwarded or mirrored.
     }
+    await acceptWrite(kindSchema, nodeId, envelope, fromPeerId);
+  }
+
+  /**
+   * The shared "a verified write exists, do everything with it" path -
+   * factored out of `handleWrite()` so `ingestFederated()` (see this
+   * file's own "FEDERATION" doc comment below) can feed in an envelope
+   * that arrived from an UPSTREAM relay instead of a local peer, without
+   * duplicating mirror/forward/notify logic.
+   *
+   * `excludePeerId` is `null` for a federated envelope (nothing local to
+   * exclude - an upstream relay is not one of `hub.peerIds()`) and a real
+   * peerId for an ordinary local write (never echo a write back to its own
+   * local author). This distinction is also EXACTLY how federation decides
+   * which writes to relay upstream in the first place: only a write with a
+   * real (non-null) `excludePeerId` - i.e. one that genuinely originated
+   * from one of THIS relay's own local peers - fires `relay.write.local`,
+   * so an envelope this relay only just received FROM upstream is never
+   * immediately bounced back upstream again.
+   */
+  async function acceptWrite(kindSchema, nodeId, envelope, excludePeerId) {
     bus?.emit('debug.relay.write.received', { nodeId, kind: kindSchema.kind });
 
     seen.push({ nodeId, envelope });
@@ -375,13 +417,39 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
 
     const toPeerIds = [];
     for (const peerId of subscribers.get(nodeId) ?? []) {
-      if (peerId === fromPeerId) continue; // never echo a write back to its own author.
-      hub.deliverTo(peerId, fromPeerId, { nodeId, envelope });
+      if (peerId === excludePeerId) continue; // never echo a write back to its own local author.
+      hub.deliverTo(peerId, excludePeerId ?? 'federation', { nodeId, envelope });
       toPeerIds.push(peerId);
     }
     bus?.emit('debug.relay.write.forwarded', { nodeId, toPeerIds });
 
+    if (excludePeerId !== null) bus?.emit('relay.write.local', { nodeId, envelope }); // see "FEDERATION" doc comment - a federateRelay() upstream link is the only intended subscriber of this.
+
     await emitNotify(kindSchema, nodeId, envelope);
+  }
+
+  /**
+   * FEDERATION entrypoint: accepts an envelope this relay obtained from an
+   * UPSTREAM relay it federates with (see federation.js's `federateRelay()`
+   * - it calls exactly this, nothing more privileged), verified and routed
+   * through the EXACT same `acceptWrite()` path as any local write - an
+   * upstream relay is trusted no more and no less than any single local
+   * peer would be: still gated by this Node's real write-ACL
+   * (`buildWriteAcl()`), still mirrored/forwarded/notify-routed identically.
+   * Returns `false` (silently, no `debug.relay.write.rejected` event -
+   * federation.js decides its own logging) for an unknown Node or a
+   * signature that fails verification, so a compromised/misbehaving
+   * upstream relay can never inject unauthorized content downstream.
+   * @param {string} nodeId
+   * @param {object} envelope
+   * @returns {Promise<boolean>} whether the envelope was accepted.
+   */
+  async function ingestFederated(nodeId, envelope) {
+    const kindSchema = resolveKindSchema(nodeId);
+    if (!kindSchema) return false;
+    if (!(await verifyEnvelope(envelope, buildWriteAcl(kindSchema, nodeId)))) return false;
+    await acceptWrite(kindSchema, nodeId, envelope, null);
+    return true;
   }
 
   /** See this file's own "PUSH ROUTING" doc comment. No-op entirely when the write carried no `notify` hint, or when `bus` was never given. Awaited by handleWrite() (same as the mirror-storage append above) so a caller awaiting a write's own forwarding also sees every notify-driven handler (a push send included) actually run, not just scheduled. */
@@ -450,5 +518,5 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     bus?.emit('debug.relay.member.joined', { pub: pubB64, name: member.name });
   }
 
-  return { seen, presence, addMember };
+  return { seen, presence, addMember, ingestFederated };
 }
