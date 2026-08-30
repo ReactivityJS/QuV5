@@ -11,6 +11,19 @@
  * here - those are PEER-side concerns (see ws-client-transport.js); a
  * server-side hub only ever needs to know "who's connected" and "deliver
  * this to that connection."
+ *
+ * WIRE EFFICIENCY: every message is already base64 (not a JSON array of
+ * integers) for its `Uint8Array` fields, via `@qu/space-core`'s own
+ * `encodeForWire()`/`decodeFromWire()` (see that module's doc comment) -
+ * that's the bigger win and it's unconditional, nothing to configure here.
+ * The other half, WebSocket `permessage-deflate` compression, is NOT this
+ * hub's concern - it's a property of the `WebSocketServer` a caller passes
+ * in as `wss`, not something this function constructs - see
+ * `relay-server.js`/`demo/relay.mjs`'s own `new WebSocketServer({...,
+ * perMessageDeflate: true})` for where that's actually turned on. The
+ * `ws` package's CLIENT side (`WsClientTransport`/a browser's native
+ * `WebSocket`) already offers this extension by default; a server has to
+ * separately opt in for the negotiation to succeed at all.
  */
 import { randomUUID } from 'node:crypto';
 import { encodeForWire, decodeFromWire } from '@qu/space-core';

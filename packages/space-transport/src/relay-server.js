@@ -88,7 +88,11 @@ const httpServer = createServer((req, res) => {
   res.end();
 });
 
-const wss = new WebSocketServer({ server: httpServer });
+// perMessageDeflate: 'ws' already offers this from the CLIENT side by default (WsClientTransport/
+// a browser's native WebSocket) - the server has to opt in too, or the extension never actually
+// negotiates. See ws-server-hub.js's own doc comment on why wire efficiency lives here (at
+// WebSocketServer construction) rather than inside the hub itself.
+const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: true });
 const hub = createWsServerHub(wss);
 const storage = DATA_DIR ? createFileStore(DATA_DIR) : null;
 createRelayForwarder({

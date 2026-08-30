@@ -40,7 +40,7 @@ test('two peers sync a Node through a real WebSocket relay on a real port', asyn
   ];
 
   const httpServer = createServer();
-  const wss = new WebSocketServer({ server: httpServer });
+  const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: true });
   const hub = createWsServerHub(wss);
   const relay = createRelayForwarder({ hub, members, resolveKindSchema: () => noteKind });
 

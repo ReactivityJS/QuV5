@@ -113,7 +113,9 @@ async function main() {
   // hub.registerRelay() synchronously) - built here from a plain node:http
   // server that also serves the browser demo's static files/API below.
   const httpServer = createServer((req, res) => handleRequest(req, res));
-  const wss = new WebSocketServer({ server: httpServer });
+  // perMessageDeflate: wire-efficiency - the client side (WsClientTransport/a browser's native
+  // WebSocket) already offers this by default, the server has to opt in too for it to negotiate.
+  const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: true });
   const hub = createWsServerHub(wss);
   const relay = createRelayForwarder({ hub, members, resolveKindSchema: () => chatKind, storage, bus });
   registerPushHandler(bus, {
