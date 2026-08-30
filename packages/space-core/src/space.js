@@ -6,6 +6,17 @@
  * decision to drop path/QuBit compatibility) - callers work with typed
  * Node/Field handles directly (see node.js/field.js).
  *
+ * Four ways to get a `SpaceNode` handle, each for a different situation -
+ * `useNode()` (see its own doc comment below) is the recommended DEFAULT
+ * for app/UI code that just wants "give me this Node": local-first, lazy,
+ * reference-counted, no need to think about which of the other three
+ * applies. The other three exist because SOMETHING has to implement that
+ * default, and each is occasionally useful directly: `createNode()` (this
+ * peer originates a brand-new Node), `subscribeNode()` (a known Node id,
+ * live sync, no reference counting), `loadNode()` (local storage only, no
+ * network at all - the "durable persistence survives a reload with zero
+ * live sync" tier).
+ *
  * The only two things a Space does that a bare Y.Doc doesn't:
  *   1. Every LOCALLY produced Yjs update gets sealed (signed + encrypted,
  *      see envelope.js) before it reaches storage.append()/transport.send() -
@@ -110,6 +121,8 @@ export class Space {
     this._nodes = new Map();
     /** @type {Map<string, Set<string>>} nodeId -> Set<base64 Ed25519 pubkey> - 'named'-mode write-ACL state, 100% derived from verified `grant` messages (see grant.js), never invented. */
     this._grants = new Map();
+    /** @type {Map<string, number>} nodeId -> active reference count - see `useNode()`'s own doc comment below. */
+    this._refCounts = new Map();
     this._transport.onMessage((msg) => this._handleIncoming(msg.data));
     this._sendHello(); // fire-and-forget, see this file's own doc comment.
   }
@@ -306,16 +319,81 @@ export class Space {
     if (!this._storage) throw new Error('Space.loadNode: no storage adapter mounted');
     const doc = new Y.Doc();
     const node = this._attach(id, kindSchema, doc, { skipReSeal: true });
+    await this._hydrateFromStorage(id, kindSchema, doc);
+    node._skipReSeal = false;
+    return node;
+  }
+
+  /** Shared by `loadNode()` and `useNode()`: applies every already-verified-on-write envelope this Space's OWN storage holds for `id` into `doc`, oldest first. Never trusts storage blindly - a tampered/foreign entry is skipped, same as any other unverified envelope. */
+  async _hydrateFromStorage(id, kindSchema, doc) {
     const envelopes = await this._storage.load(id);
     const isAuthorized = this._isAuthorizedWriter(kindSchema, id);
     for (const envelope of envelopes) {
-      if (!(await verifyEnvelope(envelope, isAuthorized))) continue; // tampered/foreign entry in the log - skip, never trust storage blindly.
+      if (!(await verifyEnvelope(envelope, isAuthorized))) continue;
       const bytes = await openUpdate(envelope, this._identity);
       Y.applyUpdate(doc, bytes, REMOTE_ORIGIN);
     }
-    node._skipReSeal = false;
     this._bus?.emit('debug.space.load', { nodeId: id, envelopeCount: envelopes.length });
-    return node;
+  }
+
+  /**
+   * THE LOCAL-FIRST, LAZY, REFERENCE-COUNTED QUERY ENTRYPOINT this Task
+   * exists for: "a client should keep locally what it needs, subscribe
+   * remotely and diff-sync only what it's actually asked for, and only
+   * once it's actually asked for it." A caller that just wants "give me
+   * this Node, I don't care whether it's already local or needs fetching"
+   * calls this instead of manually choosing between `loadNode()`/
+   * `subscribeNode()`/`createNode()`:
+   *
+   *   1. Already attached (by ANY of the four entrypoints, this one
+   *      included)? Return the existing handle immediately - no network,
+   *      no storage read, no duplicate subscribe.
+   *   2. Otherwise, hydrate from LOCAL storage FIRST if one is mounted
+   *      (instant, no network - see `_hydrateFromStorage()`), THEN send a
+   *      live `subscribe` request regardless of what local storage had -
+   *      a synced Node is presumed still-changing, so "I have a local
+   *      snapshot" is never a reason to skip asking for what's new, only
+   *      a reason not to START from nothing while that request is in
+   *      flight. This is the exact ordering the framework's own "local-
+   *      first" design commits to (see the top-level architecture notes):
+   *      READ local, THEN sync remote - never the other way round.
+   *
+   * Reference-counted so multiple independent call sites (e.g. two UI
+   * components both interested in the same Node) can each `useNode()`/
+   * `release()` independently without racing each other's unsubscribe -
+   * the underlying Node stays subscribed until the LAST interested party
+   * releases it. Mixing this with a raw `subscribeNode()`/
+   * `unsubscribeNode()` call for the SAME id is not supported - pick one
+   * discipline per Node id (this one is the recommended default for any
+   * caller that doesn't have a specific reason to use the lower-level
+   * methods directly).
+   * @param {string} id
+   * @param {object} kindSchema
+   * @returns {Promise<{node: SpaceNode, release: () => void}>}
+   */
+  async useNode(id, kindSchema) {
+    this._refCounts.set(id, (this._refCounts.get(id) ?? 0) + 1);
+
+    let node = this._nodes.get(id);
+    if (!node) {
+      const doc = new Y.Doc();
+      node = this._attach(id, kindSchema, doc, { skipReSeal: true });
+      if (this._storage) await this._hydrateFromStorage(id, kindSchema, doc);
+      node._skipReSeal = false;
+      await this._sendSubscribeRequest(id); // awaited (unlike subscribeNode()'s own fire-and-forget) - useNode() already returns a Promise, so a caller awaiting it can rely on the subscribe request having actually left by the time it resolves.
+    }
+    return { node, release: () => this._releaseNode(id) };
+  }
+
+  /** The other half of `useNode()`'s reference count - see that method's own doc comment. Fire-and-forget, same posture as every other control-message-sending method here. */
+  _releaseNode(id) {
+    const count = (this._refCounts.get(id) ?? 1) - 1;
+    if (count > 0) {
+      this._refCounts.set(id, count);
+      return;
+    }
+    this._refCounts.delete(id);
+    this.unsubscribeNode(id);
   }
 
   _attach(id, kindSchema, doc, { skipReSeal = false } = {}) {
