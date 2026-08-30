@@ -168,3 +168,26 @@ and mirrors ciphertext it cannot decrypt.
   no timer involved. A write IS still encrypted only for the members known
   at the moment it's sealed, so a message sent in the same instant as a
   join could in principle race it - by design, not a polling artifact.
+- **The typed display name is NOT an account** - a browser tab's identity
+  is a keypair generated once per browser/profile and kept in
+  `localStorage` (see `web/main.js`'s own `loadOrCreateIdentity()`); the
+  name you type is a self-reported label attached to it, nothing more. Two
+  different devices/browsers typing the SAME name join as two
+  cryptographically UNRELATED members - they never shared a keypair, so
+  neither can decrypt anything sealed for the other, and each is
+  independently "online." `POST /join`'s response now flags
+  `sameNameOtherIdentity: true` when this happens (`web/main.js` shows a
+  toast) precisely because it's easy to mistake for a sync bug otherwise -
+  "why does my phone and desktop, same name, not see each other's history"
+  is answered by "they were never the same identity," not by anything
+  broken in delivery.
+- **One failed message render used to silently kill ALL later ones** - both
+  `chat.mjs` and `web/main.js` print incoming messages via a
+  `printing = printing.then(...)` chain; without a `.catch()`, one throw
+  (a transient render glitch, a malformed message) left `printing`
+  permanently REJECTED, and every later `schedulePrint()` call silently
+  did nothing for the rest of the session - while sync itself, the debug
+  log, and notification toasts kept working fine (unrelated code paths),
+  making it look like delivery had gone one-directional. Fixed: the chain
+  now recovers, and a per-message `try/catch` means one bad message is
+  skipped, not a wall past which nothing after it ever prints again.
