@@ -67,15 +67,27 @@ async function main() {
   let printed = 0;
   let printing = Promise.resolve();
   function schedulePrint() {
-    printing = printing.then(async () => {
-      const all = await node.field('messages').toArray();
-      for (; printed < all.length; printed++) {
-        const m = all[printed];
-        if (m === undefined) continue; // ciphertext we're not a recipient of (shouldn't happen - we're always a member here)
-        const who = m.fingerprint === myFingerprint ? 'you' : `${m.from} [${m.fingerprint}]`;
-        console.log(`${new Date(m.ts).toLocaleTimeString()}  ${who}:  ${m.text}`);
-      }
-    });
+    // `.catch()` is NOT optional - see demo/web/main.js's own identical `schedulePrint()` doc
+    // comment for why an unguarded `printing = printing.then(fn)` chain permanently stops
+    // printing ANY future message after just one throw, silently, while sync itself keeps working.
+    printing = printing
+      .then(async () => {
+        const all = await node.field('messages').toArray();
+        for (; printed < all.length; printed++) {
+          const m = all[printed];
+          if (m === undefined) continue; // ciphertext we're not a recipient of (shouldn't happen - we're always a member here)
+          try {
+            const who = m.fingerprint === myFingerprint ? 'you' : `${m.from} [${m.fingerprint}]`;
+            console.log(`${new Date(m.ts).toLocaleTimeString()}  ${who}:  ${m.text}`);
+          } catch (err) {
+            // Isolated per-message - see demo/web/main.js's own identical comment on why: without
+            // this, one message that reliably fails to print would get retried at the SAME index
+            // forever, silently blocking every later message too.
+            console.error(`schedulePrint: failed to print message #${printed} - skipping it`, err);
+          }
+        }
+      })
+      .catch((err) => console.error('schedulePrint: failed to read the message list -', err));
   }
 
   node.field('messages').observe(schedulePrint);

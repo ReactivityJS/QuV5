@@ -177,11 +177,61 @@ test('relay-server.js serves the browser app at / and /bundle.js, and answers /m
     const joinBody = await joinRes.json();
     assert.equal(joinBody.ok, true);
     assert.ok(joinBody.fingerprint);
+    assert.equal(joinBody.sameNameOtherIdentity, false); // first (and only) "newcomer" so far.
 
     const afterJoin = await (await fetch(`http://127.0.0.1:${port}/members.json`)).json();
     assert.equal(afterJoin.length, 1);
     assert.equal(afterJoin[0].name, 'newcomer');
     assert.equal(afterJoin[0].pub, QuCrypto.toBase64(kp.publicKey));
+  } finally {
+    child.kill();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('POST /join flags sameNameOtherIdentity whenever ANOTHER identity shares the chosen name - never blocks the join', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qu-relay-server-'));
+  const port = freePort();
+  const child = spawn('node', [RELAY_SERVER_PATH], {
+    env: { ...process.env, QU_RELAY_PORT: String(port), QU_RELAY_DATA_DIR: dir, QU_MEMBERS_JSON: '' },
+  });
+  try {
+    await waitUntil(() => isHealthy(port));
+
+    const join = async (name, kp) =>
+      (
+        await fetch(`http://127.0.0.1:${port}/join`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name, pub: QuCrypto.toBase64(kp.publicKey), xPub: QuCrypto.toBase64(kp.xPublicKey) }),
+        })
+      ).json();
+
+    // Two SEPARATE browser profiles/devices typing the same display name - e.g. a phone and a
+    // desktop that never shared a keypair. This is the exact confusion the flag exists to surface.
+    const deviceA = await QuCrypto.generateKeypair();
+    const deviceB = await QuCrypto.generateKeypair();
+    const first = await join('alice', deviceA);
+    assert.equal(first.sameNameOtherIdentity, false);
+    const second = await join('alice', deviceB);
+    assert.equal(second.sameNameOtherIdentity, true);
+    assert.notEqual(first.fingerprint, second.fingerprint); // genuinely two different identities, not a rejected duplicate.
+
+    const members = await (await fetch(`http://127.0.0.1:${port}/members.json`)).json();
+    assert.equal(members.length, 2); // never blocked - both are valid, independent members.
+
+    // The SAME device rejoining (e.g. a real page reload with the SAME keypair, not a different
+    // one) is NOT itself a NEW collision - but once a genuine second identity ("deviceB") has
+    // claimed the same name, that fact doesn't go away just because deviceA reconnects, so this
+    // correctly still reports true (there IS another identity out there sharing this name).
+    const rejoinAfterCollisionExists = await join('alice', deviceA);
+    assert.equal(rejoinAfterCollisionExists.sameNameOtherIdentity, true);
+
+    // A rejoin under a name NO OTHER identity has ever used is correctly NOT flagged.
+    const deviceC = await QuCrypto.generateKeypair();
+    await join('carol', deviceC);
+    const rejoinNoCollision = await join('carol', deviceC);
+    assert.equal(rejoinNoCollision.sameNameOtherIdentity, false);
   } finally {
     child.kill();
     await rm(dir, { recursive: true, force: true });

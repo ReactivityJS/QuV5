@@ -99,16 +99,27 @@ export function createAppRequestHandler({ webDir, members, relay, allowJoin = tr
       res.end(`bad request: ${err.message}`);
       return;
     }
+    // NAME COLLISION CHECK: identity here has NOTHING to do with the typed `name` - it's a
+    // self-generated keypair kept in THIS BROWSER/PROFILE's own localStorage (see
+    // `demo/web/main.js`'s own `loadOrCreateIdentity()`). Two different devices/browsers typing
+    // the SAME display name join as two cryptographically UNRELATED members - correct behavior,
+    // but an easy trap for a user who assumes "same name" means "same account" (e.g. expecting a
+    // phone and a desktop typing "alice" to be one identity that syncs between them - they never
+    // shared anything, each generated its own keypair the first time). Flagging it here (never
+    // blocking the join - `'members'`-mode allows same-name-different-pubkey members just fine)
+    // is what lets the UI warn instead of leaving that silently confusing.
+    const sameNameOtherIdentity = members.some((m) => m.name === name && QuCrypto.toBase64(m.pub) !== pub);
+
     relay.addMember({ pub: pubBytes, xPub: xPubBytes, name });
     // Also update THIS array (relay.addMember() only updates relay.js's own, independent copy -
     // see that file's own doc comment) so /members.json reflects the join too, otherwise other
     // clients would never learn this member's xPub and could never encrypt-for them.
     if (!members.some((m) => QuCrypto.toBase64(m.pub) === pub)) members.push({ name, pub: pubBytes, xPub: xPubBytes });
     const fingerprint = await QuCrypto.fingerprint(pubBytes);
-    log(`  🌐 ${name} joined  [${fingerprint}]`);
+    log(`  🌐 ${name} joined  [${fingerprint}]${sameNameOtherIdentity ? '  (name already used by a DIFFERENT identity)' : ''}`);
     onJoin({ name, pub: pubBytes, xPub: xPubBytes, fingerprint });
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, fingerprint }));
+    res.end(JSON.stringify({ ok: true, fingerprint, sameNameOtherIdentity }));
   }
 
   function handleMembersJson(req, res) {

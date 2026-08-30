@@ -112,12 +112,12 @@ function notifyHandler(payload, ctx) {
   }
 }
 
-function showToast(text) {
+function showToast(text, durationMs = 4000) {
   const toast = document.createElement('div');
   toast.className = 'toast';
   toast.textContent = text;
   document.body.appendChild(toast);
-  setTimeout(() => toast.remove(), 4000);
+  setTimeout(() => toast.remove(), durationMs);
 }
 
 async function main() {
@@ -159,6 +159,7 @@ async function join(name) {
     }),
   });
   if (!joinRes.ok) throw new Error(`/join failed: ${joinRes.status} ${await joinRes.text()}`);
+  const joinBody = await joinRes.json();
 
   const membersRes = await fetch('/members.json');
   const rawMembers = await membersRes.json();
@@ -176,6 +177,16 @@ async function join(name) {
   el.chat.hidden = false;
   el.you.textContent = `${name}  [${myFingerprint}]`;
   renderMembers(members, myFingerprint);
+
+  // The typed NAME is just a self-reported label - identity is a keypair generated once per
+  // browser/profile (see loadOrCreateIdentity() above). A different device/browser typing the
+  // SAME name is NOT the same account - it never shared this keypair, so nothing it wrote before
+  // "belongs" to this session either. Surfacing that here (server-decided, see relay-app-server.js's
+  // own doc comment on sameNameOtherIdentity) is what stops that from being silently confusing -
+  // e.g. reading as "sync is one-directional" when actually two unrelated identities just share a label.
+  if (joinBody.sameNameOtherIdentity) {
+    showToast(`Achtung: Der Name "${name}" wird bereits von einer ANDEREN Identität benutzt (eigener Fingerprint hier: ${myFingerprint}) - das ist kein geteilter Account, sondern ein separates Mitglied.`, 12000);
+  }
 
   setStatus('Verbinde per WebSocket…');
   const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -230,14 +241,32 @@ async function join(name) {
   let printed = 0;
   let printing = Promise.resolve();
   function schedulePrint() {
-    printing = printing.then(async () => {
-      const all = await node.field('messages').toArray();
-      for (; printed < all.length; printed++) {
-        const m = all[printed];
-        if (m === undefined) continue; // ciphertext we're not a recipient of - shouldn't happen, we're always a member here.
-        appendMessage(m, myFingerprint);
-      }
-    });
+    // `.catch()` is NOT optional here - `printing = printing.then(fn)` with no rejection handler
+    // means ONE throw (a transient DOM hiccup, a malformed message, anything) leaves `printing`
+    // permanently REJECTED, and `.then(fn)` on an already-rejected promise with no `onRejected`
+    // just propagates the rejection WITHOUT ever calling `fn` again - every LATER schedulePrint()
+    // call would then silently do nothing for the rest of the page's life. Sync/notify/debug-log
+    // keep working fine regardless (unrelated code paths), which is exactly what made this so
+    // confusing to diagnose from the outside: everything LOOKS alive except new chat messages.
+    printing = printing
+      .then(async () => {
+        const all = await node.field('messages').toArray();
+        for (; printed < all.length; printed++) {
+          const m = all[printed];
+          if (m === undefined) continue; // ciphertext we're not a recipient of - shouldn't happen, we're always a member here.
+          try {
+            appendMessage(m, myFingerprint);
+          } catch (err) {
+            // Isolated per-message: `printed` still advances past this ONE bad entry (it's
+            // incremented by the `for` loop's own increment step regardless, since the throw never
+            // escapes this iteration) - every message AFTER it still prints normally. Without this,
+            // a single message that reliably fails to render (not just a one-off glitch) would get
+            // retried at the SAME index on every future call, forever blocking everything after it.
+            console.error(`schedulePrint: failed to render message #${printed} - skipping it, later messages still print`, err);
+          }
+        }
+      })
+      .catch((err) => console.error('schedulePrint: failed to read the message list (chat view may be stale until the next update)', err));
   }
   node.field('messages').observe(schedulePrint);
   schedulePrint();
