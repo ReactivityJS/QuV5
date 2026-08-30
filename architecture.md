@@ -22,8 +22,12 @@ applications: peers hold **Nodes** (CRDT documents) locally, sync them
 with other peers through a content-blind **Relay**, and every write is
 signed and (usually) end-to-end encrypted. It is deliberately:
 
-- **UI-agnostic** — no components, no rendering. A declarative UI layer
-  (`@qu/space-ui`) is planned as a later add-on, not part of this core.
+- **UI-agnostic core, optional UI layer on top** — `@qu/space-core`/
+  `@qu/space-transport` themselves have no components, no rendering, no DOM
+  dependency. `@qu/space-ui` (§4/§5) is a genuinely OPTIONAL, separate
+  add-on package built entirely on the public `Field`/`SpaceNode` API —
+  vanilla JS/DOM, no framework, no build step; `Space` has zero awareness
+  it exists, same as `@qu/space-plugins` below.
 - **Local-first** — a peer reads its own storage before ever touching the
   network, and only subscribes to (spends bandwidth on) data it's actually
   been asked for (`Space.useNode()`, see §5).
@@ -46,7 +50,9 @@ QuV5/
 │   ├── events/          @qu/events          - EventBus: the one hooks/listeners/slots mechanism
 │   ├── space-core/      @qu/space-core      - Space/Node/Field, envelopes, Kind-Schema, ACL, alias identities
 │   ├── space-storage/   @qu/space-storage   - storage adapters (memory/durable/file) a Space or relay mounts
-│   └── space-transport/ @qu/space-transport - Transports (in-process/WebSocket), the Relay, federation
+│   ├── space-transport/ @qu/space-transport - Transports (in-process/WebSocket), the Relay, federation
+│   ├── space-plugins/   @qu/space-plugins   - OPTIONAL app helpers: delivery-status (write-ack + read receipts), upload outbox
+│   └── space-ui/        @qu/space-ui        - OPTIONAL vanilla-JS/DOM bindings: field bind, inline-edit, list-bind, upload-status
 ├── demo/                 - runnable proofs: CLI chat, browser client, in-process auto-demo
 ├── docs/                 - docs/v5-space-core-guide.md: the practical how-to companion to this file
 └── architecture.md       - this file
@@ -128,7 +134,65 @@ Relay federation (`federation.js`) applies the second rule one hop
 further: a downstream relay only subscribes upstream when one of ITS OWN
 local peers has proven real demand for a Node it doesn't already have.
 
-### 3.4 Events: the one hooks/listeners/slots mechanism
+### 3.4 Reconnect, resync, and per-Kind persistence tiers
+
+`WsClientTransport` auto-reconnects (exponential backoff + jitter, plus a
+backgrounded-browser-tab recovery check on `visibilitychange`/`online`) and
+reports its lifecycle through `onStatusChange({status})` —
+`'connected'`/`'disconnected'`/`'reconnecting'`/`'reconnected'`. `Space`
+claims that single callback slot and, on `'connected'`/`'reconnected'`,
+re-sends `hello` and re-subscribes every currently attached Node — a relay
+answers each `subscribe` by replaying its full mirror (§3.1 step 3), so
+whatever changed while offline (including this peer's OWN writes, queued
+by the transport's send-queue rather than dropped) arrives the same way
+ordinary catch-up already does. No separate "diff" wire message: Yjs
+updates are idempotent to re-apply. `Space` also emits `space.status.
+changed` on its `bus` for every transition, so a UI's own "reconnecting…"
+banner needs no separate connectivity API.
+
+`defineKind()` also takes `persistence: 'durable' | 'volatile'` (default
+`'durable'`). A `'volatile'` Kind's writes hydrate/append/replace through a
+SEPARATE storage adapter (`Space`'s own `volatileStorage` constructor
+param / the relay's own `volatileStorage` param, both defaulting to a
+private in-memory store if omitted) instead of the configured durable one
+— the same swappable-adapter idea `@qu/space-storage`'s memory/durable/
+file tiers already embody, now selectable PER KIND rather than only for
+the whole Space/relay. This is what `presence.js`'s `presenceKind` (§3.5)
+is built on, and what a Kind like it needs instead of any relay/transport-
+level special-casing: presence/typing are ordinary Node writes on a
+volatile-persistence Kind, nothing more.
+
+### 3.5 Presence, typing, and delivery status — ordinary data, not protocol
+
+Online/offline liveness stays exactly the pre-existing `hello`/
+`PresenceTracker` mechanism (relay-internal, push-routing only — see
+§3.6's event list). Everything else that might look like a "presence
+feature" is deliberately just Node writes:
+
+- `@qu/space-core`'s `presence.js` — `presenceKind` (self-certifying
+  `acl.write: 'owner'`, `persistence: 'volatile'`) holds `online`/`status`/
+  `updatedAt`/`typingIn`/`typingAt`. `publishPresence()`/`setStatus()`/
+  `setTyping()` write it; `watchPresence()`/`PresenceWatcher` read it
+  (one-shot snapshot vs. a reactive multi-member cache, same split
+  `alias.js`'s functions vs. `AliasRegistry` already established).
+  `online` is a best-effort, SELF-REPORTED flag (nothing can sign "went
+  offline" after its own connection already dropped) — a reader wanting to
+  treat long-silent `online: true` as effectively offline compares
+  `updatedAt` against its own staleness threshold; that policy is
+  deliberately left to the app, not hardcoded here.
+- `@qu/space-plugins`'s `delivery-status.js` — `awaitRelayAck(bus, nodeId)`
+  correlates the relay's write-ack (below) to one write by ordering;
+  `readReceiptKind` (durable, unlike `presenceKind`) is the same self-
+  certifying-per-reader shape for a "read up to here" marker.
+
+WRITE-ACK: once a relay mirrors a LOCALLY-originated write, it sends
+`{type: 'write-ack', nodeId, seq}` back to that write's own author — `seq`
+is simply the mirror's current size for that Node, a cheap way to tell
+"reached the relay's durable mirror" apart from "a live peer applied it"
+(the latter is just an ordinary remote `space.node.<id>.changed`, observed
+on the RECIPIENT's own Space, not the author's).
+
+### 3.6 Events: the one hooks/listeners/slots mechanism
 
 `@qu/events`' `EventBus` (dot-namespaced topics, `*` = one segment, `**` =
 prefix + everything under it, must be the last segment) is used
@@ -174,12 +238,13 @@ mechanism — `Space` itself has zero awareness that "alias" is a concept.
 | File | Purpose |
 |---|---|
 | `src/envelope.js` | `sealUpdate()`/`sealPublicUpdate()`/`verifyEnvelope()`/`openUpdate()` — the ONE place a Yjs update is ever sealed/opened. Envelope v2 (`mode: 'encrypted'\|'public'`) and the `snapshot` flag (compaction) live here. |
-| `src/kind-schema.js` | `defineKind()`, `KindRegistry`, `deriveOwnerNodeId()` (self-certifying nodeId derivation for `'owner'`/`'named'` ACL). |
+| `src/kind-schema.js` | `defineKind()` (now also `persistence: 'durable'\|'volatile'`, §3.4), `KindRegistry`, `deriveOwnerNodeId()` (self-certifying nodeId derivation for `'owner'`/`'named'` ACL). |
 | `src/grant.js` | `signGrant()`/`verifyGrant()` — the `'named'`-ACL delegated-authority mechanism. |
 | `src/node.js` | `SpaceNode` (one Node = one Y.Doc, `meta` + `content` maps), `stampMeta()`. |
 | `src/field.js` | `AtomicField`/`TextField`/`ListField`, `createField()`, `withWriteContext()` (the shared transact-with-origin wrapper every field mutation goes through). |
-| `src/space.js` | `Space` — the main class. See §5 below for its full method surface. |
+| `src/space.js` | `Space` — the main class, now also reconnect/resync (`onStatusChange` wiring, §3.4) and per-Kind storage routing (`_storageFor()`). See §5 below for its full method surface. |
 | `src/alias.js` | `deriveAliasIdentity()`, `aliasRegistryKind`/`aliasRegistryNodeId()`, `publishAlias()`, `AliasRegistry` — per-space pseudonymity. |
+| `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes (§3.5). |
 | `src/wire-codec.js` | `encodeForWire()`/`decodeFromWire()` — Uint8Array ↔ base64 for any JSON serialization boundary (WebSocket, on-disk file). |
 | `src/index.js` | Package's public export surface — the authoritative list of what's public API vs. internal. |
 
@@ -202,8 +267,8 @@ envelope).
 |---|---|
 | `src/in-process-transport.js` | `createInProcessHub()`, `InProcessTransport` — same-process transport for tests, star-shaped through a relay. |
 | `src/ws-server-hub.js` | `createWsServerHub(wss)` — the server-side hub over a real `ws` `WebSocketServer`. |
-| `src/ws-client-transport.js` | `WsClientTransport` — real WebSocket client, browser-safe (separate `exports` subpath, no `node:crypto`). |
-| `src/relay.js` | `createRelayForwarder()` — the Relay itself: signature verification, subscriber-tracking, mirroring, `'named'`-ACL grant handling, push-notify routing, federation's `ingestFederated()` integration point. |
+| `src/ws-client-transport.js` | `WsClientTransport` — real WebSocket client, browser-safe (separate `exports` subpath, no `node:crypto`); now also auto-reconnect + `onStatusChange()` (§3.4). |
+| `src/relay.js` | `createRelayForwarder()` — the Relay itself: signature verification, subscriber-tracking, per-Kind durable/volatile mirroring (§3.4), `'named'`-ACL grant handling, push-notify routing, write-ack (§3.5), federation's `ingestFederated()` integration point. |
 | `src/federation.js` | `federateRelay()` — a relay as a subscribing peer of another relay. |
 | `src/presence-tracker.js` | `PresenceTracker` — pubkey ↔ peerId online/offline state, built from signed `hello` messages. |
 | `src/push-handler.js` | `registerPushHandler(bus, {sendPush})` — reference delivery-channel handler for `relay.notify.**`. |
@@ -211,6 +276,30 @@ envelope).
 | `src/relay-app-server.js` | `createAppRequestHandler()` — the shared HTTP layer (static browser app, `GET /members.json`, `POST /join`) both `relay-server.js` and `demo/relay.mjs` serve alongside their WebSocket endpoint. |
 | `src/relay-server.js` | Standalone, env-var-configured relay process (`QU_*`, see its own doc comment; `--print-identity` CLI flag) — what the Dockerfile runs. Also serves an app (today, `demo/web/`) via `relay-app-server.js` — see its own "SERVES AN APP" doc comment. |
 | `src/index.js` | Package's public export surface (main entry — excludes `ws-client-transport.js`'s browser-safe subpath, see that file's own doc comment on why). |
+
+### `packages/space-plugins/` — `@qu/space-plugins` (OPTIONAL)
+
+| File | Purpose |
+|---|---|
+| `src/delivery-status.js` | `awaitRelayAck()`, `readReceiptKind`, `markRead()`/`watchReadReceipts()`/`ReadReceiptWatcher` — local/relay-synced/read lifecycle helpers (§3.5). |
+| `src/upload-outbox.js` | `uploadOutboxKind`, `UploadOutbox` — local-save-then-sync queue for (multiple) file uploads: caller supplies a local blob store + an `upload()` function; this class owns the pending→uploading→done/failed state machine, retry, and a reactive `watch()`. |
+| `src/index.js` | Package's public export surface. |
+
+Built entirely on `@qu/space-core`'s public API — `Space` has zero
+awareness either of these exist, same as `alias.js`.
+
+### `packages/space-ui/` — `@qu/space-ui` (OPTIONAL)
+
+| File | Purpose |
+|---|---|
+| `src/bind.js` | `bindField()`/`bindCheckbox()` — one/two-way reactive binding between a DOM element and a `Field`. |
+| `src/inline-edit.js` | `makeInlineEditable()` — `[contenteditable]` bound to a `Field` with explicit save (Enter/blur)/cancel (Escape) semantics; never applies a remote change while the element has focus. |
+| `src/list-bind.js` | `bindList()` — keyed reconciliation of a list `Field` into a DOM container; skips re-rendering items whose value hasn't changed even without a caller-supplied `update()`. |
+| `src/upload-status.js` | `bindFileInput()`/`bindUploadStatusIcon()` — wires `<input type="file">` and status icons to `@qu/space-plugins`' `UploadOutbox`; a status icon is never auto-hidden on `'done'`. |
+| `src/index.js` | Package's public export surface. |
+
+Vanilla JS/DOM, no framework dependency, no build step — `Space` has zero
+awareness this package exists either.
 
 ### `demo/`
 
@@ -232,7 +321,7 @@ notice.
 
 | Member | Purpose |
 |---|---|
-| `new Space({identity, members, transport, storage?, bus?})` | Construct one peer's live view. Sends a signed `hello` immediately. |
+| `new Space({identity, members, transport, storage?, volatileStorage?, bus?})` | Construct one peer's live view. Sends a signed `hello` immediately; claims the transport's `onStatusChange()` slot if it has one (§3.4). `volatileStorage` backs any `persistence: 'volatile'` Kind (§3.4) — defaults to a private in-memory store. |
 | `.identity` | Read-only getter — this Space's own identity object. |
 | `.addMember(member)` | Grows this Space's own view of `'members'`-mode ACL/encryption recipients (idempotent). |
 | `.createNode(kindSchema, initialFields?, {id?})` | Originate a new Node. `id` is IGNORED (self-derived) for `'owner'`/`'named'` Kinds. |
@@ -262,7 +351,7 @@ notice.
 | `sealUpdate()` / `sealPublicUpdate()` | Seal a raw Yjs update into a signed (+ encrypted, for the first) envelope. |
 | `verifyEnvelope(envelope, isAuthorizedWriter)` | Signature + ACL check, either mode. |
 | `openUpdate(envelope, recipient?)` | Decrypt (encrypted mode) or pass through (public mode). |
-| `defineKind(kind, {fields, acl?, notifyTopics?})` | Declare a Kind-Schema. |
+| `defineKind(kind, {fields, acl?, notifyTopics?, persistence?})` | Declare a Kind-Schema. `persistence: 'durable'\|'volatile'` (default `'durable'`) — see §3.4. |
 | `KindRegistry` | `.register()`/`.get()`/`.list()` static registry. |
 | `deriveOwnerNodeId(ownerPub, kind)` | Self-certifying nodeId for `'owner'`/`'named'` Kinds. |
 | `signGrant()` / `verifyGrant()` | `'named'`-ACL delegated-authority messages. |
@@ -270,17 +359,22 @@ notice.
 | `publishAlias(space, spaceId)` | Derive + publish this Space's alias to the registry. |
 | `aliasRegistryKind` / `aliasRegistryNodeId(realPub)` | The registry Kind and its deterministic per-member nodeId. |
 | `AliasRegistry` | Bus watcher maintaining an alias→real map. |
+| `presenceKind` | Self-certifying `'owner'`-ACL, `persistence: 'volatile'` Kind — `online`/`status`/`updatedAt`/`typingIn`/`typingAt` (§3.5). |
+| `presenceNodeId(pub)` | Deterministic presence Node id for `pub`. |
+| `publishPresence(space, fields)` / `setStatus(space, status)` / `setTyping(space, nodeId, typing)` | Write this Space's own presence Node. |
+| `watchPresence(space, pub)` | One-shot presence snapshot of another identity (subscribes if needed). |
+| `PresenceWatcher` | Reactive multi-member presence cache off the bus — `.watch(pub)` / `.of(pubB64)`. |
 | `encodeForWire()` / `decodeFromWire()` | Uint8Array ↔ base64 for any JSON boundary. |
 
 ### Relay / transport / federation (`@qu/space-transport`)
 
 | Export | Purpose |
 |---|---|
-| `createRelayForwarder({hub, members, resolveKindSchema, storage?, bus?, presence?})` | The Relay. Returns `{seen, presence, addMember, ingestFederated}`. |
+| `createRelayForwarder({hub, members, resolveKindSchema, storage?, volatileStorage?, bus?, presence?})` | The Relay. `volatileStorage` mirrors any `persistence: 'volatile'` Kind (§3.4), defaulting to a private `createMemoryStore()`. Returns `{seen, presence, addMember, ingestFederated}`. |
 | `federateRelay({relay, bus, transport, identity})` | Wire a relay as a subscribing peer of another relay. Returns `{isFederated}`. |
 | `createInProcessHub()` / `InProcessTransport` | Same-process transport, for tests. |
 | `createWsServerHub(wss)` | Server-side hub over a real `ws` `WebSocketServer`. |
-| `WsClientTransport` (also `@qu/space-transport/ws-client-transport`) | Real WebSocket client, browser-safe subpath. |
+| `WsClientTransport` (also `@qu/space-transport/ws-client-transport`) | Real WebSocket client, browser-safe subpath. Auto-reconnects (backoff + jitter, backgrounded-tab recovery) by default (`{reconnect: false}` to opt out); `.onStatusChange(cb)` reports the lifecycle (§3.4). |
 | `PresenceTracker` | `.setOnline()`/`.disconnect()`/`.isOnline()`/`.pubFor()`. |
 | `registerPushHandler(bus, {sendPush, pattern?})` | Reference push delivery-channel handler. |
 | `loadOrCreateIdentity(filePath)` / `describeIdentity(identity)` | A relay's own keypair — auto-generate-and-persist, and a printable public summary. |
@@ -294,6 +388,27 @@ notice.
 | `createDurableStore(backingStore?)` | Simulated-persistence tier (tests): same contract, plus `._backingStore`. |
 | `createFileStore(dataDir)` | Real on-disk tier: same contract, one `.ndjson` file per Node. |
 
+### Delivery status / upload outbox (`@qu/space-plugins`, OPTIONAL)
+
+| Export | Purpose |
+|---|---|
+| `awaitRelayAck(bus, nodeId)` | Resolves on the next write-ack for `nodeId` (§3.5) — correlated by ordering. |
+| `readReceiptKind` / `readReceiptNodeId(pub)` | Durable, self-certifying per-reader `'owner'`-ACL Kind holding an encrypted `{contentNodeId: {upTo, at}}` map. |
+| `markRead(space, contentNodeId, upTo)` | Writes this Space's own read marker. |
+| `watchReadReceipts(space, pub)` | One-shot snapshot of another identity's read receipts. |
+| `ReadReceiptWatcher` | Reactive multi-reader cache — `.watch(pub)` / `.upToFor(pubB64, contentNodeId)`. |
+| `uploadOutboxKind` | Self-certifying `'owner'`-ACL Kind, `records: {shape:'atomic', visibility:'public'}` map. |
+| `UploadOutbox` | `.enqueue(meta, blob)` (fire-and-forget upload, resolves once locally saved+queued) / `.retry(id)` / `.statusOf(id)` / `.list()` / `.watch(id, cb)` (reactive). |
+
+### UI bindings (`@qu/space-ui`, OPTIONAL)
+
+| Export | Purpose |
+|---|---|
+| `bindField(el, field, {twoWay?, event?, prop?})` / `bindCheckbox(el, field)` | One/two-way reactive DOM↔Field binding. |
+| `makeInlineEditable(el, field, {onSave?, onCancel?})` | `[contenteditable]` with Enter/blur = save, Escape = cancel. |
+| `bindList(container, field, {key, render, update?})` | Keyed diff rendering of a list Field into a DOM container. |
+| `bindFileInput(inputEl, outbox, {onEnqueue?})` / `bindUploadStatusIcon(iconEl, outbox, fileId, {classes?})` | Wires `<input type="file">` / a status icon to an `UploadOutbox`. |
+
 ## 6. Event topic reference
 
 | Topic | Emitted by | Payload |
@@ -301,6 +416,8 @@ notice.
 | `space.node.<nodeId>.changed` | Space | `{nodeId, kind, origin}` |
 | `notification.<kind>.<topic>` | Space | `{nodeId, kind, topic, to, authorPub, origin}` |
 | `space.member.joined` | Space | `{pub, xPub, name}` |
+| `space.status.changed` | Space | `{status}` — from the transport's own `onStatusChange()`, §3.4 |
+| `space.node.<nodeId>.write-ack` | Space | `{nodeId, seq}` — see §3.5's WRITE-ACK |
 | `debug.space.write.local` / `.remote.accepted` / `.remote.rejected` / `.remote.ignored` | Space | write lifecycle |
 | `debug.space.subscribe.sent` / `.unsubscribe.sent` / `.hello.sent` | Space | `{nodeId}` / `{nodeId}` / `{}` |
 | `debug.space.grant.received` / `.rejected` | Space | `{nodeId}` |

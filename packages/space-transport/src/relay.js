@@ -126,6 +126,51 @@
  * this relay doesn't already have proves there is real local interest -
  * see federation.js for exactly how that trigger is wired.
  *
+ * PRESENCE/TYPING/CUSTOM-STATUS - deliberately NOT special-cased here at
+ * all. Online/offline liveness stays exactly the pre-existing `hello`/
+ * `PresenceTracker` mechanism above (push-routing only, unchanged). Custom
+ * status and a "member X is typing" signal are ordinary `acl.write:
+ * 'owner'` Node writes (see `@qu/space-core`'s `presence.js` -
+ * `presenceKind`, `Space.setStatus()`/`setTyping()`/`watchPresence()`) that
+ * flow through the EXACT SAME `handleWrite()`/`handleSubscribe()` path as
+ * any other Kind - the only thing that makes them "ephemeral" is that
+ * `presenceKind` declares `persistence: 'volatile'` (see this file's own
+ * "PERSISTENCE TIERS" doc comment below and kind-schema.js), which routes
+ * their mirroring to an in-memory store instead of `storage`, not a
+ * transport-level bypass. This was a deliberate design correction: an
+ * earlier draft of this Task added bespoke `'typing'`/`'presence'` wire
+ * messages with their own relay code paths - reverted in favor of this,
+ * because "the storage adapter decides persistence, not the protocol" is a
+ * strictly more reusable mechanism (any future low-value/high-churn Kind
+ * gets it for free) and keeps the relay's own message vocabulary exactly
+ * as small as it was before this Task.
+ *
+ * PERSISTENCE TIERS: `resolveKindSchema(nodeId)`'s returned Kind-Schema now
+ * also decides WHICH storage a write mirrors to - `kindSchema.persistence
+ * === 'volatile'` routes to `volatileStorage` (an in-memory store, created
+ * automatically if the caller doesn't supply one - see this function's own
+ * parameters), anything else (including a relay like `relay-server.js`'s
+ * own `resolveKindSchema: () => true`, which resolves no real Kind-Schema
+ * at all) keeps using `storage` exactly as before this existed. This is
+ * the SAME swappable-adapter idea `@qu/space-storage`'s own memory/durable/
+ * file stores already embody at the whole-space level, now selectable
+ * PER KIND - a caller wanting even `storage`-backed Kinds to survive only
+ * as long as a browser tab (e.g. sessionStorage instead of localStorage)
+ * does so by handing `Space`/the relay a differently-backed adapter
+ * object, never by this framework treating the DATA differently.
+ *
+ * WRITE-ACK: once `acceptWrite()` has mirrored a LOCALLY-originated write
+ * to `storage` (when one is configured), it sends `{type:'write-ack',
+ * nodeId, seq}` back to that write's own author (`excludePeerId`) -
+ * `seq` is simply "how many envelopes this Node's mirror now holds", a
+ * cheap, storage-derived acknowledgment a Kind-Schema/plugin can compare
+ * against "how many writes I've sent" to know a write reached the relay's
+ * durable mirror (`'relay-synced'`), as distinct from a live peer merely
+ * having received and applied it (`'client-synced'`, which a Space already
+ * observes as an ordinary remote write) - see `@qu/space-plugins`'
+ * `delivery-status.js` for the intended consumer. A no-op when no `storage`
+ * is configured - there is nothing to have durably mirrored yet.
+ *
  * PUSH ROUTING (the `notify`/`bus` pair): when a write's envelope carries
  * a `notify` hint (see `@qu/space-core`'s `envelope.js` - a small,
  * UNENCRYPTED `{topic, to?}` the AUTHOR attached, never something this
@@ -164,14 +209,20 @@
  */
 import { verifyEnvelope, deriveOwnerNodeId, verifyGrant } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
+import { createMemoryStore } from '@qu/space-storage';
 import { PresenceTracker } from './presence-tracker.js';
 
 const HELLO_DOMAIN = 'qu-space-hello-v1'; // MUST match @qu/space-core's own HELLO_DOMAIN (space.js) - duplicated as a literal rather than imported, to keep this package's only @qu/space-core dependency at "the same version, not a live shared module" (matches this file's own already-existing `verifyEnvelope` import boundary).
 
 /**
- * @param {{hub: object, members: Array<{pub: Uint8Array}>, resolveKindSchema: (nodeId: string) => object, storage?: object, bus?: import('@qu/events').EventBus, presence?: PresenceTracker}} params
+ * @param {{hub: object, members: Array<{pub: Uint8Array}>, resolveKindSchema: (nodeId: string) => object, storage?: object, volatileStorage?: object, bus?: import('@qu/events').EventBus, presence?: PresenceTracker}} params
+ *   `volatileStorage` - see this file's own "PERSISTENCE TIERS" doc comment: the mirror for any Kind whose Kind-Schema declares `persistence: 'volatile'` (e.g. `@qu/space-core`'s `presenceKind`), regardless of what `storage` above is. Defaults to a private `@qu/space-storage` `createMemoryStore()` - a fresh one per `createRelayForwarder()` call, never shared across relay instances by accident.
  */
-export function createRelayForwarder({ hub, members, resolveKindSchema, storage = null, bus = null, presence = new PresenceTracker() }) {
+export function createRelayForwarder({ hub, members, resolveKindSchema, storage = null, volatileStorage = createMemoryStore(), bus = null, presence = new PresenceTracker() }) {
+  /** See this file's own "PERSISTENCE TIERS" doc comment. */
+  function storageFor(kindSchema) {
+    return kindSchema?.persistence === 'volatile' ? volatileStorage : storage;
+  }
   // A local, mutable copy - addMember() (see the returned API, and this
   // file's own "DYNAMIC MEMBERSHIP" doc comment below) appends to THIS
   // array/Set, never to the caller's original `members` argument.
@@ -193,6 +244,9 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
 
   /** @type {Array<{nodeId: string, envelope: object}>} Every envelope this relay ever handled, ciphertext/signature only - for tests to assert "no plaintext ever passed through here." */
   const seen = [];
+
+  /** @type {Map<string, number>} nodeId -> how many envelopes this relay's mirror currently holds for it - the `seq` a WRITE-ACK reports (see this file's own "WRITE-ACK" doc comment). Reset to 1 on a snapshot/compaction (`storage.replace()`), incremented on every ordinary append - mirrors exactly what `storage.load(nodeId)` would return the length of, without an extra read per write. */
+  const mirrorCount = new Map();
 
   hub.registerRelay(async (fromPeerId, message) => {
     if (message?.type === 'hello') {
@@ -278,8 +332,9 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     subscribers.get(nodeId).add(fromPeerId);
     bus?.emit('debug.relay.subscribe.received', { nodeId, pub: pubB64 });
 
-    if (!storage) return; // nothing to catch up on - but the subscription itself is tracked either way, live pushes still reach this peer from here on.
-    const envelopes = await storage.load(nodeId);
+    const nodeStorage = storageFor(kindSchema);
+    if (!nodeStorage) return; // nothing to catch up on - but the subscription itself is tracked either way, live pushes still reach this peer from here on.
+    const envelopes = await nodeStorage.load(nodeId);
     for (const envelope of envelopes) {
       hub.deliverTo(fromPeerId, 'relay', { nodeId, envelope });
     }
@@ -404,15 +459,24 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     bus?.emit('debug.relay.write.received', { nodeId, kind: kindSchema.kind });
 
     seen.push({ nodeId, envelope });
-    if (storage) {
+    const nodeStorage = storageFor(kindSchema);
+    if (nodeStorage) {
       // A `snapshot: true` envelope (see @qu/space-core's envelope.js "SNAPSHOT/COMPACTION" doc
       // comment) REPLACES this Node's entire mirrored log instead of appending to it - the actual
       // fix for a mirror that otherwise grows forever, even past content Yjs itself already
       // garbage-collected in memory. Authorized identically to any other write (verifyEnvelope()
       // above already ran the SAME ACL check) - no separate "who may compact" concept exists.
-      if (envelope.snapshot) await storage.replace(nodeId, [envelope]);
-      else await storage.append(nodeId, envelope); // the mirror - present even if the author disconnects the instant after this line runs.
+      if (envelope.snapshot) {
+        await nodeStorage.replace(nodeId, [envelope]);
+        mirrorCount.set(nodeId, 1);
+      } else {
+        await nodeStorage.append(nodeId, envelope); // the mirror - present even if the author disconnects the instant after this line runs.
+        mirrorCount.set(nodeId, (mirrorCount.get(nodeId) ?? 0) + 1);
+      }
       bus?.emit('debug.relay.write.mirrored', { nodeId, snapshot: envelope.snapshot === true });
+      // See this file's own "WRITE-ACK" doc comment - only meaningful for a LOCALLY-originated
+      // write (a real `excludePeerId`); a federated envelope has no local author on this relay to ack.
+      if (excludePeerId !== null) hub.deliverTo(excludePeerId, 'relay', { type: 'write-ack', nodeId, seq: mirrorCount.get(nodeId) });
     }
 
     const toPeerIds = [];

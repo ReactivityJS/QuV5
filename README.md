@@ -22,7 +22,9 @@ kept up to date with every architectural change. For the practical
 how-to, see [`docs/v5-space-core-guide.md`](./docs/v5-space-core-guide.md)
 (the `Space`/`Node`/`Field` API, what's actually cryptographically
 enforced, the local-first query API, alias identities, compaction,
-federation, and how to run a relay standalone or via Docker).
+federation, reconnect/resync, per-Kind persistence tiers, the optional
+`@qu/space-plugins`/`@qu/space-ui` add-ons, and how to run a relay
+standalone or via Docker).
 
 ## Packages
 
@@ -47,6 +49,14 @@ federation, and how to run a relay standalone or via Docker).
   the ONE hooks/listeners/slots mechanism used for domain notifications,
   Space/Node change events, and relay-side routing/debugging alike,
   client-side and relay-side.
+- [`packages/space-plugins`](./packages/space-plugins) - `@qu/space-plugins`
+  (optional): delivery-status helpers (write-ack correlation, durable
+  read receipts) and `UploadOutbox` (local-save-then-sync file upload
+  queue with retry) - built entirely on `@qu/space-core`'s public API.
+- [`packages/space-ui`](./packages/space-ui) - `@qu/space-ui` (optional):
+  vanilla JS/DOM reactive bindings - one/two-way field binding,
+  contenteditable inline-edit with save/cancel, keyed list diffing,
+  file-selection + upload-status icons - no framework, no build step.
 
 ## Development
 

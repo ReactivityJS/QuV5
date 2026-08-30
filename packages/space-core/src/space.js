@@ -53,8 +53,32 @@
  *     connection this arrives on is already open for every other message
  *     type, so a new member is learned about exactly as promptly as a
  *     Node update is.
+ *   - `space.status.changed` - `{status}`, straight from the transport's
+ *     own `onStatusChange()` if it has one (see e.g. `@qu/space-transport`'s
+ *     `WsClientTransport` - `InProcessTransport` has none, so this never
+ *     fires there): `'connected'`/`'disconnected'`/`'reconnecting'`/
+ *     `'reconnected'` - a UI's own "you're offline"/"reconnecting…" banner
+ *     reads this feed directly, no separate connectivity API needed.
+ * Custom presence status and "member X is typing" are DELIBERATELY not a
+ * feed documented here - see `presence.js`'s own doc comment: they're
+ * ordinary Node writes (`presenceKind`, `acl.write: 'owner'`,
+ * `persistence: 'volatile'`), so they emit the exact SAME `space.node.
+ * <nodeId>.changed` this doc comment already describes, nothing special.
+ *
+ * RESYNC ON RECONNECT: the same `onStatusChange` wiring that emits
+ * `space.status.changed` also re-sends `hello` and re-subscribes every
+ * currently attached Node (`this._nodes`) on `'connected'`/`'reconnected'` -
+ * a relay answers each re-`subscribe` by replaying its full mirror for that
+ * Node (see relay.js's `handleSubscribe()`), so whatever changed while this
+ * Space was offline (this peer's own queued writes included - see
+ * `WsClientTransport`'s own send-queue doc comment) arrives the same way
+ * initial catch-up already does. No separate "diff" protocol needed: Yjs
+ * updates are idempotent to re-apply, so replaying already-known history
+ * is harmless, just occasionally redundant - `compactNode()` is the
+ * existing answer for keeping that redundant history small.
  * Omitting `bus` (the default) makes a Space behave exactly as before this
- * existed - nothing is emitted, nothing else changes.
+ * existed - nothing is emitted, nothing else changes. Resync itself does
+ * NOT depend on `bus` - it runs regardless, `bus` only reports it.
  *
  * The SAME `bus` also gets a `debug.space.*` family, purely for optional
  * debugging/observability (see `@qu/events`' `createDebugLogger()`) - every
@@ -105,19 +129,50 @@ const REMOTE_ORIGIN = Symbol('space-core:remote-update');
 /** Signed by a Space on connect to prove key possession for presence purposes - see this file's own doc comment. Exported so `@qu/space-transport`'s relay verifies against the exact same bytes. */
 export const HELLO_DOMAIN = 'qu-space-hello-v1';
 
+/**
+ * The zero-config default for a `persistence: 'volatile'` Kind's storage
+ * (see kind-schema.js's own doc comment) when a caller doesn't hand
+ * `Space` a `volatileStorage` of their own - same tiny in-memory shape as
+ * `@qu/space-storage`'s `createMemoryStore()` (this file can't import that
+ * package directly: `@qu/space-storage` itself depends on `@qu/space-core`,
+ * so the dependency would be circular) - a caller who wants volatile Kinds
+ * to live somewhere OTHER than plain process memory (e.g. a browser's
+ * `sessionStorage`, cleared when the tab closes rather than the process
+ * exiting) passes their own adapter as `volatileStorage` instead; this is
+ * only ever the fallback for "didn't ask for anything specific."
+ */
+function createInMemoryVolatileStore() {
+  const log = new Map();
+  return {
+    async append(nodeId, envelope) {
+      const list = log.get(nodeId) ?? [];
+      list.push(envelope);
+      log.set(nodeId, list);
+    },
+    async load(nodeId) {
+      return [...(log.get(nodeId) ?? [])];
+    },
+    async replace(nodeId, envelopes) {
+      log.set(nodeId, [...envelopes]);
+    },
+  };
+}
+
 export class Space {
   /**
-   * @param {{identity: object, members: Array<{pub: Uint8Array, xPub: Uint8Array}>, transport: object, storage?: object, bus?: import('@qu/events').EventBus}} params
+   * @param {{identity: object, members: Array<{pub: Uint8Array, xPub: Uint8Array}>, transport: object, storage?: object, volatileStorage?: object, bus?: import('@qu/events').EventBus}} params
    *   `identity` = `{signingKey, signingPub, xPrivateKey, xPublicKey}` (Ed25519 + X25519 pairs, e.g. from QuCrypto.generateKeypair()).
    *   `members` = every space member's public keys (encryption recipients + write-ACL, kept simple for the PoC - see kind-schema.js).
-   *   `storage` = optional; omitting it is the "flüchtig/memory-only" tier (see docs/v5-space-core-guide.md) - a Node still syncs live, nothing survives a reload.
+   *   `storage` = optional; omitting it is the "flüchtig/memory-only" tier (see docs/v5-space-core-guide.md) - a Node still syncs live, nothing survives a reload. Used for every Kind EXCEPT a `persistence: 'volatile'` one (see `_storageFor()` below).
+   *   `volatileStorage` = optional; the storage used for a `persistence: 'volatile'` Kind (e.g. `presenceKind`, see `presence.js`) regardless of what `storage` above is - defaults to a private in-memory adapter if omitted. Pass your own (e.g. a `sessionStorage`-backed one in a browser) to control exactly how/where "ephemeral" data lives, same swappable-adapter idea `storage` already offers for durable data.
    *   `bus` = optional - see this file's own doc comment for what gets emitted on it.
    */
-  constructor({ identity, members, transport, storage = null, bus = null }) {
+  constructor({ identity, members, transport, storage = null, volatileStorage = createInMemoryVolatileStore(), bus = null }) {
     this._identity = identity;
     this._members = [...members]; // own copy - addMember() (see below) must never mutate the caller's own array out from under them.
     this._transport = transport;
     this._storage = storage;
+    this._volatileStorage = volatileStorage;
     this._bus = bus;
     /** @type {Map<string, SpaceNode>} */
     this._nodes = new Map();
@@ -126,6 +181,7 @@ export class Space {
     /** @type {Map<string, number>} nodeId -> active reference count - see `useNode()`'s own doc comment below. */
     this._refCounts = new Map();
     this._transport.onMessage((msg) => this._handleIncoming(msg.data));
+    this._transport.onStatusChange?.((update) => this._handleTransportStatus(update));
     this._sendHello(); // fire-and-forget, see this file's own doc comment.
   }
 
@@ -133,6 +189,20 @@ export class Space {
     const sig = await QuCrypto.sign(new TextEncoder().encode(HELLO_DOMAIN), this._identity.signingKey);
     this._transport.send({ type: 'hello', pub: this._identity.signingPub, sig });
     this._bus?.emit('debug.space.hello.sent', {});
+  }
+
+  /**
+   * See this file's own "RESYNC ON RECONNECT" doc comment: the transport's
+   * `onStatusChange()` (optional - only `WsClientTransport` has one today)
+   * drives both the `space.status.changed` bus event AND the actual resync
+   * work, so a caller with no `bus` at all still gets working reconnect
+   * behavior, not just a missed notification.
+   */
+  _handleTransportStatus({ status }) {
+    this._bus?.emit('space.status.changed', { status });
+    if (status !== 'connected' && status !== 'reconnected') return;
+    this._sendHello();
+    for (const nodeId of this._nodes.keys()) this._sendSubscribeRequest(nodeId);
   }
 
   /** This Space's own identity, `{signingKey, signingPub, xPrivateKey, xPublicKey}` - read-only, for framework-level add-ons (e.g. alias.js's `publishAlias()`) that need it without reaching into a "private" field. */
@@ -386,14 +456,26 @@ export class Space {
         ? await sealPublicUpdate(snapshotBytes, this._identity, null, true)
         : await sealUpdate(snapshotBytes, this._identity, this._recipientXPubKeys(), null, true);
 
-    await this._storage?.replace(id, [envelope]);
+    await this._storageFor(kindSchema)?.replace(id, [envelope]);
     this._transport.send({ nodeId: id, envelope });
     this._bus?.emit('debug.space.compact.sent', { nodeId: id, bytes: snapshotBytes.length });
   }
 
+  /**
+   * Which storage adapter a Kind's writes go through - see kind-schema.js's
+   * own `persistence` doc comment. `'volatile'` ALWAYS resolves to
+   * something (a caller-supplied `volatileStorage` or the private default
+   * created in this file's own constructor) - only the `'durable'` (the
+   * default, unnamed) tier can be `null` (the pre-existing "flüchtig/
+   * memory-only whole Space" behavior, unchanged).
+   */
+  _storageFor(kindSchema) {
+    return kindSchema?.persistence === 'volatile' ? this._volatileStorage : this._storage;
+  }
+
   /** Replays a Node's envelope history from storage (see @qu/space-storage) - the "durable persistence survives a reload" path. */
   async loadNode(id, kindSchema) {
-    if (!this._storage) throw new Error('Space.loadNode: no storage adapter mounted');
+    if (!this._storageFor(kindSchema)) throw new Error('Space.loadNode: no storage adapter mounted');
     const doc = new Y.Doc();
     const node = this._attach(id, kindSchema, doc, { skipReSeal: true });
     await this._hydrateFromStorage(id, kindSchema, doc);
@@ -403,7 +485,7 @@ export class Space {
 
   /** Shared by `loadNode()` and `useNode()`: applies every already-verified-on-write envelope this Space's OWN storage holds for `id` into `doc`, oldest first. Never trusts storage blindly - a tampered/foreign entry is skipped, same as any other unverified envelope. */
   async _hydrateFromStorage(id, kindSchema, doc) {
-    const envelopes = await this._storage.load(id);
+    const envelopes = await this._storageFor(kindSchema).load(id);
     const isAuthorized = this._isAuthorizedWriter(kindSchema, id);
     for (const envelope of envelopes) {
       if (!(await verifyEnvelope(envelope, isAuthorized))) continue;
@@ -455,7 +537,7 @@ export class Space {
     if (!node) {
       const doc = new Y.Doc();
       node = this._attach(id, kindSchema, doc, { skipReSeal: true });
-      if (this._storage) await this._hydrateFromStorage(id, kindSchema, doc);
+      if (this._storageFor(kindSchema)) await this._hydrateFromStorage(id, kindSchema, doc);
       node._skipReSeal = false;
       await this._sendSubscribeRequest(id); // awaited (unlike subscribeNode()'s own fire-and-forget) - useNode() already returns a Promise, so a caller awaiting it can rely on the subscribe request having actually left by the time it resolves.
     }
@@ -495,7 +577,7 @@ export class Space {
       visibility === 'public'
         ? await sealPublicUpdate(update, this._identity, notify)
         : await sealUpdate(update, this._identity, this._recipientXPubKeys(), notify);
-    await this._storage?.append(nodeId, envelope);
+    await this._storageFor(node.kindSchema)?.append(nodeId, envelope);
     this._transport.send({ nodeId, envelope });
     this._bus?.emit('debug.space.write.local', { nodeId, kind: node.kind, bytes: update.length, notify });
     this._emitChangeEvents(nodeId, node, { origin: 'local', notify, authorPub: this._identity.signingPub });
@@ -504,6 +586,14 @@ export class Space {
   async _handleIncoming(message) {
     const { nodeId, envelope, type, pub, xPub, name } = message;
     if (type === 'subscribe' || type === 'unsubscribe' || type === 'hello') return; // all three are relay-bound, not peer-bound (see _sendSubscribeRequest/unsubscribeNode/_sendHello) - defensive no-op if one ever reaches here anyway.
+    if (type === 'write-ack') {
+      // See @qu/space-transport's relay.js "WRITE-ACK" doc comment - `seq` is this Node's mirror
+      // size after the ack-triggering write landed, a cheap, storage-derived "your write reached
+      // the relay's durable mirror" signal distinct from a live peer applying it (which arrives as
+      // an ordinary `space.node.<nodeId>.changed` with `origin: 'remote'` on THEIR Space, not this one).
+      this._bus?.emit(`space.node.${message.nodeId}.write-ack`, { nodeId: message.nodeId, seq: message.seq });
+      return;
+    }
     if (type === 'grant') {
       // See grant.js's own doc comment: verified independently here, never trusted just because
       // it arrived - a relay (or a malicious peer on a peer-to-peer transport) forwarding a
@@ -540,8 +630,8 @@ export class Space {
     // REPLACES this Space's own local storage log for the Node instead of appending to it - the
     // same compaction that just happened for the relay's mirror also has to happen for every
     // OTHER peer's own durable copy, or the point of compacting would only ever apply to one place.
-    if (envelope.snapshot) await this._storage?.replace(nodeId, [envelope]);
-    else await this._storage?.append(nodeId, envelope);
+    if (envelope.snapshot) await this._storageFor(node.kindSchema)?.replace(nodeId, [envelope]);
+    else await this._storageFor(node.kindSchema)?.append(nodeId, envelope);
     this._bus?.emit('debug.space.write.remote.accepted', { nodeId, kind: node.kind, authorPub: QuCrypto.toBase64(envelope.pub), bytes: bytes.length });
     this._emitChangeEvents(nodeId, node, { origin: 'remote', notify: envelope.notify ?? null, authorPub: envelope.pub });
   }
