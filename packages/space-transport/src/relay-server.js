@@ -95,14 +95,33 @@
  * ever fall back to flat `members` ACL, never `'owner'`/`'named'`. Run
  * `createRelayForwarder()` directly with a real `resolveKindSchema` (as
  * every test in `test/` does, and `demo/auto-demo.mjs` routes by nodeId
- * prefix) to get that enforcement. Also unbuilt: any mechanism for an
- * operator to ADD a `'members'`-mode member to an already-running
- * `relay-server.js` process (the in-process `relay.addMember()` exists
- * and works - see relay.js's own doc comment - but nothing here exposes
- * it over the network; `demo/relay.mjs`'s `/join` is a deliberately
- * insecure, demo-only example of what that would need to guard against).
+ * prefix) to get that enforcement.
+ *
+ * SERVES AN APP on this SAME HTTP server/port, alongside the WebSocket
+ * upgrade endpoint - `GET /` and `/index.html`, `GET /bundle.js`/`.map`,
+ * `GET /members.json`, `POST /join` (see `relay-app-server.js`'s own doc
+ * comment for what each does). TODAY that app is `demo/web/` - the same
+ * browser chat client `demo/relay.mjs` serves - bundled at DOCKER BUILD
+ * TIME (see the Dockerfile) so the runtime image needs no bundler. This
+ * is a deliberate first step, not the final shape: the plan is for this
+ * to become "the primary app the relay loads and defines on start,"
+ * replacing today's demo content with a real one, without changing how
+ * the relay itself serves it (see architecture.md).
+ *
+ *   QU_ALLOW_JOIN           - default `true`. Whether `POST /join` lets
+ *                             ANY caller register a self-generated
+ *                             identity as a new `'members'`-mode member,
+ *                             no authentication beyond well-formed base64
+ *                             keys (see `relay-app-server.js`'s own doc
+ *                             comment on this tradeoff). Set to the exact
+ *                             string `"false"` to disable it - the join
+ *                             route then answers 403 to everyone, and
+ *                             membership is fixed to whatever
+ *                             `QU_MEMBERS_JSON` configured at boot.
  */
 import { createServer } from 'node:http';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { QuCrypto } from '@qu/core';
 import { EventBus } from '@qu/events';
@@ -112,11 +131,16 @@ import { WsClientTransport } from './ws-client-transport.js';
 import { createRelayForwarder } from './relay.js';
 import { federateRelay } from './federation.js';
 import { loadOrCreateIdentity, describeIdentity } from './relay-identity.js';
+import { createAppRequestHandler } from './relay-app-server.js';
 
 const PORT = Number(process.env.QU_RELAY_PORT || 8081);
 const DATA_DIR = process.env.QU_RELAY_DATA_DIR ?? '/data';
 const IDENTITY_FILE = process.env.QU_RELAY_IDENTITY_FILE || (DATA_DIR ? `${DATA_DIR}/relay-identity.json` : null);
 const FEDERATE_UPSTREAM_URL = process.env.QU_FEDERATE_UPSTREAM_URL || null;
+const ALLOW_JOIN = process.env.QU_ALLOW_JOIN !== 'false';
+// packages/space-transport/src/relay-server.js -> up 3 -> repo root -> demo/web. See this file's
+// own "SERVES AN APP" doc comment on why THIS specific app for now.
+const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'demo', 'web');
 
 let members = [];
 const membersJson = process.env.QU_MEMBERS_JSON;
@@ -160,15 +184,7 @@ async function main() {
 
   const relayIdentity = await resolveIdentity();
 
-  const httpServer = createServer((req, res) => {
-    if (req.url === '/healthz') {
-      res.writeHead(200, { 'content-type': 'text/plain' });
-      res.end('ok');
-      return;
-    }
-    res.writeHead(404);
-    res.end();
-  });
+  const httpServer = createServer((req, res) => handleRequest(req, res));
 
   // perMessageDeflate: 'ws' already offers this from the CLIENT side by default (WsClientTransport/
   // a browser's native WebSocket) - the server has to opt in too, or the extension never actually
@@ -190,6 +206,22 @@ async function main() {
     bus,
   });
 
+  // See this file's own "SERVES AN APP" doc comment - `members` is the SAME array given to
+  // createRelayForwarder() above, so a successful /join updates both this relay's own ACL/
+  // encryption-recipient list AND what /members.json reports, not just one of them.
+  const handleAppRequest = createAppRequestHandler({ webDir: WEB_DIR, members, relay, allowJoin: ALLOW_JOIN, log: console.log });
+
+  function handleRequest(req, res) {
+    if (req.url === '/healthz') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('ok');
+      return;
+    }
+    if (handleAppRequest(req, res)) return;
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('not found');
+  }
+
   if (FEDERATE_UPSTREAM_URL) {
     const upstreamTransport = new WsClientTransport(FEDERATE_UPSTREAM_URL, { WebSocketImpl: WebSocket });
     await upstreamTransport.connect();
@@ -205,6 +237,7 @@ async function main() {
         ? `${members.length} authorized 'members'-mode member(s)`
         : `no 'members'-mode members configured (owner/named-ACL Kinds work regardless - see this file's own doc comment)`;
     console.log(`[qu-relay] listening on :${PORT} - ${membersNote}, blind relay (no plaintext ever decrypted), ${mirrorNote}`);
+    console.log(`[qu-relay] app: open http://localhost:${PORT}/ in a browser - join is ${ALLOW_JOIN ? 'OPEN to anyone (QU_ALLOW_JOIN=false to lock it down)' : 'DISABLED (QU_ALLOW_JOIN=false)'}`);
   });
 }
 

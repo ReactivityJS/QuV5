@@ -15,8 +15,15 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { QuCrypto } from '@qu/core';
+import { buildWebBundle } from '../../../demo/web/build.mjs';
 
 const RELAY_SERVER_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'relay-server.js');
+
+// A real Docker build bundles demo/web/main.js at BUILD TIME (see the Dockerfile) - running
+// relay-server.js straight from source, as these tests do, needs that same bundle to already
+// exist, so build it once up front rather than relying on a prior manual `npm run build:web`.
+await buildWebBundle();
 
 function freePort() {
   // Ports in this range are unlikely to collide across parallel test files - good enough for a
@@ -138,5 +145,76 @@ test('QU_FEDERATE_UPSTREAM_URL connects this relay to an upstream relay as a sub
   } finally {
     upstream.kill();
     await rm(upstreamDir, { recursive: true, force: true });
+  }
+});
+
+test('relay-server.js serves the browser app at / and /bundle.js, and answers /members.json + POST /join', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qu-relay-server-'));
+  const port = freePort();
+  const child = spawn('node', [RELAY_SERVER_PATH], {
+    env: { ...process.env, QU_RELAY_PORT: String(port), QU_RELAY_DATA_DIR: dir, QU_MEMBERS_JSON: '' },
+  });
+  try {
+    await waitUntil(() => isHealthy(port));
+
+    const indexRes = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(indexRes.ok, true);
+    assert.match(indexRes.headers.get('content-type'), /text\/html/);
+
+    const bundleRes = await fetch(`http://127.0.0.1:${port}/bundle.js`);
+    assert.equal(bundleRes.ok, true);
+
+    const beforeJoin = await (await fetch(`http://127.0.0.1:${port}/members.json`)).json();
+    assert.deepEqual(beforeJoin, []); // no QU_MEMBERS_JSON configured - nobody yet.
+
+    const kp = await QuCrypto.generateKeypair();
+    const joinRes = await fetch(`http://127.0.0.1:${port}/join`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'newcomer', pub: QuCrypto.toBase64(kp.publicKey), xPub: QuCrypto.toBase64(kp.xPublicKey) }),
+    });
+    assert.equal(joinRes.ok, true);
+    const joinBody = await joinRes.json();
+    assert.equal(joinBody.ok, true);
+    assert.ok(joinBody.fingerprint);
+
+    const afterJoin = await (await fetch(`http://127.0.0.1:${port}/members.json`)).json();
+    assert.equal(afterJoin.length, 1);
+    assert.equal(afterJoin[0].name, 'newcomer');
+    assert.equal(afterJoin[0].pub, QuCrypto.toBase64(kp.publicKey));
+  } finally {
+    child.kill();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('QU_ALLOW_JOIN=false disables joining (403) while the app is still served', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qu-relay-server-'));
+  const port = freePort();
+  const child = spawn('node', [RELAY_SERVER_PATH], {
+    env: { ...process.env, QU_RELAY_PORT: String(port), QU_RELAY_DATA_DIR: dir, QU_ALLOW_JOIN: 'false' },
+  });
+  try {
+    let stdout = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    await waitUntil(() => isHealthy(port));
+    await waitUntil(() => stdout.includes('DISABLED'));
+
+    const indexRes = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(indexRes.ok, true); // the app itself is unaffected - only /join is gated.
+
+    const kp = await QuCrypto.generateKeypair();
+    const joinRes = await fetch(`http://127.0.0.1:${port}/join`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'blocked', pub: QuCrypto.toBase64(kp.publicKey), xPub: QuCrypto.toBase64(kp.xPublicKey) }),
+    });
+    assert.equal(joinRes.status, 403);
+
+    const members = await (await fetch(`http://127.0.0.1:${port}/members.json`)).json();
+    assert.deepEqual(members, []); // the rejected join never took effect.
+  } finally {
+    child.kill();
+    await rm(dir, { recursive: true, force: true });
   }
 });

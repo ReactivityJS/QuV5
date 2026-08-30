@@ -1,0 +1,7 @@
+.git
+node_modules
+**/node_modules
+demo/.identities
+demo/.data
+demo/web/dist
+*.log

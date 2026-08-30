@@ -208,7 +208,8 @@ envelope).
 | `src/presence-tracker.js` | `PresenceTracker` — pubkey ↔ peerId online/offline state, built from signed `hello` messages. |
 | `src/push-handler.js` | `registerPushHandler(bus, {sendPush})` — reference delivery-channel handler for `relay.notify.**`. |
 | `src/relay-identity.js` | `loadOrCreateIdentity(filePath)`/`describeIdentity()` — a relay's own keypair, auto-generated on first boot and persisted (only needed for federation). |
-| `src/relay-server.js` | Standalone, env-var-configured relay process (`QU_*`, see its own doc comment; `--print-identity` CLI flag) — what the Dockerfile runs. |
+| `src/relay-app-server.js` | `createAppRequestHandler()` — the shared HTTP layer (static browser app, `GET /members.json`, `POST /join`) both `relay-server.js` and `demo/relay.mjs` serve alongside their WebSocket endpoint. |
+| `src/relay-server.js` | Standalone, env-var-configured relay process (`QU_*`, see its own doc comment; `--print-identity` CLI flag) — what the Dockerfile runs. Also serves an app (today, `demo/web/`) via `relay-app-server.js` — see its own "SERVES AN APP" doc comment. |
 | `src/index.js` | Package's public export surface (main entry — excludes `ws-client-transport.js`'s browser-safe subpath, see that file's own doc comment on why). |
 
 ### `demo/`
@@ -283,6 +284,7 @@ notice.
 | `PresenceTracker` | `.setOnline()`/`.disconnect()`/`.isOnline()`/`.pubFor()`. |
 | `registerPushHandler(bus, {sendPush, pattern?})` | Reference push delivery-channel handler. |
 | `loadOrCreateIdentity(filePath)` / `describeIdentity(identity)` | A relay's own keypair — auto-generate-and-persist, and a printable public summary. |
+| `createAppRequestHandler({webDir, members, relay, allowJoin?, onJoin?, log?})` | Shared HTTP handler: static browser app, `GET /members.json`, `POST /join`. |
 
 ### Storage (`@qu/space-storage`)
 

@@ -150,9 +150,12 @@ and mirrors ciphertext it cannot decrypt.
   terminals on the same machine," not a real key-distribution mechanism.
 - `POST /join` (what lets a browser tab join live) has NO AUTHENTICATION
   beyond "well-formed base64 keys" - anyone who can reach the relay port
-  can join the room as a fully-authorized member. Fine for "two people
-  testing," not for anything actually private - see `relay.mjs`'s own doc
-  comment on `/join` for what a real deployment would add in front of it.
+  can join the room as a fully-authorized member. This is the SAME shared
+  handler (`@qu/space-transport`'s `relay-app-server.js`) the production
+  `relay-server.js`/Docker image now also serves - there, it defaults to
+  the same "anyone may join" behavior (`QU_ALLOW_JOIN=false` to disable
+  it, see `docs/v5-space-core-guide.md` §10), not something unique to this
+  local demo.
 - A member added after another client's `Space` was already constructed
   (via `demo:relay` restart for the CLI, or `/join` for the browser) is
   invisible to that client until it learns about them - the CLI demo

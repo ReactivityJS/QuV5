@@ -19,6 +19,12 @@ services:
       # and persisted under /data on first boot - see relay-identity.js) is
       # what authenticates it to the upstream relay.
       QU_FEDERATE_UPSTREAM_URL: ${QU_FEDERATE_UPSTREAM_URL:-}
+      # Default true (unset here = true) - anyone reaching this port can
+      # join the demo app at / as a new 'members'-mode member, no auth
+      # beyond well-formed keys. Set to the exact string "false" to lock
+      # membership to QU_MEMBERS_JSON only - see relay-server.js's own doc
+      # comment.
+      QU_ALLOW_JOIN: ${QU_ALLOW_JOIN:-}
     volumes:
       - qu-space-relay-data:/data
     restart: unless-stopped
