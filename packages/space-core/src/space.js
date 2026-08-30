@@ -59,8 +59,11 @@
  *   - `debug.space.write.remote.ignored` - an incoming envelope arrived for
  *     a Node this Space never subscribed to (ordinary relay fan-out, not
  *     an error) and was silently ignored, `{nodeId}`.
- *   - `debug.space.subscribe.sent` / `debug.space.hello.sent` - the two
- *     signed control messages this Space sends on its own, `{nodeId}` / `{}`.
+ *   - `debug.space.subscribe.sent` / `debug.space.unsubscribe.sent` /
+ *     `debug.space.hello.sent` - the signed control messages this Space
+ *     sends on its own, `{nodeId}` / `{nodeId}` / `{}`.
+ *   - `debug.space.grant.received` / `.rejected` - an incoming `grant`
+ *     control message (see grant.js) was verified and applied, or wasn't, `{nodeId}`.
  * Deliberately NOT instrumented: plain local reads (`field.get()`/
  * `toArray()`) - they touch no network/storage and aren't where a sync bug
  * usually hides; this stays scoped to what actually crosses a process
@@ -227,6 +230,12 @@ export class Space {
     // every later update on this Node.
     const doc = new Y.Doc();
     const node = this._attach(id, kindSchema, doc);
+    // A relay only ever forwards a write to a Node's SUBSCRIBERS (see @qu/space-transport's
+    // relay.js "SUBSCRIBER-TRACKING" doc comment) - without this, the creator of a Node would
+    // never see anyone ELSE's later, otherwise-authorized write to it (e.g. a 'named'-ACL
+    // grantee writing back - see acl.test.js), since creating a Node is not, by itself, asking to
+    // be pushed updates for it. Fire-and-forget, same posture as subscribeNode()'s own request.
+    this._sendSubscribeRequest(id);
     stampMeta(doc, kindSchema, this._identity.signingPub);
     for (const [name, value] of Object.entries(initialFields)) {
       const field = node.field(name);
@@ -261,6 +270,35 @@ export class Space {
     const sig = await QuCrypto.sign(new TextEncoder().encode(nodeId), this._identity.signingKey);
     this._transport.send({ type: 'subscribe', nodeId, pub: this._identity.signingPub, sig });
     this._bus?.emit('debug.space.subscribe.sent', { nodeId });
+  }
+
+  /**
+   * The exact inverse of `subscribeNode()`: tells a relay (see
+   * @qu/space-transport's relay.js) to stop live-forwarding `id` to this
+   * connection, and drops this Space's own local handle for it (its Y.Doc
+   * included - nothing more references it after this call returns, so it
+   * becomes eligible for GC the moment the caller drops its own reference
+   * to the `SpaceNode` too). Deliberately NOT reference-counted here (a
+   * caller-tracked "how many things still want this Node" policy is
+   * `Space`'s own local-first lazy query API's job - a later, separate
+   * task - not this method's) - calling this once always fully
+   * unsubscribes, regardless of how many call sites hold a reference to
+   * the same Node.
+   *
+   * Dropping the local Y.Doc means a later `subscribeNode(id, ...)` call
+   * for the SAME id starts completely fresh (a brand-new empty doc, a
+   * brand-new `subscribe` request) rather than being a no-op - see that
+   * method's own early-return-if-already-attached check, which is exactly
+   * what would otherwise make an unsubscribe-then-resubscribe permanently
+   * stuck.
+   * @param {string} id
+   */
+  async unsubscribeNode(id) {
+    if (!this._nodes.has(id)) return;
+    this._nodes.delete(id);
+    const sig = await QuCrypto.sign(new TextEncoder().encode(id), this._identity.signingKey);
+    this._transport.send({ type: 'unsubscribe', nodeId: id, pub: this._identity.signingPub, sig });
+    this._bus?.emit('debug.space.unsubscribe.sent', { nodeId: id });
   }
 
   /** Replays a Node's envelope history from storage (see @qu/space-storage) - the "durable persistence survives a reload" path. */
@@ -310,7 +348,7 @@ export class Space {
 
   async _handleIncoming(message) {
     const { nodeId, envelope, type, pub, xPub, name } = message;
-    if (type === 'subscribe' || type === 'hello') return; // both are relay-bound, not peer-bound (see _sendSubscribeRequest/_sendHello) - defensive no-op if one ever reaches here anyway.
+    if (type === 'subscribe' || type === 'unsubscribe' || type === 'hello') return; // all three are relay-bound, not peer-bound (see _sendSubscribeRequest/unsubscribeNode/_sendHello) - defensive no-op if one ever reaches here anyway.
     if (type === 'grant') {
       // See grant.js's own doc comment: verified independently here, never trusted just because
       // it arrived - a relay (or a malicious peer on a peer-to-peer transport) forwarding a

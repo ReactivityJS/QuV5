@@ -55,8 +55,11 @@ test('two peers sync a Node through a real WebSocket relay on a real port', asyn
   const aliceSpace = new Space({ identity: alice, members, transport: aliceTransport });
   const bobSpace = new Space({ identity: bob, members, transport: bobTransport });
 
-  await aliceSpace.createNode(noteKind, { title: 'Über das Netzwerk' }, { id: 'note-net-1' });
+  // bob subscribes BEFORE alice creates the Node - see relay.js's "SUBSCRIBER-TRACKING" doc
+  // comment: a relay only forwards a write to a Node's subscribers, and this test uses no
+  // storage adapter, so a late subscriber would have no catch-up path to fall back on.
   const bobNote = bobSpace.subscribeNode('note-net-1', noteKind);
+  await aliceSpace.createNode(noteKind, { title: 'Über das Netzwerk' }, { id: 'note-net-1' });
 
   await waitUntil(async () => (await bobNote.field('title').get()) === 'Über das Netzwerk');
   assert.equal(await bobNote.field('title').get(), 'Über das Netzwerk');

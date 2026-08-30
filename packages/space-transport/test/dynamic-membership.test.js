@@ -96,8 +96,11 @@ test('addMember() reactively broadcasts to an ALREADY-CONNECTED peer\'s Space - 
     transport: bobTransport,
   });
 
-  const aliceNode = await aliceSpace.createNode(noteKind, { title: 'hi bob' }, { id: 'note-reactive' });
+  // bob subscribes BEFORE alice creates the Node - a relay only forwards a write to a Node's
+  // subscribers (see @qu/space-transport's relay.js "SUBSCRIBER-TRACKING" doc comment), and this
+  // test uses no storage adapter, so there is no catch-up path for a late subscriber to fall back on.
   const bobNode = bobSpace.subscribeNode('note-reactive', noteKind);
+  await aliceSpace.createNode(noteKind, { title: 'hi bob' }, { id: 'note-reactive' });
   await waitUntil(async () => (await bobNode.field('title').get()) === 'hi bob');
 });
 

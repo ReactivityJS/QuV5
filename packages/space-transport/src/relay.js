@@ -1,8 +1,10 @@
 /**
  * RELAY FORWARDER — the relay is itself a Space member's peer, not just a
  * dumb pipe: it verifies an incoming envelope's write signature against
- * the space's membership, forwards it live to every other connected peer,
- * AND (when given a `storage` adapter) MIRRORS it - so a peer that comes
+ * the space's membership, forwards it live to every SUBSCRIBED peer (see
+ * this file's own "SUBSCRIBER-TRACKING" doc comment below - deliberately
+ * NOT "every connected peer" any more, see that section for why), AND
+ * (when given a `storage` adapter) MIRRORS it - so a peer that comes
  * online after the original author has already gone offline still gets
  * caught up, from the relay's own mirror, without the author needing to
  * be connected at the same time.
@@ -16,17 +18,27 @@
  * does not change this - it stores the exact same sealed envelope it
  * already forwards, never anything decrypted.
  *
- * Two message shapes flow through here (both defined by @qu/space-core's
+ * Three message shapes flow through here (all defined by @qu/space-core's
  * `Space`, see space.js):
- *   - `{nodeId, envelope}` - a write. Verified, forwarded live, mirrored.
- *   - `{type:'subscribe', nodeId, pub, sig}` - a peer asking to catch up
- *     on a Node (sent by `Space.subscribeNode()`). `sig` is that peer's
- *     signature over `nodeId` itself, proving the request came from an
- *     actual space member - without this check, anyone who can connect to
- *     the relay could ask for and receive any Node's full mirrored
- *     envelope history (still ciphertext-only, but node activity/metadata
- *     is not nothing). Answered by replaying every mirrored envelope for
- *     that Node straight to the requester, in storage order.
+ *   - `{nodeId, envelope}` - a write. Verified, forwarded live to `nodeId`'s
+ *     subscribers, mirrored.
+ *   - `{type:'subscribe', nodeId, pub, sig}` - a peer asking to (a) become a
+ *     live forward target for `nodeId` from now on, AND (b), if `storage`
+ *     is configured, catch up on everything already mirrored for it (sent
+ *     by `Space.subscribeNode()`/`createNode()` - see this file's own
+ *     "SUBSCRIBER-TRACKING" doc comment on why `createNode()` sends one
+ *     too). `sig` is that peer's signature over `nodeId` itself, proving
+ *     the request came from an actual space member - without this check,
+ *     anyone who can connect to the relay could ask for and receive any
+ *     Node's full mirrored envelope history (still ciphertext-only, but
+ *     node activity/metadata is not nothing). Catch-up (when available) is
+ *     answered by replaying every mirrored envelope for that Node straight
+ *     to the requester, in storage order.
+ *   - `{type:'unsubscribe', nodeId, pub, sig}` - the exact inverse of
+ *     `subscribe`'s tracking half (see `Space.unsubscribeNode()`): stops
+ *     `nodeId` from being forwarded to this connection. Never touches
+ *     mirrored storage (nothing is deleted) - purely a live-forwarding
+ *     opt-out.
  *
  * `resolveKindSchema(nodeId)` lets the relay gate WRITES to only Node ids
  * it's willing to route for, without needing to understand what a Node's
@@ -36,6 +48,30 @@
  * signed-for space member," precisely because a relay with mirrored
  * history for a Node it doesn't otherwise recognize should still be able
  * to hand that history back to a legitimate member.
+ *
+ * SUBSCRIBER-TRACKING: `handleWrite()`'s forward loop reads ONLY from
+ * `subscribers` (`nodeId -> Set<peerId>`, populated exclusively by
+ * verified `subscribe`/`unsubscribe` messages and pruned on disconnect) -
+ * NEVER from `hub.peerIds()` (every connected peer). This is the traffic-
+ * shaping half of this Task: a peer that is a space member/Node owner but
+ * has never subscribed to a given Node receives literally nothing about
+ * it, no matter how small the space is - membership/ownership answers
+ * "may I," subscription answers "do I actually want this pushed to me
+ * right now," and only the second question governs live traffic. A Node's
+ * OWN creator is made a subscriber automatically (`Space.createNode()`
+ * sends a `subscribe` too, not just `subscribeNode()`) precisely so this
+ * doesn't surprise the one case where "of course I want updates to my own
+ * Node" is obviously true (e.g. a `'named'`-ACL grantee writing back to
+ * the owner - see @qu/space-core's acl.test.js). A `peerId` is a
+ * CONNECTION identity, not a durable one: a reconnecting peer (new
+ * WebSocket, new `peerId` from `ws-server-hub.js`) is a stranger to every
+ * `subscribers` set until it re-sends its own `subscribe` requests -
+ * exactly what constructing a fresh `Space`/calling `subscribeNode()`
+ * again already does, so this falls out of the existing Dev API for free
+ * rather than needing a reconnect-specific code path. A KNOWN, accepted
+ * scope boundary for now (revisit in the relay-federation task): this
+ * state is 100% in-memory and per-relay-process, same lifetime as
+ * `presence`/`grants` - a relay restart loses it, same as those.
  *
  * A THIRD message shape flows through here, for presence/push routing
  * only, never for content: `{type:'hello', pub, sig}` (sent once by every
@@ -95,6 +131,8 @@
  *     `storage` adapter is configured).
  *   - `debug.relay.subscribe.received` / `.rejected` (`{nodeId, reason}`)
  *     / `.replayed` (`{nodeId, count}`).
+ *   - `debug.relay.unsubscribe.received` (`{nodeId, pub}`) / `.rejected`
+ *     (`{nodeId, reason}`).
  *   - `debug.relay.hello.received` / `.rejected` (`{reason}`).
  *   - `debug.relay.presence.online` / `.offline` (`{pub}`).
  *   - `debug.relay.grant.received` (`{nodeId, granteePub}`) / `.rejected` (`{nodeId}`).
@@ -121,6 +159,15 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
   /** @type {Map<string, Set<string>>} nodeId -> Set<base64 Ed25519 pubkey> - 'named'-mode write-ACL state, 100% derived from verified `grant` messages (see grant.js) - see this file's own "GRANTS" doc comment below. */
   const grants = new Map();
 
+  /**
+   * @type {Map<string, Set<string>>} nodeId -> Set<peerId> - see this
+   * file's own "SUBSCRIBER-TRACKING" doc comment below. The ONLY source of
+   * truth `handleWrite()`'s forward loop reads from - a peer never
+   * receives a write for a Node it never asked for, no matter how many
+   * Nodes it's a signed-for member/owner of.
+   */
+  const subscribers = new Map();
+
   /** @type {Array<{nodeId: string, envelope: object}>} Every envelope this relay ever handled, ciphertext/signature only - for tests to assert "no plaintext ever passed through here." */
   const seen = [];
 
@@ -133,6 +180,10 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
       await handleSubscribe(fromPeerId, message);
       return;
     }
+    if (message?.type === 'unsubscribe') {
+      await handleUnsubscribe(fromPeerId, message);
+      return;
+    }
     if (message?.type === 'grant') {
       await handleGrant(fromPeerId, message);
       return;
@@ -143,6 +194,7 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     const pubB64 = presence.pubFor?.(peerId) ?? null;
     presence.disconnect(peerId);
     if (pubB64) bus?.emit('debug.relay.presence.offline', { pub: pubB64 });
+    for (const peerIds of subscribers.values()) peerIds.delete(peerId); // a dropped connection stops being a forward target for everything it had subscribed to - see this file's own "SUBSCRIBER-TRACKING" doc comment on why a fresh connection must re-subscribe from scratch anyway.
   });
 
   /** See this file's own "A THIRD message shape" doc comment. */
@@ -166,15 +218,31 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     bus?.emit('debug.relay.presence.online', { pub: pubB64 });
   }
 
-  /** Mirror-storage catch-up: hand a requesting member everything this relay has mirrored for one Node, regardless of whether the original author is still connected. */
+  /**
+   * Registers `fromPeerId` as a live forward target for `nodeId` (see this
+   * file's own "SUBSCRIBER-TRACKING" doc comment) - happens REGARDLESS of
+   * whether `storage` is configured, unlike the mirror-catch-up replay
+   * below it (a live-only relay can still track who wants live pushes,
+   * even with nothing to replay for a peer arriving late). Also, when
+   * `storage` IS configured, hands the requester everything this relay has
+   * already mirrored for the Node, regardless of whether the original
+   * author is still connected.
+   */
   async function handleSubscribe(fromPeerId, { nodeId, pub, sig }) {
-    if (!storage) return; // this relay isn't mirroring anything - nothing to catch a late peer up on.
     if (!pub || !sig) {
       bus?.emit('debug.relay.subscribe.rejected', { nodeId, reason: 'malformed' });
       return;
     }
     const pubB64 = QuCrypto.toBase64(pub);
-    if (!isSpaceMember(pubB64)) {
+    // Same reasoning as buildWriteAcl() below: an 'owner'/'named' Node opted OUT of the flat
+    // membership model already (Task 3's whole point) - requiring membership just to SUBSCRIBE to
+    // one would silently strand a legitimate owner/grantee who was never added as a "member"
+    // anywhere, now that subscription (not mere connection) is what gates live forwarding at all.
+    // A 'members'-mode Kind (or an unresolvable nodeId - e.g. relay-server.js's own
+    // `resolveKindSchema: () => true`) keeps the original membership gate exactly as before.
+    const kindSchema = resolveKindSchema(nodeId);
+    const requiresMembership = kindSchema?.acl?.write !== 'owner' && kindSchema?.acl?.write !== 'named';
+    if (requiresMembership && !isSpaceMember(pubB64)) {
       bus?.emit('debug.relay.subscribe.rejected', { nodeId, reason: 'not-member' });
       return; // not a member - no history for you, mirrored ciphertext or not.
     }
@@ -183,13 +251,40 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
       bus?.emit('debug.relay.subscribe.rejected', { nodeId, reason: 'bad-signature' });
       return; // signature doesn't match the claimed pub - reject, don't trust the claim.
     }
+    if (!subscribers.has(nodeId)) subscribers.set(nodeId, new Set());
+    subscribers.get(nodeId).add(fromPeerId);
     bus?.emit('debug.relay.subscribe.received', { nodeId, pub: pubB64 });
 
+    if (!storage) return; // nothing to catch up on - but the subscription itself is tracked either way, live pushes still reach this peer from here on.
     const envelopes = await storage.load(nodeId);
     for (const envelope of envelopes) {
       hub.deliverTo(fromPeerId, 'relay', { nodeId, envelope });
     }
     bus?.emit('debug.relay.subscribe.replayed', { nodeId, count: envelopes.length });
+  }
+
+  /**
+   * The exact inverse of `handleSubscribe()`'s tracking half: removes
+   * `fromPeerId` from `nodeId`'s forward-target set, same signature
+   * convention as `subscribe` (`sig` over the bare `nodeId` string). Not
+   * gated on anything beyond authenticity - unsubscribing narrows what a
+   * peer receives, it can't be used to affect anyone else's subscription
+   * (`fromPeerId` is the connection's own identity, not a claim about who
+   * to remove), so there is no "who's allowed to unsubscribe whom" question
+   * the way there is for a write or a grant.
+   */
+  async function handleUnsubscribe(fromPeerId, { nodeId, pub, sig }) {
+    if (!pub || !sig) {
+      bus?.emit('debug.relay.unsubscribe.rejected', { nodeId, reason: 'malformed' });
+      return;
+    }
+    const ok = await QuCrypto.verify(new TextEncoder().encode(nodeId), sig, pub);
+    if (!ok) {
+      bus?.emit('debug.relay.unsubscribe.rejected', { nodeId, reason: 'bad-signature' });
+      return;
+    }
+    subscribers.get(nodeId)?.delete(fromPeerId);
+    bus?.emit('debug.relay.unsubscribe.received', { nodeId, pub: QuCrypto.toBase64(pub) });
   }
 
   /**
@@ -229,10 +324,11 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
    * all, so an owner never needs to be registered as a "member" anywhere
    * to write their own Node (see kind-schema.js's own doc comment on why
    * that's the whole point of `deriveOwnerNodeId()`). A known, accepted
-   * scope boundary for now: such a not-otherwise-a-member owner's `hello`/
-   * `subscribe` requests still gate on `isSpaceMember` below, so presence/
-   * push and mirrored-history catch-up don't yet extend to them - revisit
-   * when subscriber-tracking (a later task) reshapes that gate anyway.
+   * scope boundary for now: such a not-otherwise-a-member owner's `hello`
+   * still gates on `isSpaceMember` below (it carries no `nodeId`, so there
+   * is no per-Kind ACL mode to consult the way `handleSubscribe()` does),
+   * so presence/push don't yet extend to them - revisit in the relay-
+   * federation task, which has to rethink this gate anyway.
    *
    * `kindSchema?.acl?.write` anything OTHER than exactly `'owner'`/`'named'`
    * (including a relay like `relay-server.js`'s own that deliberately never
@@ -270,7 +366,7 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     }
 
     const toPeerIds = [];
-    for (const peerId of hub.peerIds()) {
+    for (const peerId of subscribers.get(nodeId) ?? []) {
       if (peerId === fromPeerId) continue; // never echo a write back to its own author.
       hub.deliverTo(peerId, fromPeerId, { nodeId, envelope });
       toPeerIds.push(peerId);

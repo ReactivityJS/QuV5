@@ -154,8 +154,14 @@ test('subscribeNode() catch-up emits subscribe.received then subscribe.replayed 
   const bobSpace = new Space({ identity: bob, members, transport: bobTransport });
   bobSpace.subscribeNode('room-catchup', chatKind);
 
-  await waitUntil(() => topics.some(([t]) => t === 'debug.relay.subscribe.replayed'));
-  assert.ok(topics.some(([t]) => t === 'debug.relay.subscribe.received'));
-  const replayed = topics.find(([t]) => t === 'debug.relay.subscribe.replayed')[1];
+  const bobPubB64 = QuCrypto.toBase64(bob.signingPub);
+  await waitUntil(() => topics.some(([t, p]) => t === 'debug.relay.subscribe.received' && p.pub === bobPubB64));
+  assert.ok(topics.some(([t, p]) => t === 'debug.relay.subscribe.received' && p.pub === bobPubB64));
+  // createNode() now sends its OWN subscribe request too (see space.js's own doc comment on why -
+  // a Node's creator needs to be a live forward target for others' later authorized writes), so
+  // alice's Space already produced an earlier "replayed" event for this same nodeId before bob
+  // ever subscribed - take the LAST one, which is bob's (his subscribe strictly follows alice's).
+  await waitUntil(() => topics.filter(([t]) => t === 'debug.relay.subscribe.replayed').length >= 2);
+  const replayed = topics.filter(([t]) => t === 'debug.relay.subscribe.replayed').at(-1)[1];
   assert.ok(replayed.count >= 2); // meta-stamp + the 'one' push, both mirrored
 });
