@@ -1,15 +1,19 @@
 # Qu V5: Space/Node/Field API + Relay Deployment Guide
 
 This is the practical companion to the packages themselves (see
-`packages/space-core/`, `packages/space-storage/`, `packages/space-transport/`
-for the doc comments this guide points at). It covers:
+`packages/space-core/`, `packages/space-storage/`, `packages/space-transport/`,
+and the optional `packages/space-plugins/`/`packages/space-ui/` for the doc
+comments this guide points at). It covers:
 
 1. How to use the `@qu/space-core` API to model and sync data — including
    ACL modes, the local-first lazy query API, alias identities, and
    compaction.
 2. How to run a relay that lets real, separate peer processes exchange
    data — including via Docker, and federated with other relays.
-3. Two runnable demos — a CLI/browser chat, and an in-process script that
+3. Reconnect/resync, per-Kind persistence tiers (what presence/typing are
+   built on), and the optional `@qu/space-plugins`/`@qu/space-ui` add-ons
+   (§15-17).
+4. Two runnable demos — a CLI/browser chat, and an in-process script that
    exercises every mechanism below in one command (see `demo/README.md`).
 
 If you haven't read the packages' own source doc comments, do that first for
@@ -49,6 +53,11 @@ whenever this guide's own claims change**, and vice versa.
   live to a Node's actual SUBSCRIBERS (never a blind broadcast, see §6),
   and (given a storage adapter) mirrors everything it forwards. It is never
   given a decryption key, so it structurally cannot read content.
+- **Reconnect** is automatic (`WsClientTransport`) and **resync** follows
+  from it (`Space` re-subscribes on reconnect) — see §15. **Persistence is
+  per-Kind**, not just per-Space (`persistence: 'durable'|'volatile'` in
+  `defineKind()`) — see §16, which is also how presence/typing/read-status
+  work with zero relay/transport special-casing.
 
 ## 2. A minimal example
 
@@ -533,7 +542,11 @@ information appropriate to what each side can see:
   `{nodeId, kind, origin}`). A write that also carried a `notify` hint
   additionally fires `notification.<kind>.<topic>`. `space.member.joined`
   fires reactively when a relay's `addMember()` broadcast arrives (no
-  polling). A full `debug.space.*` family (write/subscribe/unsubscribe/
+  polling). `space.status.changed` (`{status}`) mirrors the transport's own
+  reconnect lifecycle (§15); `space.node.<nodeId>.write-ack` (`{nodeId,
+  seq}`) fires when the relay confirms it durably mirrored a write (§16 -
+  `@qu/space-plugins`' `awaitRelayAck()` is the usual way to consume this).
+  A full `debug.space.*` family (write/subscribe/unsubscribe/
   hello/grant/load/compact lifecycle) is available for optional,
   zero-cost-when-unused logging — see `space.js`'s own doc comment for the
   complete list.
@@ -564,12 +577,14 @@ real WebSocket relay.
 
 ## 12. Known gaps (honest, not hidden)
 
-- **No auto-reconnect** in `WsClientTransport` — a dropped connection stays
-  dropped; reconnect logic (with backoff) is real, separate work. A
-  reconnecting `Space` also has to re-send every `subscribe`/`hello` it
-  had active — this falls out naturally from constructing a fresh `Space`,
-  but isn't automatic for a long-lived `Space` instance surviving a
-  transport-level reconnect.
+- **Reconnect is automatic, but liveness detection for a peer that just
+  crashed/lost network is still best-effort** — `WsClientTransport`
+  reconnects and `Space` resyncs (§15) fine for a peer's OWN connection,
+  but ANOTHER peer's `presenceKind.online` (§16) can only ever be
+  self-reported; nothing signs "I went offline" after the fact. A reader
+  wanting to treat a long-silent `online: true` as effectively offline has
+  to apply its own staleness threshold against `updatedAt` - not something
+  this framework hardcodes a policy for.
 - **`'members'`-mode ACL is still space-wide, not per-field/per-role** —
   any member may write any `'members'`-mode Node of any Kind. `'owner'`/
   `'named'` (§3) cover the self-certifying/delegated-authority cases; a
@@ -596,13 +611,20 @@ real WebSocket relay.
 - **No relay clustering/HA within one relay** — federation (§9) composes
   independent relay processes, but there's no hot-standby/failover for a
   single relay's own process.
-- **`@qu/space-ui`** (declarative `<qu-view>`/`<qu-bind>`/`<qu-list>`/
-  `<qu-text>`-style components) is not built yet — core sync/signing/
-  encryption/ACL/federation was sequenced first, UI bindings are real,
-  separate work.
-- **No app/UI beyond the demo** — `demo/` is a minimal CLI AND a minimal
+- **`@qu/space-ui` is vanilla JS/DOM function bindings, not a component
+  framework** — `bindField()`/`makeInlineEditable()`/`bindList()`/upload
+  status icons (§17) work with plain elements, not custom elements/JSX/a
+  virtual DOM. A `<qu-view>`/`<qu-bind>`-style custom-element wrapper on
+  top is real, separate work if a project wants that authoring style.
+- **No app beyond the demo** — `demo/` is a minimal CLI AND a minimal
   browser page (`demo/web/`, served by `demo/relay.mjs` at `/`) proving the
-  sync mechanism (see `demo/README.md`); nothing app-shaped is built yet.
+  sync mechanism (see `demo/README.md`); nothing production-app-shaped is
+  built on top of `@qu/space-ui`/`@qu/space-plugins` yet.
+- **`UploadOutbox` (§17) has no binary transfer protocol of its own** — a
+  relay only ever forwards/mirrors signed CRDT envelopes, a poor fit for
+  file bytes, so the actual upload mechanism (HTTP, object storage,
+  whatever) is always supplied by the app; this class only owns the local
+  queue/retry/status state machine.
 - **`/join`'s dynamic membership has no authentication** — see
   `demo/relay.mjs`'s own doc comment on that endpoint; it's a deliberate,
   loud demo-only tradeoff (anyone reaching the port can join), not
@@ -638,6 +660,22 @@ highlights:
 - `packages/space-storage/test/file-store.test.js` — real on-disk
   persistence, including the "fresh instance sees what a prior instance
   wrote" restart simulation.
+- `packages/space-transport/test/ws-reconnect.test.js` — a client
+  reconnecting after the relay is killed and restarted on the same port,
+  and resyncing a Node it missed while offline (§15).
+- `packages/space-core/test/persistence-tiers.test.js` /
+  `packages/space-transport/test/persistence-tiers.test.js` — a
+  `persistence: 'volatile'` Kind routes to a separate storage adapter on
+  both the client and the relay (§16).
+- `packages/space-core/test/presence.test.js` /
+  `packages/space-transport/test/presence-through-relay.test.js` —
+  presence/typing round-tripping peer-to-peer and through a real relay.
+- `packages/space-plugins/test/` — write-ack correlation, read receipts,
+  and the upload outbox's full lifecycle/retry.
+- `packages/space-ui/test/` — the DOM-binding behaviors themselves (via
+  `jsdom`): two-way binding without fighting its own echo, inline-edit
+  never clobbering an in-progress edit, keyed list diffing, upload status
+  icons.
 
 Run any of them with `node --test <path>` from the relevant package
 directory, or `npm test` from the repo root to run everything.
@@ -672,3 +710,140 @@ The SAME app is also served by `relay-server.js`/the Docker image (§10) -
 Docker build bundles once at build time. This is a deliberate first step
 towards a real one, not the final destination - see `relay-server.js`'s
 own "SERVES AN APP" doc comment and architecture.md.
+
+## 15. Reconnect and resync
+
+`WsClientTransport` reconnects on its own — a dropped socket (relay
+restart, laptop sleep, a network handoff) is retried with exponential
+backoff + jitter, and (in a browser) a backgrounded tab regaining focus or
+the network coming back also forces an immediate reconnect check, since a
+`close` event isn't guaranteed to fire promptly in either case. Opt out
+with `{ reconnect: false }`.
+
+```js
+const transport = new WsClientTransport(url, { WebSocketImpl: WebSocket });
+transport.onStatusChange(({ status }) => console.log('transport:', status));
+// 'connected' -> ... -> 'disconnected' -> 'reconnecting' (x N, backoff) -> 'reconnected'
+```
+
+`Space` claims that callback itself (constructing a `Space` with a
+transport that has `onStatusChange` wires this up automatically - nothing
+else to call): on `'connected'`/`'reconnected'` it re-sends `hello` and
+re-subscribes every Node it currently has attached. A relay answers each
+`subscribe` by replaying its full mirror for that Node (§6), so whatever
+this peer missed while offline — including another peer's writes made in
+the meantime — arrives the same way ordinary catch-up already does; no
+separate "diff" protocol exists or is needed, since re-applying already-
+known Yjs updates is a no-op, not an error. This peer's OWN writes made
+while offline are never lost either: `WsClientTransport.send()` queues
+them and flushes the queue the moment the socket reopens.
+
+To observe the SAME lifecycle from app/UI code (a "reconnecting…" banner,
+say), read it off the bus instead of trying to also call
+`onStatusChange()` yourself — `Space` already owns that single slot:
+
+```js
+const bus = new EventBus();
+const space = new Space({ identity, members, transport, bus });
+bus.on('space.status.changed', ({ status }) => updateConnectionBanner(status));
+```
+
+## 16. Per-Kind persistence tiers: presence, typing, and other ephemeral data
+
+`defineKind()` takes an optional `persistence: 'durable' | 'volatile'`
+(default `'durable'`, i.e. unchanged from before this existed). A Node of a
+`'volatile'` Kind hydrates/mirrors through a SEPARATE storage adapter —
+`Space`'s own `volatileStorage` constructor option, and the relay's own
+`volatileStorage` option to `createRelayForwarder()` — instead of the
+Space/relay's configured durable `storage`. Both default to a private,
+zero-config in-memory store if you don't supply one, so declaring a
+volatile Kind needs no extra wiring to just work:
+
+```js
+const typingSignalKind = defineKind('room-typing', {
+  fields: { by: { shape: 'atomic', visibility: 'public' } },
+  persistence: 'volatile', // never touches disk, gone on process exit - a relay restart loses it, same as `hello`/subscriber state already does.
+});
+```
+
+This is the SAME swappable-adapter idea `@qu/space-storage`'s memory/
+durable/file tiers already gave you at the whole-Space/whole-relay level —
+now selectable per Kind. A concrete, real reason to want it: a browser app
+could pass a `sessionStorage`-backed adapter as `volatileStorage` so
+ephemeral Kinds vanish when the tab closes, while its durable Kinds keep
+using `indexedDB`/`localStorage` as before — same `Space`, two adapters,
+each Kind picks one via this one flag.
+
+**Presence and typing are built on exactly this**, deliberately NOT as a
+transport-level concept (an earlier draft added bespoke `'typing'`/
+`'presence'` wire messages with their own relay code paths — reverted:
+this generalization is strictly more reusable, and keeps the relay's wire
+vocabulary exactly as small as before). `@qu/space-core`'s `presence.js`:
+
+```js
+import { setStatus, setTyping, watchPresence, PresenceWatcher, presenceKind } from '@qu/space-core';
+
+await setStatus(mySpace, 'in a meeting');     // writes MY OWN presenceKind Node
+await setTyping(mySpace, 'room-1', true);     // same Node, different field
+
+const snapshot = await watchPresence(otherSpace, alicePub); // one-shot: {online, status, updatedAt, typingIn, typingAt}
+
+const watcher = new PresenceWatcher(otherSpace, bus); // reactive, multi-member
+await watcher.watch(alicePub);
+watcher.of(aliceB64Pub); // -> latest snapshot - kept live off the ORDINARY space.node.<presenceNodeId>.changed event, no dedicated "presence" topic exists.
+```
+
+Online/offline LIVENESS itself is the one piece that deliberately stays
+outside this mechanism — it's connection-lifecycle, not data (nothing can
+sign "I went offline" after the fact) — see the pre-existing `hello`/
+`PresenceTracker` machinery (§11) for that, unchanged by any of this.
+`presenceKind`'s own `online` field is a best-effort self-reported flag
+instead; combine it with `updatedAt` staleness if you need to guess at a
+silently-dropped peer (§12's own honest note on this).
+
+## 17. Optional plugins and UI layer (`@qu/space-plugins`, `@qu/space-ui`)
+
+Both packages are built ENTIRELY on the public `Space`/`Field` API — no
+`Space`/relay-side changes, no special casing, same "opt-in watcher/
+helper, core stays unaware" shape as `alias.js`'s `AliasRegistry`.
+
+**`@qu/space-plugins`** — small, reusable app helpers many apps would
+otherwise reinvent:
+
+```js
+import { awaitRelayAck, markRead, watchReadReceipts, UploadOutbox } from '@qu/space-plugins';
+
+// Delivery status: local -> relay-synced -> read.
+await node.field('messages').push(message);
+const { seq } = await awaitRelayAck(bus, node.id); // resolves once the relay durably mirrors THIS write (ordering-correlated - see its own doc comment)
+await markRead(mySpace, node.id, message.id);      // durable, self-certifying-per-reader receipt
+const receipts = await watchReadReceipts(otherSpace, myPub);
+
+// (Multiple) file uploads: local save -> outbox queue -> mark done after sync.
+const outbox = new UploadOutbox(space, myLocalBlobStore, async (record, blob) => {
+  await uploadToMyServer(record, blob); // YOUR transport for bytes - a relay only ever forwards signed CRDT envelopes.
+});
+const fileId = await outbox.enqueue({ name: file.name, size: file.size, mimeType: file.type }, file);
+await outbox.watch(fileId, (record) => console.log(record.status)); // 'pending' -> 'uploading' -> 'done'/'failed'
+```
+
+**`@qu/space-ui`** — vanilla JS/DOM bindings, no framework, no build step:
+
+```js
+import { bindField, makeInlineEditable, bindList, bindFileInput, bindUploadStatusIcon } from '@qu/space-ui';
+
+bindField(titleInputEl, node.field('title'), { twoWay: true }); // live two-way text binding
+makeInlineEditable(titleDivEl, node.field('title'));            // [contenteditable], Enter/blur = save, Escape = cancel
+
+bindList(messageListEl, node.field('messages'), {
+  key: (msg) => msg.id,
+  render: (msg) => { const li = document.createElement('li'); li.textContent = msg.text; return li; },
+}); // keyed diff - inserts/removes/moves the minimum, never re-renders an untouched sibling
+
+bindFileInput(fileInputEl, outbox);
+await bindUploadStatusIcon(statusIconEl, outbox, fileId); // never auto-hidden on 'done' - your stylesheet decides what that looks like
+```
+
+See each package's own `src/*.js` doc comments (and `architecture.md`'s
+own API reference tables) for the complete surface — this section is a
+taste, not the full reference.
