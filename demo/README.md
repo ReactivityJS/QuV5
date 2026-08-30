@@ -13,9 +13,14 @@ npm run demo
 ```
 
 Runs `auto-demo.mjs`: generates two identities, starts an in-process relay,
-and simulates a short conversation between them - all in one process, so it
-also doubles as a smoke test that the build actually works end to end
-(signing, encryption, CRDT sync, and the relay never seeing plaintext).
+and runs two scenarios back to back - a short chat conversation with
+presence-gated push routing, then an `acl.write: 'owner'` Node with public
+fields that a completely unrelated third peer discovers and reads knowing
+only its owner's pubkey (see `docs/v5-space-core-guide.md` §3/§14). All in
+one process, so it also doubles as a smoke test that the build actually
+works end to end (signing, encryption, CRDT sync, node-level ACL, and the
+relay never seeing plaintext) - it exits non-zero if anything doesn't
+converge as expected.
 
 ## Real thing: two clients, one relay, three terminals
 
@@ -74,7 +79,7 @@ both are just members of the same relay-managed Space.
 The page also has a "Debug-Log" checkbox (`@qu/events`' `createDebugLogger()`
 watching everything on that tab's own bus - the granular event system this
 demo has been building toward the whole time, see
-`docs/v5-space-core-guide.md` §7) and a "Browser-Notifications erlauben"
+`docs/v5-space-core-guide.md` §11) and a "Browser-Notifications erlauben"
 button - grant it, switch to another tab/app, and a message that mentions
 you shows a real OS-level notification instead of an in-page toast (the
 handler decides the channel purely from `document.visibilityState` +
@@ -93,7 +98,7 @@ HTTPS.
 ### Push routing: stop one client and watch the relay terminal
 
 Every message attaches a granular `notify` hint (`@qu/events`' `EventBus`
-topics, see `docs/v5-space-core-guide.md` §7): a plain line is
+topics, see `docs/v5-space-core-guide.md` §11): a plain line is
 `notify.topic: 'message'`, a line starting with `@bob` (a known member) is
 `notify.topic: 'mention'` addressed just to bob. Stop `demo:bob` (Ctrl+C)
 but leave `demo:relay` and `demo:alice` running, then type a message (or
@@ -122,8 +127,8 @@ silent, since bob's live connection already got it.
   `packages/space-transport/src/relay-server.js` - plus an `@qu/events`
   `EventBus` and `registerPushHandler()` for the push-routing log above.
 - `demo/chat.mjs` - a CLI peer: connects via `WsClientTransport`, joins a
-  shared `demo-chat` Node (`{ messages: 'list' }` Kind-Schema, see
-  `packages/space-core/src/kind-schema.js`), reads/writes it from
+  shared `demo-chat` Node (`{ messages: { shape: 'list' } }` Kind-Schema,
+  see `packages/space-core/src/kind-schema.js`), reads/writes it from
   stdin/stdout, and attaches a `notify` hint to every push.
 - `demo/auto-demo.mjs` - the same mechanism, in-process, no relay/terminal
   needed - see `npm run demo` above.
@@ -151,9 +156,12 @@ and mirrors ciphertext it cannot decrypt.
 - A member added after another client's `Space` was already constructed
   (via `demo:relay` restart for the CLI, or `/join` for the browser) is
   invisible to that client until it learns about them - the CLI demo
-  requires a restart; the browser demo polls `/members.json` every 3s and
-  calls `Space.addMember()` (see that method's own doc comment in
-  `packages/space-core/src/space.js`) - so a message sent in the few
-  seconds right after someone joins may not reach them, by design (a write
-  is encrypted only for the members known at the moment it's sealed;
-  wait a few seconds after a join before relying on delivery).
+  requires a restart; the browser demo learns REACTIVELY, not by polling:
+  `relay.mjs`'s `/join` calls `relay.addMember()`, which broadcasts
+  `{type:'member-joined', ...}` to every already-connected peer over the
+  SAME open WebSocket connection, and each `Space` handles it by calling
+  its own `addMember()` (see that method's own doc comment in
+  `packages/space-core/src/space.js`) - the instant the broadcast arrives,
+  no timer involved. A write IS still encrypted only for the members known
+  at the moment it's sealed, so a message sent in the same instant as a
+  join could in principle race it - by design, not a polling artifact.

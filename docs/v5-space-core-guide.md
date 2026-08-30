@@ -2,44 +2,53 @@
 
 This is the practical companion to the packages themselves (see
 `packages/space-core/`, `packages/space-storage/`, `packages/space-transport/`
-for the doc comments this guide points at). It covers three things:
+for the doc comments this guide points at). It covers:
 
-1. How to use the `@qu/space-core` API to model and sync data.
-2. How to run a relay that lets real, separate peer processes exchange data —
-   including via Docker — with the relay acting as a mirror-storing peer so
-   an offline sender's data still reaches a peer that connects later.
-3. A small runnable demo — text exchange between two clients, identified by
-   their Qu public-key fingerprint (see `demo/README.md`).
+1. How to use the `@qu/space-core` API to model and sync data — including
+   ACL modes, the local-first lazy query API, alias identities, and
+   compaction.
+2. How to run a relay that lets real, separate peer processes exchange
+   data — including via Docker, and federated with other relays.
+3. Two runnable demos — a CLI/browser chat, and an in-process script that
+   exercises every mechanism below in one command (see `demo/README.md`).
 
 If you haven't read the packages' own source doc comments, do that first for
-the *why*; this guide is the *how*.
+the *why*; this guide is the *how*. See `architecture.md` at the repo root
+for the bird's-eye map of files/concepts/API surface — **update that file
+whenever this guide's own claims change**, and vice versa.
 
 ## 1. Core concepts, in one paragraph each
 
 - **Identity**: an Ed25519 (signing) + X25519 (encryption) keypair, from
-  `QuCrypto.generateKeypair()` (`@qu/core`). Every peer has one.
-- **Kind-Schema** (`defineKind()`): a static description of what fields a
-  Node of this kind has, and their type — `'atomic-encrypted'` (a single
-  value, encrypted, replaced wholesale on write), `'text'` (a real `Y.Text`,
-  character-level CRDT merge, plaintext locally while being edited), or
-  `'list'` (a `Y.Array` of small encrypted items, concurrent appends
-  converge without any custom ordering code).
+  `QuCrypto.generateKeypair()` (`@qu/core`). Every peer has one:
+  `{signingKey, signingPub, xPrivateKey, xPublicKey}`.
+- **Kind-Schema** (`defineKind()`): a static description of a Node's shape.
+  Each field declares TWO independent properties — `shape` (`'atomic'` |
+  `'text'` | `'list'`, the LOCAL CRDT structure) and `visibility`
+  (`'encrypted'` default, or `'public'` — which envelope mode a write to
+  that field seals with). `acl.write` names who may sign updates:
+  `'members'` (any current Space member, the default), `'owner'`
+  (self-certifying — only the pubkey the Node's own id cryptographically
+  commits to), or `'named'` (the owner plus anyone they've explicitly
+  authorized via a signed `grant`). See §3.
 - **Space**: one peer's live view of a set of Nodes, wired to one Transport
   and (optionally) one Storage adapter. No `get(path)`/`put(path, val)` —
   you work with typed Node/Field handles directly.
-- **Node**: one Y.Doc. `space.createNode(kind, fields)` makes one and
-  returns it; `space.subscribeNode(id, kind)` registers interest in one
-  another peer created.
-- **Field**: `node.field(name)` — typed accessor, shape depends on the
-  Kind-Schema (`.get()`/`.set()`/`.observe()` for atomic fields, `.ytext`/
-  `.insert()`/`.delete()`/`.observe()` for text fields, `.push()`/
-  `.toArray()`/`.observe()` for lists).
+- **Node**: one Y.Doc. `space.createNode(kind, fields)` makes one;
+  `space.subscribeNode(id, kind)` registers interest in one another peer
+  created; `space.useNode(id, kind)` (§5) is the recommended default —
+  local-first, lazy, reference-counted.
+- **Field**: `node.field(name)` — typed accessor
+  (`.get()`/`.set()`/`.observe()` for atomic, `.ytext`/`.insert()`/
+  `.delete()`/`.observe()` for text, `.push()`/`.toArray()`/`.observe()`
+  for lists).
 - **Transport**: how bytes move between peers. `InProcessTransport` (same
   process, for tests) or `WsClientTransport` (a real WebSocket connection to
-  a relay).
+  a relay, browser or Node).
 - **Relay**: `createRelayForwarder()` — verifies write signatures, forwards
-  live, and (given a storage adapter) mirrors everything it forwards. It is
-  never given a decryption key, so it structurally cannot read content.
+  live to a Node's actual SUBSCRIBERS (never a blind broadcast, see §6),
+  and (given a storage adapter) mirrors everything it forwards. It is never
+  given a decryption key, so it structurally cannot read content.
 
 ## 2. A minimal example
 
@@ -57,21 +66,24 @@ async function actor() {
 const alice = await actor();
 const bob = await actor();
 
-// 2. Every peer that's allowed to read/write in this Space, by public key.
-//    (This PoC's ACL is space-wide, not per-Kind - see kind-schema.js.)
+// 2. Every peer allowed to read/write an 'acl.write: members' Kind, by public key.
 const members = [
   { pub: alice.signingPub, xPub: alice.xPublicKey },
   { pub: bob.signingPub, xPub: bob.xPublicKey },
 ];
 
-// 3. Define what a "note" looks like.
+// 3. Define what a "note" looks like - shape (local CRDT structure) and
+//    visibility (envelope mode) are independent per field.
 const noteKind = defineKind('note', {
-  fields: { title: 'atomic-encrypted', body: 'text' },
+  fields: {
+    title: { shape: 'atomic' }, // visibility defaults to 'encrypted'
+    body: { shape: 'text' },
+  },
 });
 
 // 4. Wire up a relay + two peer transports (in-process here; see §4 for real network).
 const hub = createInProcessHub();
-createRelayForwarder({ hub, members, resolveKindSchema: () => true });
+createRelayForwarder({ hub, members, resolveKindSchema: () => noteKind });
 const aliceTransport = new InProcessTransport(hub, 'alice');
 const bobTransport = new InProcessTransport(hub, 'bob');
 await aliceTransport.connect();
@@ -80,12 +92,16 @@ await bobTransport.connect();
 const aliceSpace = new Space({ identity: alice, members, transport: aliceTransport });
 const bobSpace = new Space({ identity: bob, members, transport: bobTransport });
 
-// 5. Alice creates a Node...
+// 5. Bob subscribes BEFORE alice writes - a relay only forwards a write to
+//    a Node's actual subscribers (see §6), so this ordering matters when
+//    there's no storage adapter for catch-up.
+const bobNote = bobSpace.subscribeNode('note-1', noteKind);
+
+// 6. Alice creates the Node...
 const note = await aliceSpace.createNode(noteKind, { title: 'Einkaufsliste' }, { id: 'note-1' });
 note.field('body').insert(0, 'Milch, Brot');
 
-// 6. ...Bob subscribes to it and (once sync catches up) reads the same content.
-const bobNote = bobSpace.subscribeNode('note-1', noteKind);
+// ...and bob converges once sync catches up.
 // (real code awaits/observes; see packages/space-transport/test/poc-demo.test.js
 //  for a full worked example, including waiting for delivery)
 ```
@@ -93,9 +109,9 @@ const bobNote = bobSpace.subscribeNode('note-1', noteKind);
 ### Reading and writing fields
 
 ```js
-// atomic-encrypted
+// atomic
 await note.field('title').set('Neuer Titel');
-const title = await note.field('title').get(); // null = unset, undefined = you're not a recipient, string = decrypted value
+const title = await note.field('title').get(); // null = unset, undefined = you're not a recipient (encrypted only), string = value
 note.field('title').observe(() => console.log('title changed'));
 
 // text (collaborative)
@@ -126,30 +142,56 @@ new Space({ identity, members, transport }); // no persistence
 new Space({ identity, members, transport, storage: createFileStore('./my-data') });
 ```
 
-To reload a Node from storage after a restart:
+To reload a Node from storage after a restart (no live sync, pure local read):
 
 ```js
 const reloaded = await space.loadNode('note-1', noteKind);
 ```
 
+Or, for the common case of "give me this Node, local-first, and keep it
+live if I still need it" — see §5.
+
 ## 3. Signing, encryption, ACL — what's actually enforced
 
 - **Every Yjs update is signed** before it ever reaches storage or a
   transport, and verified before being applied (`sealUpdate()`/
-  `verifyEnvelope()`/`openUpdate()` in `envelope.js`).
-- **`atomic-encrypted` fields** are ciphertext at the value level — even
-  inside your own local Y.Doc, `contentMap.get('title')` is never plaintext.
-  `field.get()` decrypts locally; a non-recipient's `get()` returns
-  `undefined`.
-- **`text` fields** are encrypted one layer out, at the envelope, because
-  the CRDT merge algorithm needs the plaintext ops locally to work at all —
-  plaintext exists only in the RAM of an actively-editing, authorized peer,
-  exactly like every other end-to-end-encrypted collaborative editor. The
-  relay and any storage never see it.
-- **ACL in this PoC is space-wide, not per-Kind or per-field**: `members`
-  is one flat list, and any member may write any Node any Kind-Schema
-  declares (`kind-schema.js`'s `acl` field is defined but not yet
-  consulted by the relay/write-path — see §6).
+  `sealPublicUpdate()`/`verifyEnvelope()`/`openUpdate()` in `envelope.js`).
+- **Envelope has two modes**, chosen per-field by `visibility`:
+  `'encrypted'` (`sealUpdate()` — AES-GCM content key wrapped per
+  recipient via X25519 ECDH) or `'public'` (`sealPublicUpdate()` — the
+  raw update travels as plaintext, signed directly, no encryption at any
+  layer). Signature covers exactly the transported bytes either way.
+- **`'atomic'`+`'encrypted'` fields** are ciphertext at the value level —
+  even inside your own local Y.Doc, `contentMap.get('title')` is never
+  plaintext. `field.get()` decrypts locally; a non-recipient's `get()`
+  returns `undefined`.
+- **`'text'`+`'encrypted'` fields** are encrypted one layer out, at the
+  envelope, because the CRDT merge algorithm needs the plaintext ops
+  locally to work at all — plaintext exists only in the RAM of an
+  actively-editing, authorized peer, exactly like every other
+  end-to-end-encrypted collaborative editor.
+- **`visibility: 'public'`** exists for content that must be discoverable
+  by someone with no prior relationship to the writer — a `'owner'`-ACL
+  identity Node's `pub`/`epub` fields being the canonical case (§7). No
+  encryption at any layer; anyone, relay included, can read and verify it.
+- **`acl.write` has three modes**, all enforced by BOTH the relay and every
+  receiving `Space` (same check, `_isAuthorizedWriter()`/`buildWriteAcl()`):
+  - `'members'` (default) — any current Space member.
+  - `'owner'` — self-certifying: `nodeId = "~" + base64url(sha256(kind +
+    ":" + base64(ownerPub)))` (`deriveOwnerNodeId()`, kind-schema.js).
+    Verifying a write is a PURE FUNCTION of `(nodeId, envelope.pub)` — zero
+    relay/Space bootstrap state, and the owner never needs to be
+    registered as a flat "member" anywhere. `createNode()` auto-derives
+    this id; any explicit `{id}` you pass is ignored for this mode.
+  - `'named'` — the owner plus anyone they've authorized via a signed
+    `grant` message: `await space.grantWriter(nodeId, kind, granteePub)`.
+    State is 100% derived from verified grants, never invented. **Grant
+    BEFORE the grantee's first write attempt, not in response to one** —
+    see `grant.js`'s own doc comment on why a premature, rejected write
+    permanently poisons that writer's local Y.Doc for any peer who
+    rejected it (a real Yjs property: per-author updates integrate in
+    strict order, so a peer that ever rejects one can never integrate a
+    LATER one from the same doc either).
 
 ## 4. Real network: WebSocket transport + relay
 
@@ -165,6 +207,12 @@ const transport = new WsClientTransport('ws://your-relay-host:8081', { WebSocket
 await transport.connect();
 const space = new Space({ identity: alice, members, transport });
 ```
+
+Wire efficiency: every message is base64-encoded for its binary fields
+(never a JSON array of per-byte integers — `@qu/space-core`'s
+`encodeForWire()`/`decodeFromWire()`), and a real relay should be built
+with `perMessageDeflate: true` (see below) — the client side already
+offers WebSocket compression by default.
 
 ### Running the relay yourself
 
@@ -185,9 +233,188 @@ console.log(JSON.stringify({ pub: QuCrypto.toBase64(kp.publicKey), xPub: QuCrypt
 // SAVE kp.privateKey and kp.xPrivateKey somewhere safe for the peer that owns this identity - never send them anywhere.
 ```
 
-`GET /healthz` returns `200 ok` once the relay is listening.
+`GET /healthz` returns `200 ok` once the relay is listening. `relay-server.js`
+constructs its `WebSocketServer` with `perMessageDeflate: true` already —
+if you build your own relay process, do the same (`ws`'s client side offers
+the extension by default, but a server must also opt in for it to
+negotiate). `relay-server.js` itself has NO Kind-Schema registry
+(`resolveKindSchema: () => true`) — it forwards/mirrors any Node id gated
+only by flat `members` ACL, which means it can only ever enforce
+`'members'`-mode write-ACL, never `'owner'`/`'named'` (those need the real
+Kind-Schema — specifically its `kind` string — to verify at all). Run
+`createRelayForwarder()` directly with a real `resolveKindSchema` (routing
+by nodeId, e.g. by the `~` prefix — see `demo/auto-demo.mjs`) to get
+`'owner'`/`'named'` enforcement.
 
-## 5. Docker deployment
+## 5. The local-first, lazy query API
+
+`Space.useNode(id, kindSchema)` is the recommended default entrypoint for
+app/UI code that just wants "give me this Node" — matching the framework's
+own design commitment: keep what you need locally, subscribe/sync remotely
+only for what's actually asked for, and only once it's asked for.
+
+```js
+const { node, release } = await space.useNode('note-1', noteKind);
+// node is usable immediately - hydrated from LOCAL storage first (if any
+// is mounted, zero network), then a live `subscribe` request is sent
+// regardless (a synced Node is presumed still-changing).
+
+release(); // reference-counted: the Node stays subscribed until every
+           // useNode() caller for this id has released it. The LAST
+           // release() drops the local handle entirely and tells the
+           // relay to stop forwarding - a later useNode() call for the
+           // same id starts completely fresh.
+```
+
+Calling `useNode()` twice for the same id is a plain, instant lookup (no
+duplicate subscribe). This sits alongside the three lower-level
+entrypoints — `createNode()` (originate a new Node), `subscribeNode()`
+(known id, live sync, not reference-counted), `loadNode()` (local storage
+only, zero network) — which `useNode()` itself is built from; use them
+directly only when you have a specific reason to (e.g. `Space`'s own
+internals, or a caller that deliberately wants non-refcounted semantics).
+
+## 6. Subscriber-tracking: a relay forwards ONLY to who asked
+
+A relay tracks exactly which connections have sent a signed `subscribe`
+request for each Node id (`nodeId -> Set<peerId>`) and forwards a write
+ONLY to that set — never to "every connected peer" or "every space
+member," regardless of ACL mode. Being a fully authorized member/owner of
+a Node is not enough to receive live updates about it; only an actual
+`subscribe` request (sent automatically by `subscribeNode()`/`useNode()`,
+and by `createNode()` on the creator's own behalf so they remain a live
+target for others' later authorized writes) is. This is the actual
+traffic-shaping mechanism behind "subscriptions restrict data and
+traffic" — the same rule a relay already applies to its own clients
+applies one hop further to relay-to-relay federation (§9).
+
+A relay with a `storage` adapter additionally answers a NEW subscriber's
+request by replaying its full mirrored history for that Node — this is
+what makes offline-sender catch-up work even when the original author has
+long since disconnected:
+
+```
+Client A  --write-->  Relay (mirrors to disk)  --live-->  (nobody, B isn't online yet)
+                              |
+                       A goes offline
+                              |
+Client B  --subscribe('note-1')-->  Relay  --replay from mirror-->  Client B
+```
+
+Proven end-to-end (real WebSocket, real disk, relay process actually
+restarted between the two halves) in
+`packages/space-transport/test/mirror-offline.test.js`. Without a storage
+adapter, a relay is pure live-only: a subscriber that wasn't connected at
+write time gets nothing for that write, ever (`mirror-offline.test.js`'s
+second test documents exactly this tradeoff).
+
+`Space.unsubscribeNode(id)` is the exact inverse — tells the relay to stop
+forwarding and drops the local Node handle (a later `subscribeNode()`/
+`useNode()` call starts completely fresh).
+
+## 7. Space-scoped alias identities (per-space pseudonymity)
+
+`deriveAliasIdentity(identity, spaceId)` (`@qu/space-core`'s `alias.js`)
+deterministically derives a completely independent Ed25519+X25519
+keypair from a real identity's own private key and a `spaceId` string —
+same inputs always yield the same alias; a different `spaceId` yields a
+computationally unrelated one.
+
+An alias is a REAL, fully independent identity for every purpose the
+framework already has — in particular, it can own `acl.write: 'owner'`
+Nodes with zero relay-side awareness that anything alias-shaped is
+happening (self-certifying, see §3). This is deliberately why aliases are
+scoped to `'owner'`/`'named'` Kinds, not `'members'`-mode ones, which
+would need new relay-side plumbing to extend a flat membership list
+per-alias.
+
+Resolving alias → real identity is published as an ordinary ENCRYPTED
+Node write (`aliasRegistryKind`, `'members'`-mode ACL, both fields
+`visibility: 'encrypted'`) — the exact same envelope encryption every
+other confidential field already uses, sealed for the Space's current
+members:
+
+```js
+import { publishAlias, aliasRegistryNodeId, AliasRegistry } from '@qu/space-core';
+
+const alias = await publishAlias(aliceSpace, 'my-space-id'); // writes the registry entry, returns the alias identity
+const aliasSpace = new Space({ identity: alias, members: [], transport: aliasTransport });
+const post = await aliasSpace.createNode(postKind, {}); // acl.write:'owner' - pseudonymous, self-certifying
+
+// A space member who subscribes to alice's registry Node can resolve it:
+const registry = new AliasRegistry(bobSpace, bobBus); // watches bobSpace's bus, no changes to Space itself
+bobSpace.subscribeNode(aliasRegistryNodeId(alice.signingPub), aliasRegistryKind);
+registry.resolve(aliasPubB64); // -> alice's real pubkey, once resolved; undefined until then
+```
+
+An outsider (never subscribed to that registry entry, or not a
+decryption recipient — the relay always) sees only sealed ciphertext,
+structurally unable to open it — not being able to resolve an alias is
+indistinguishable from "not a Space member," by design.
+
+## 8. Snapshot/compaction: real storage GC purge
+
+Yjs already garbage-collects a deleted item's content from a live
+`Y.Doc`'s own memory automatically (`gc: true` is the default for every
+`Y.Doc` in this codebase) — but every sealed envelope that ever carried
+that content remained sitting in storage/a relay's mirror forever, since
+nothing pruned or re-derived that log from the current state. That was
+the real, previously-documented gap in this framework's deletion story.
+
+`Space.compactNode(id)` closes it:
+
+```js
+await space.compactNode('note-1');
+```
+
+This replaces the Node's ENTIRE stored envelope history — this Space's
+own storage, and (once the resulting envelope propagates) every other
+subscriber's storage and the relay's own mirror — with ONE envelope
+holding the Node's current, garbage-collected state. It is NOT a new
+envelope shape: a snapshot is sealed with the exact same `sealUpdate()`/
+`sealPublicUpdate()` as any other write (a Yjs full-state encoding
+instead of one incremental update, plus one extra signed `snapshot: true`
+bit) — `Y.applyUpdate()` neither knows nor cares whether an update is
+incremental or full-state, so receivers integrate it exactly as before.
+A storage adapter's new `replace(nodeId, envelopes)` method (all three
+`@qu/space-storage` adapters have it) is what actually discards the old
+log.
+
+Authorization needs no new mechanism — a snapshot is verified through the
+exact same ACL check as any other write, so whoever may already write to
+a Node may also compact it. Only supported for a Kind whose meta AND
+every field share the SAME `visibility` (a single envelope can't
+represent a Node whose fields disagree) — note a `'members'`-mode Kind's
+meta is ALWAYS `'encrypted'` regardless of any field's own visibility, so
+such a Kind can only be compacted whole if every field is too.
+
+## 9. Relay federation: relay-as-subscribing-peer
+
+A relay federates with another (upstream) relay by being an ordinary
+SUBSCRIBING PEER to it — the same `hello`/`subscribe` control messages any
+`Space` client already sends, over an ordinary Transport connection. No
+new relay-to-relay wire protocol.
+
+```js
+import { federateRelay } from '@qu/space-transport';
+
+const downstreamRelay = createRelayForwarder({ hub: hubB, members, resolveKindSchema, storage, bus });
+const linkToUpstream = new InProcessTransport(hubA, 'relay-b-link'); // or WsClientTransport for a real network
+await linkToUpstream.connect();
+federateRelay({ relay: downstreamRelay, bus, transport: linkToUpstream, identity: relayIdentity });
+```
+
+Demand-driven, matching §6's own rule applied one hop further: nothing
+crosses the link until a REAL local peer on the downstream relay actually
+subscribes to a Node the downstream relay doesn't already have — that
+event automatically triggers exactly one upstream subscribe for that
+nodeId. Bidirectional once federated: a local write to a federated Node is
+also forwarded upstream, so peers on either side see each other's writes.
+An upstream relay is trusted no more than a single ordinary local peer —
+every envelope it sends down is independently re-verified against the
+real write-ACL before anything happens with it.
+
+## 10. Docker deployment
 
 ```sh
 # From the repo root:
@@ -207,41 +434,10 @@ docker compose -f docker-compose.space-relay.yml up -d
 
 `SPACE_RELAY_DATA_DIR` (default `/data`, backed by the `qu-space-relay-data`
 volume in the compose file) is where the relay mirrors every envelope it
-forwards — this is what makes offline-sender catch-up work (see §6). Set it
-to an empty string to run a pure live-only relay instead (no mirroring, no
-catch-up for peers that weren't connected at write time — see
-`packages/space-transport/test/mirror-offline.test.js`'s second test for
-exactly what that trades away).
+forwards — this is what makes offline-sender catch-up work (§6). Set it
+to an empty string to run a pure live-only relay instead.
 
-**Not build-tested in this environment** (no Docker daemon available while
-writing this) — the Dockerfile mirrors the repo-root Dockerfile's
-already-working multi-stage/entrypoint/healthcheck pattern closely, and
-`relay-server.js` itself is proven end-to-end against a real socket + real
-on-disk file store (`mirror-offline.test.js`'s third test literally
-restarts a relay process against the same data directory), but building the
-actual image is worth doing once before relying on it in production.
-
-## 6. Why the relay matters: offline-sender catch-up
-
-The relay isn't just a pipe — it's a Space member's peer with its own
-mirror. Concretely: Client A writes while B isn't connected. A goes fully
-offline. B connects later and calls `subscribeNode()`. B still gets A's
-data, because the relay mirrored every envelope it forwarded and answers
-B's (signed) subscribe request by replaying that mirror.
-
-```
-Client A  --write-->  Relay (mirrors to disk)  --live-->  (nobody, B isn't online yet)
-                              |
-                       A goes offline
-                              |
-Client B  --subscribe('note-1')-->  Relay  --replay from mirror-->  Client B
-```
-
-Proven end-to-end (real WebSocket, real disk, relay process actually
-restarted between the two halves) in
-`packages/space-transport/test/mirror-offline.test.js`.
-
-## 7. Granular events: notifications, presence, and push routing
+## 11. Granular events: notifications, presence, push, and debugging
 
 `@qu/events`'s `EventBus` is one dot-namespaced, wildcard-matching
 (`*`/`**`) pub/sub primitive used on BOTH sides of a Space, fed different
@@ -249,69 +445,75 @@ information appropriate to what each side can see:
 
 - **Client-side** (`new Space({..., bus})`): every applied update - local
   or remote - fires `space.node.<nodeId>.changed` (generic change feed,
-  `{nodeId, kind, origin}`). A write that also carried a `notify` hint (see
-  below) additionally fires `notification.<kind>.<topic>`. This is real
-  content: the client has already decrypted the update by the time it
-  emits.
-- **Relay-side** (`createRelayForwarder({..., bus})`): the relay is
-  content-blind by construction (§3) - it can never compute "this is a
-  mention" from ciphertext. So a WRITER who wants the relay to route a
-  push notification attaches a small `notify: {topic, to?}` hint to the
-  write itself (`field.set(value, {notify})` / `field.push(value,
-  {notify})`), which travels UNENCRYPTED alongside the envelope - signed
-  (tamper-evident against a third party), but not verifiable against real
-  content (the sender could mislabel their own write - an accepted,
-  documented tradeoff, not a hole in the encryption). `notify.topic` must
-  be declared in the Kind-Schema's `notifyTopics` (`defineKind(kind,
-  {fields, notifyTopics: [...]})`) - an undeclared topic throws locally,
-  before the write ever reaches Yjs. The relay emits one
-  `relay.notify.<kind>.<topic>` event per recipient, carrying `online`
-  (from its own `PresenceTracker`, built from every `Space`'s automatic
-  signed `{type:'hello'}` message on connect).
+  `{nodeId, kind, origin}`). A write that also carried a `notify` hint
+  additionally fires `notification.<kind>.<topic>`. `space.member.joined`
+  fires reactively when a relay's `addMember()` broadcast arrives (no
+  polling). A full `debug.space.*` family (write/subscribe/unsubscribe/
+  hello/grant/load/compact lifecycle) is available for optional,
+  zero-cost-when-unused logging — see `space.js`'s own doc comment for the
+  complete list.
+- **Relay-side** (`createRelayForwarder({..., bus})`): content-blind by
+  construction (§3) - it can never compute "this is a mention" from
+  ciphertext. So a WRITER who wants the relay to route a push notification
+  attaches a small `notify: {topic, to?}` hint to the write itself
+  (`field.set(value, {notify})` / `field.push(value, {notify})`), which
+  travels UNENCRYPTED alongside the envelope - signed (tamper-evident
+  against a third party), but not verifiable against real content.
+  `notify.topic` must be declared in the Kind-Schema's `notifyTopics`. The
+  relay emits one `relay.notify.<kind>.<topic>` event per recipient,
+  carrying `online` (from its own `PresenceTracker`). A full
+  `debug.relay.*` family covers write/subscribe/unsubscribe/hello/grant/
+  presence lifecycle, and `relay.write.local` is the (non-debug) event
+  `federateRelay()` (§9) listens on to decide what to forward upstream.
 
-**Delivery channel is a handler's decision, not the bus's:** the bus only
-ever describes what happened and whether the recipient looks reachable
-live - `packages/space-transport/src/push-handler.js`'s
-`registerPushHandler(bus, {sendPush})` is the reference example: it
-subscribes to `relay.notify.**` and sends a push ONLY when `online` is
-false (an online recipient's live connection already got the real
-envelope, a push would be redundant). A browser-notification or in-app
-toast handler on the CLIENT side works the same way - subscribe to
-`notification.**`, decide locally (tab visible? `Notification.permission`
-granted?) whether to actually show one. None of that logic lives in
-`EventBus`, `Space`, or the relay themselves - see `demo/auto-demo.mjs`
-for both sides wired up together in one runnable script, and
-`demo/chat.mjs`/`demo/relay.mjs` for the same thing over a real WebSocket
-relay (a `@bob ...` message attaches a `mention` hint; watch the relay's
-own terminal log a push once bob's client isn't running).
+**Delivery channel is a handler's decision, not the bus's:**
+`packages/space-transport/src/push-handler.js`'s `registerPushHandler(bus,
+{sendPush})` is the reference example: it subscribes to `relay.notify.**`
+and sends a push ONLY when `online` is false. A browser-notification or
+in-app toast handler on the CLIENT side works the same way - subscribe to
+`notification.**`, decide locally whether to actually show one. None of
+that logic lives in `EventBus`, `Space`, or the relay themselves - see
+`demo/auto-demo.mjs` for both sides wired up together in one runnable
+script, and `demo/chat.mjs`/`demo/relay.mjs` for the same thing over a
+real WebSocket relay.
 
-## 8. Known gaps (honest, not hidden)
+## 12. Known gaps (honest, not hidden)
 
 - **No auto-reconnect** in `WsClientTransport` — a dropped connection stays
-  dropped; reconnect logic (with backoff) is real, separate work.
-- **ACL is space-wide, not per-Kind/per-field** — every member can write
-  every Node of every Kind. `kind-schema.js`'s `acl` field exists but the
-  relay/write-path doesn't consult it yet.
-- **No file compaction** — `createFileStore()` is a pure append-only log per
-  Node; a very long-lived, heavily-edited Node's file only grows. Yjs
-  itself garbage-collects deleted content from an in-memory `Y.Doc`, but
-  that doesn't shrink an already-written append log — periodic
-  snapshotting/compaction is real, separate work.
-- **No relay clustering/HA** — one relay process, one data directory. A
-  multi-relay federation (or even just a hot standby) is not built.
-- **Member ADDITION is live, removal/rotation is not** — a relay's
-  `addMember()` and a `Space`'s own `addMember()` (see their doc comments
-  in `relay.js`/`space.js`) let a new member join a running relay/an
-  already-constructed `Space` without a restart (see `demo/web/main.js`'s
-  `/join` + member-poll for a full worked example). What's still missing:
-  removing a member (nothing revokes their standing ability to decrypt
-  future writes or forge signed ones), and - inherent to "every write is
-  encrypted only for the members known at seal time", not a gap so much as
-  a property - a newly added member can never retroactively decrypt a
-  write sealed before they joined.
+  dropped; reconnect logic (with backoff) is real, separate work. A
+  reconnecting `Space` also has to re-send every `subscribe`/`hello` it
+  had active — this falls out naturally from constructing a fresh `Space`,
+  but isn't automatic for a long-lived `Space` instance surviving a
+  transport-level reconnect.
+- **`'members'`-mode ACL is still space-wide, not per-field/per-role** —
+  any member may write any `'members'`-mode Node of any Kind. `'owner'`/
+  `'named'` (§3) cover the self-certifying/delegated-authority cases; a
+  full per-field/per-role ACL within `'members'` mode is real, separate
+  work.
+- **A not-otherwise-a-member `'owner'`/`'named'` identity's `hello` still
+  gates on flat membership** (it carries no `nodeId`, so there's no
+  per-Kind ACL mode to consult the way `subscribe` does) — presence/push
+  don't yet extend to such an identity. Revisit alongside federation's own
+  membership model.
+- **Grant revocation is out of scope** — a `'named'`-mode grantee stays
+  granted for the life of the process that learned about the grant; no
+  message revokes one.
+- **Member REMOVAL/rotation is not built** — `addMember()` (relay and
+  Space) lets a new member join live; nothing revokes a departed member's
+  standing ability to decrypt future writes or forge signed ones. Also
+  inherent, not a gap: a newly added member can never retroactively
+  decrypt a write sealed before they joined.
+- **Federation has no membership-provisioning protocol** — a federating
+  relay authenticates to its upstream with its own keypair, but if the
+  upstream Kind requires flat `'members'` ACL, that relay still has to be
+  added as a member out-of-band, same as any other member.
+- **No relay clustering/HA within one relay** — federation (§9) composes
+  independent relay processes, but there's no hot-standby/failover for a
+  single relay's own process.
 - **`@qu/space-ui`** (declarative `<qu-view>`/`<qu-bind>`/`<qu-list>`/
   `<qu-text>`-style components) is not built yet — core sync/signing/
-  encryption was sequenced first, UI bindings are real, separate work.
+  encryption/ACL/federation was sequenced first, UI bindings are real,
+  separate work.
 - **No app/UI beyond the demo** — `demo/` is a minimal CLI AND a minimal
   browser page (`demo/web/`, served by `demo/relay.mjs` at `/`) proving the
   sync mechanism (see `demo/README.md`); nothing app-shaped is built yet.
@@ -320,12 +522,17 @@ own terminal log a push once bob's client isn't running).
   loud demo-only tradeoff (anyone reaching the port can join), not
   something to copy into a production relay unmodified.
 
-## 9. Where to look for more
+## 13. Where to look for more
 
-Every claim above is backed by a runnable test, not just a comment:
+Every claim above is backed by a runnable test, not just a comment. See
+`architecture.md` at the repo root for the full file-by-file map; the
+highlights:
 
-- `packages/space-core/test/` — envelope signing/verification, field
-  encryption behavior, CRDT convergence for text and list fields.
+- `packages/space-core/test/` — envelope signing/verification (both
+  modes, including `snapshot`), field encryption/visibility behavior, CRDT
+  convergence, node-level ACL (`acl.test.js`), alias identities
+  (`alias.test.js`), compaction (`compact-node.test.js`), the local-first
+  query API (`use-node.test.js`).
 - `packages/space-transport/test/poc-demo.test.js` — the original
   end-to-end proof (in-process transport).
 - `packages/space-transport/test/ws-relay.test.js` — the same, over a real
@@ -333,6 +540,15 @@ Every claim above is backed by a runnable test, not just a comment:
 - `packages/space-transport/test/mirror-offline.test.js` — the
   offline-sender/mirror-storage scenario, including a real relay-process
   restart against real disk.
+- `packages/space-transport/test/subscriber-tracking.test.js` — a
+  connected, authorized member who never subscribed gets nothing;
+  `unsubscribeNode()` reliably turns delivery back off.
+- `packages/space-transport/test/named-acl.test.js` — `'owner'`/`'named'`
+  ACL enforcement through a real relay.
+- `packages/space-transport/test/federation.test.js` — two independent
+  relay processes, demand-driven, bidirectional.
+- `packages/space-transport/test/wire-efficiency.test.js` — base64 sizing
+  and real `permessage-deflate` negotiation.
 - `packages/space-storage/test/file-store.test.js` — real on-disk
   persistence, including the "fresh instance sees what a prior instance
   wrote" restart simulation.
@@ -340,19 +556,23 @@ Every claim above is backed by a runnable test, not just a comment:
 Run any of them with `node --test <path>` from the relevant package
 directory, or `npm test` from the repo root to run everything.
 
-## 10. Try it yourself: the text-exchange demo
+## 14. Try it yourself: the demos
 
-`demo/` is a small, runnable proof that two independent processes can
-exchange collaboratively-edited text over a real relay, each side
-identified by its Qu public-key fingerprint (`QuCrypto.fingerprint()`,
-see `packages/core/src/crypto.js`) rather than a raw key or a username:
+`demo/` has two runnable proofs (see `demo/README.md` for full detail):
 
 ```sh
-npm run demo            # zero-setup: one process, two simulated peers
+npm run demo            # zero-setup: one process, simulates chat AND owner-node identity discovery
 npm run demo:relay      # real relay, terminal 1 - also serves a browser client at http://localhost:8081/
 npm run demo:alice      # real client "alice", terminal 2
 npm run demo:bob        # real client "bob", terminal 3 - type in either, watch it appear in the other
 ```
+
+`npm run demo` (`demo/auto-demo.mjs`) runs two scenarios in one process: a
+chat exchange with presence-gated push routing (part 1), and an
+`acl.write: 'owner'` Node with public fields that a completely unrelated
+peer — never a Space member, never previously connected — discovers and
+reads knowing only the owner's pubkey (part 2, §7/§3's `'owner'` mode in
+action). Exits non-zero if anything doesn't converge as expected.
 
 `demo:relay` serves a small browser page on that SAME port (`demo/web/`,
 esbuild-bundled at startup) - open it in two tabs, pick a name, and chat
@@ -360,6 +580,3 @@ live with each other or with a CLI `demo:alice`/`demo:bob` in the same
 room. Point a reverse proxy at this one port for HTTPS/TLS-offloading - it
 never needs a second port, the WebSocket upgrade rides the same HTTP
 server as the page/API.
-
-See `demo/README.md` for what each command does and how identity/
-membership works for the demo, in the browser and the CLI alike.
