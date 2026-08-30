@@ -207,7 +207,8 @@ envelope).
 | `src/federation.js` | `federateRelay()` — a relay as a subscribing peer of another relay. |
 | `src/presence-tracker.js` | `PresenceTracker` — pubkey ↔ peerId online/offline state, built from signed `hello` messages. |
 | `src/push-handler.js` | `registerPushHandler(bus, {sendPush})` — reference delivery-channel handler for `relay.notify.**`. |
-| `src/relay-server.js` | Standalone, env-var-configured relay process (`node src/relay-server.js`) — what the Dockerfile runs. |
+| `src/relay-identity.js` | `loadOrCreateIdentity(filePath)`/`describeIdentity()` — a relay's own keypair, auto-generated on first boot and persisted (only needed for federation). |
+| `src/relay-server.js` | Standalone, env-var-configured relay process (`QU_*`, see its own doc comment; `--print-identity` CLI flag) — what the Dockerfile runs. |
 | `src/index.js` | Package's public export surface (main entry — excludes `ws-client-transport.js`'s browser-safe subpath, see that file's own doc comment on why). |
 
 ### `demo/`
@@ -281,6 +282,7 @@ notice.
 | `WsClientTransport` (also `@qu/space-transport/ws-client-transport`) | Real WebSocket client, browser-safe subpath. |
 | `PresenceTracker` | `.setOnline()`/`.disconnect()`/`.isOnline()`/`.pubFor()`. |
 | `registerPushHandler(bus, {sendPush, pattern?})` | Reference push delivery-channel handler. |
+| `loadOrCreateIdentity(filePath)` / `describeIdentity(identity)` | A relay's own keypair — auto-generate-and-persist, and a printable public summary. |
 
 ### Storage (`@qu/space-storage`)
 

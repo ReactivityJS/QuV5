@@ -5,3 +5,4 @@ export { createWsServerHub } from './ws-server-hub.js';
 export { WsClientTransport } from './ws-client-transport.js';
 export { registerPushHandler } from './push-handler.js';
 export { federateRelay } from './federation.js';
+export { loadOrCreateIdentity, describeIdentity } from './relay-identity.js';
