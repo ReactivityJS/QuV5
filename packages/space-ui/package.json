@@ -1,0 +1,19 @@
+{
+  "name": "@qu/space-ui",
+  "version": "0.1.0",
+  "description": "Qu V5: an OPTIONAL, framework-agnostic add-on UI layer over @qu/space-core's Field/SpaceNode API - vanilla JS/DOM, no build step, no virtual DOM, no component framework dependency. bind.js (one/two-way reactive field<->element binding), inline-edit.js (contenteditable with cancel/save), list-bind.js (keyed diff list rendering off a list Field), upload-status.js (file selection + always-visible remote-sync status icons, built on @qu/space-plugins' UploadOutbox). @qu/space-core itself stays completely unaware this package exists - every function here takes a real DOM element and a Field/Node handle and wires listeners/observers, nothing more.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/space-core": "^0.1.0",
+    "@qu/space-plugins": "^0.1.0"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  },
+  "license": "MIT"
+}

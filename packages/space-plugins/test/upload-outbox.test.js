@@ -62,9 +62,11 @@ test('enqueue() saves locally, then transitions pending -> uploading -> done, an
   });
 
   const id = await outbox.enqueue({ name: 'cat.png', size: 1234, mimeType: 'image/png' }, 'fake-bytes');
-  assert.equal(localStore.has(id), false); // upload() resolved synchronously in this test - already cleaned up.
+  // enqueue() resolves once locally saved/queued, NOT once uploaded (see that method's own doc
+  // comment on why it's fire-and-forget) - the actual attempt is still in flight at this point.
+  await waitUntil(async () => (await outbox.statusOf(id))?.status === 'done');
+  assert.equal(localStore.has(id), false); // done - the local copy was cleaned up.
   const status = await outbox.statusOf(id);
-  assert.equal(status.status, 'done');
   assert.equal(status.name, 'cat.png');
   assert.equal(uploaded.length, 1);
   assert.equal(uploaded[0].blob, 'fake-bytes');
@@ -81,12 +83,13 @@ test('a throwing upload() leaves the record "failed" (with the error message) an
   });
 
   const id = await outbox.enqueue({ name: 'doc.pdf', size: 99, mimeType: 'application/pdf' }, 'bytes');
+  await waitUntil(async () => (await outbox.statusOf(id))?.status === 'failed');
   let status = await outbox.statusOf(id);
-  assert.equal(status.status, 'failed');
   assert.equal(status.error, 'network down');
   assert.equal(localStore.has(id), true); // never dropped - still retryable.
 
-  await outbox.retry(id);
+  await outbox.retry(id); // also fire-and-forget - see retry()'s own doc comment.
+  await waitUntil(async () => (await outbox.statusOf(id))?.status === 'done');
   status = await outbox.statusOf(id);
   assert.equal(status.status, 'done');
   assert.equal(attempts, 2);
@@ -102,6 +105,25 @@ test('list() returns every queued file\'s current record', async () => {
   const all = await outbox.list();
   assert.equal(all.length, 2);
   assert.deepEqual(new Set(all.map((r) => r.name)), new Set(['a.txt', 'b.txt']));
+});
+
+test('watch() reactively reports a file\'s status changes, no polling', async () => {
+  const alice = await actor();
+  const space = new Space({ identity: alice, members: [], transport: silentTransport() });
+  let resolveUpload;
+  const outbox = new UploadOutbox(space, memoryLocalStore(), () => new Promise((resolve) => (resolveUpload = resolve)));
+
+  const seen = [];
+  const enqueuePromise = outbox.enqueue({ name: 'slow.bin', size: 1, mimeType: 'application/octet-stream' }, 'x');
+  await new Promise((resolve) => setTimeout(resolve, 10)); // let enqueue() reach 'uploading' and register the record before watch() reads it back.
+  const id = (await outbox.list())[0].id;
+  const unwatch = await outbox.watch(id, (record) => seen.push(record?.status));
+
+  resolveUpload();
+  await enqueuePromise;
+  await waitUntil(() => seen.includes('done'));
+  assert.deepEqual(seen[0], 'uploading'); // the immediate callback on watch() itself reported the current status.
+  unwatch();
 });
 
 test('upload status is visible to a fellow Space member who subscribes to the uploader\'s outbox Node', async () => {

@@ -83,25 +83,40 @@ export class UploadOutbox {
 
   /**
    * Saves `blob` locally FIRST (so the file survives a reload/crash before
-   * any network attempt is even made), records `'pending'` metadata, then
-   * immediately attempts the upload - failure leaves it `'failed'` for a
-   * later `retry()`, it is never dropped from the queue on its own.
+   * any network attempt is even made) and records `'pending'` metadata -
+   * BOTH awaited, so the returned promise settles quickly and predictably.
+   * The actual upload attempt then runs in the BACKGROUND (fire-and-forget,
+   * never awaited here) - `enqueue()` must not block its caller for the
+   * full upload duration, or queueing several files in a loop would
+   * serialize them one at a time instead of actually queueing. Track
+   * progress via `watch()`/`statusOf()`, not this method's own return
+   * value. A failure leaves the record `'failed'` for a later `retry()` -
+   * it is never dropped from the queue on its own.
    * @param {{id?: string, name: string, size: number, mimeType: string}} meta
    * @param {*} blob - whatever `localStore` expects (a `Blob`/`File` in a browser, a `Buffer` in Node, ...).
-   * @returns {Promise<string>} the file id (generated if `meta.id` was omitted).
+   * @returns {Promise<string>} the file id (generated if `meta.id` was omitted) - resolves once locally saved and queued, NOT once uploaded.
    */
   async enqueue(meta, blob) {
     const id = meta.id ?? randomId();
     await this._localStore.save(id, blob);
     await this._patch(id, { ...meta, id, status: 'pending', addedAt: Date.now(), error: null });
-    await this._attempt(id, blob);
+    this._attempt(id, blob); // fire-and-forget - see this method's own doc comment.
     return id;
   }
 
-  /** Re-attempts a `'failed'` (or any) queued upload, reloading its bytes from `localStore` first - so a retry works even across a reload where the original `blob` reference is long gone. @param {string} id */
+  /**
+   * Re-attempts a `'failed'` (or any) queued upload, reloading its bytes
+   * from `localStore` first - so a retry works even across a reload where
+   * the original `blob` reference is long gone. Also fire-and-forget, same
+   * reasoning as `enqueue()` - the returned promise resolves once the
+   * reload+re-attempt has been KICKED OFF, not once it finishes; a caller
+   * that specifically wants to know when THIS attempt settles should watch
+   * `watch(id, ...)`/`statusOf(id)` instead.
+   * @param {string} id
+   */
   async retry(id) {
     const blob = await this._localStore.load(id);
-    await this._attempt(id, blob);
+    this._attempt(id, blob);
   }
 
   async _attempt(id, blob) {
@@ -128,5 +143,26 @@ export class UploadOutbox {
   async list() {
     const node = await this._ensureNode();
     return Object.values((await node.field('records').get()) ?? {});
+  }
+
+  /**
+   * Reactive status for ONE file: calls `callback(record)` immediately with
+   * the current record, then again every time `records` changes (the whole
+   * map is one atomic field - see this file's own doc comment - so this
+   * re-reads and re-filters on every change rather than needing a
+   * per-key observer; fine at the scale a local outbox actually holds).
+   * No polling anywhere - this is `field.observe()`, the same reactive
+   * primitive every other read in this framework uses (see `@qu/space-ui`'s
+   * `bindUploadStatusIcon()` for the intended consumer).
+   * @param {string} id
+   * @param {(record: object|undefined) => void} callback
+   * @returns {Promise<() => void>} unobserve function.
+   */
+  async watch(id, callback) {
+    const node = await this._ensureNode();
+    const notify = async () => callback(await this.statusOf(id));
+    const unobserve = node.field('records').observe(notify);
+    await notify();
+    return unobserve;
   }
 }
