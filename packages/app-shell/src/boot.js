@@ -31,6 +31,16 @@ async function renderLandingPage({ mountEl, doc, platform }) {
   const p = doc.createElement('p');
   p.textContent = apps.length > 0 ? 'Verfügbare Anwendungen:' : 'Noch keine Anwendung auf dieser Plattform installiert.';
   container.appendChild(p);
+  if (apps.length === 0) {
+    // The one thing this page CAN say without any Qu content to resolve (this IS the fallback for
+    // when there's genuinely nothing yet, including at #/admin BEFORE the "admin" alias has ever
+    // been registered - a plain relay restart alone never gets you here, an install step is always
+    // required first, same "framework never silently assumes a Package is installed" posture the
+    // rest of this file already takes for a single unresolved route).
+    const hint = doc.createElement('p');
+    hint.innerHTML = 'Am schnellsten: <code>npm run bootstrap:platform</code> (siehe root <code>README.md</code>s "Deploying the App Shell") - installiert die Admin-Konsole (dann erreichbar unter <code>#/admin</code>) und eine CMS-verwaltete Demo-App in einem Schritt.';
+    container.appendChild(hint);
+  }
   const list = doc.createElement('ul');
   for (const app of apps) {
     const li = doc.createElement('li');

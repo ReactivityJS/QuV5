@@ -592,6 +592,29 @@ actually act as either identity locally. Safe to re-run any time (every
 step checks first, never re-creates content that already exists — see its
 own doc comment on why that matters for `Y.Text` fields specifically).
 
+**Before running it, `/` and `#/admin` both show "Noch keine Anwendung
+auf dieser Plattform installiert"** — expected, not broken: `docker
+compose up` alone only starts an EMPTY platform. `#/admin` is an ORDINARY
+registered alias (architecture.md §7 — nothing about the route string is
+special-cased), not a route the Shell hardcodes — until something has
+registered it AND installed the console's own content, it resolves to
+nothing and falls through to the same generic landing page as any other
+unmatched route. `bootstrap:platform` above is exactly that "something."
+
+**The Admin-UI (`#/admin`) and a CMS editor (`#/<prefix>/cms`) are
+different things at different levels, and there is no single global one
+covering everything** — `#/admin` (one per platform, the relay-admin's
+own realm) only registers apps under path prefixes, it has no content
+editor of its own; a CMS editor (architecture.md §7's "The built-in CMS
+editor") is installed PER APP, into that app's OWN Space
+(`installCms(space)`, `@qu/app-shell`'s `cms-bundle.js`) — `bootstrap:
+platform` installs one for its own demo app (`#/demo/cms`) automatically;
+for your own app, call `installCms()` the same way from your own install
+script. Editing `#/admin`'s own content still needs
+`bin/install-admin-console.mjs` — no CMS editor for it yet (its Kinds
+have no `edit*()` counterparts, see architecture.md §7's own note on
+this gap).
+
 The rest of this subsection is the equivalent BY-HAND walkthrough — useful
 for a real deployment where you want full control over each identity/step
 rather than the one-shot script above.

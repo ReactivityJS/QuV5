@@ -140,6 +140,40 @@ For a single, fixed app instead of a platform, set `QU_APP_ADMIN_PUB`
 directly (ignored once `QU_RELAY_ADMIN_PUB` - platform mode - is also
 set) - see the guide's own walkthrough.
 
+**"Noch keine Anwendung auf dieser Plattform installiert" / `#/admin`
+shows the same thing, not the console** - this is the expected state
+right after `docker compose up` alone, not a bug: starting the relay
+gives you an EMPTY platform (a running Space, nothing written to it yet).
+`#/admin` is an ORDINARY registered alias like any other (`architecture.md`
+§7 - "kein Sonderfall zu normalen Spaces") - until something has actually
+registered it AND installed the console's own content, it resolves to
+nothing, so it falls through to this SAME generic landing page. Run
+`npm run bootstrap:platform` (above) to fix both at once; see its own
+"Two passes are sometimes needed" doc comment if a first run tells you to
+restart the relay and re-run it.
+
+**The Admin-UI (`#/admin`) and a CMS editor (`#/<prefix>/cms`) are TWO
+DIFFERENT things, at two different levels** - a common point of confusion:
+- **`#/admin`** (platform/relay-admin level, ONE per platform) only
+  registers apps under path prefixes (`registerApp()`) - it has no
+  content editor of its own. `bootstrap:platform` installs it for you;
+  by hand, see `packages/app-shell/bin/install-admin-console.mjs`.
+- **`#/<prefix>/cms`** (per-app, one per REGISTERED app, `#/demo/cms` for
+  `bootstrap:platform`'s own demo app) is where that app's OWN
+  templates/styles/pages are actually created and edited - see
+  architecture.md §7's "The built-in CMS editor." Every app-admin installs
+  this into their OWN app's Space (`installCms(space)`,
+  `@qu/app-shell`'s `cms-bundle.js`) - `bootstrap:platform` does this for
+  its demo app automatically; for your OWN app, call `installCms()` from
+  your own install script (see `demo/install-app-shell-demo.mjs` for the
+  connect-as-app-admin pattern) or add it to your own bundle install flow.
+
+There is currently no SINGLE, platform-wide CMS shared across every app,
+and no CMS for `#/admin`'s own content either (its `qu-admin-*` Kinds have
+no `edit*()` counterparts yet - `bin/install-admin-console.mjs` remains
+the only way to update it) - each ordinary app gets its OWN independent
+CMS editor, installed once per app.
+
 ## Deploying the legacy chat relay
 
 The OLD, hardcoded chat demo relay (`@qu/space-transport`'s own
