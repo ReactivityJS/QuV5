@@ -123,7 +123,10 @@ exact URLs plus copy-pasteable browser devtools snippets so you can
 actually act as either identity. See that script's own doc comment, or
 the root `README.md`'s "Deploying the App Shell" section, for the full
 walkthrough - including what to do if it tells you to restart the relay
-and re-run it (a one-time thing, on a totally fresh setup only).
+and re-run it (a one-time thing on a fresh Docker setup, UNLESS you're
+running it via `docker exec` into the already-running container, which
+needs one extra `docker compose cp` + recreate step in between - the root
+`README.md` has the exact recipe, and the script itself prints it too).
 
 ## Legacy: the old hardcoded chat demo (two clients, one relay, three terminals)
 
