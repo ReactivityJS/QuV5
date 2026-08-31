@@ -57,6 +57,21 @@ standalone or via Docker).
   vanilla JS/DOM reactive bindings - one/two-way field binding,
   contenteditable inline-edit with save/cancel, keyed list diffing,
   file-selection + upload-status icons - no framework, no build step.
+- [`packages/app-core`](./packages/app-core) - `@qu/app-core`: the App
+  Runtime - Kind-Schemas for application content (manifest, route registry,
+  pages, templates, styles), content-addressed Node ids, `ContentResolver`,
+  `HashRouter`, `AppRuntime`, and a Dev/Admin API to bootstrap an empty
+  Space into a working app.
+- [`packages/app-renderer`](./packages/app-renderer) - `@qu/app-renderer`:
+  turns a resolved Template + Page into DOM - HTML sanitizing, `<qu-slot>`
+  resolution, style injection.
+- [`packages/app-shell`](./packages/app-shell) - `@qu/app-shell`: the
+  minimal, application-agnostic bootstrap kernel a Relay serves (a single
+  `<qu-app-shell>` element - no concrete page/app hardcoded), plus its OWN
+  production `relay-server.js`/`Dockerfile` (see "Deploying the App Shell"
+  below) - see `architecture.md` §7 and
+  [`docs/app-shell-arbeitsauftrag.md`](./docs/app-shell-arbeitsauftrag.md)
+  for the full design.
 
 ## Development
 
@@ -89,3 +104,22 @@ docker compose -f docker-compose.space-relay.yml up -d
 See the guide's "Docker deployment" section for `QU_MEMBERS_JSON` (optional -
 only needed for `'members'`-mode ACL Kinds) and how to generate it, and for
 `QU_FEDERATE_UPSTREAM_URL` to federate with another relay.
+
+## Deploying the App Shell
+
+A SEPARATE relay/image from the one above - serves `@qu/app-shell` (a
+generic app defined entirely by Qu content) instead of the hardcoded chat
+demo, so it never makes `@qu/space-transport` depend on an application-layer
+package (see `packages/space-transport/src/relay-server.js`'s own doc
+comment):
+
+```sh
+docker compose -f docker-compose.space-relay.yml --profile app-shell up -d
+```
+
+Starts fine with no configuration (a setup page instead of an app) until you
+set `QU_APP_ADMIN_PUB` (a base64 Ed25519 PUBLIC key - this relay never sees
+the matching private key) and `QU_MEMBERS_JSON` for that same identity - see
+the guide's "App Shell deployment" subsection for the full walkthrough,
+including how to seed content with `demo/install-app-shell-demo.mjs`
+pointed at a real deployment.

@@ -24,6 +24,8 @@ import WebSocket from 'ws';
 import { QuCrypto } from '@qu/core';
 import { defineKind, Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport';
+import { EventBus } from '@qu/events';
+import { autoCompactOnJoin } from '@qu/space-plugins';
 import { ensureIdentity, loadMembers, fingerprintOf, DEFAULT_IDENTITY_DIR } from './lib/identity.mjs';
 
 function parseArgs(argv) {
@@ -61,8 +63,16 @@ async function main() {
   await transport.connect();
   console.log(`Connected to relay at ${relay}. Room: "${room}". Type a message and press Enter (Ctrl+C to quit).\n`);
 
-  const space = new Space({ identity, members, transport });
+  const bus = new EventBus();
+  const space = new Space({ identity, members, transport, bus });
   const node = space.subscribeNode(room, chatKind);
+  // Closes a real gap, not a hypothetical one: `demo-chat`'s `messages` field is
+  // `visibility: 'encrypted'` (the default) - a member who joins the room AFTER some messages
+  // already exist can never decrypt those, and because Yjs integrates one author's updates as a
+  // strictly ordered, gapless sequence, could then never receive ANY later message from that
+  // author either - see auto-compact.js's own doc comment. Recompacts the room (re-encrypted for
+  // whoever is a member NOW) the instant this Space learns someone new joined.
+  autoCompactOnJoin(space, bus, [room]);
 
   let printed = 0;
   let printing = Promise.resolve();
@@ -75,7 +85,7 @@ async function main() {
         const all = await node.field('messages').toArray();
         for (; printed < all.length; printed++) {
           const m = all[printed];
-          if (m === undefined) continue; // ciphertext we're not a recipient of (shouldn't happen - we're always a member here)
+          if (m === undefined) continue; // ciphertext we're not a recipient of - a message from before we joined that hasn't been recompacted yet (see autoCompactOnJoin() above), not an error.
           try {
             const who = m.fingerprint === myFingerprint ? 'you' : `${m.from} [${m.fingerprint}]`;
             console.log(`${new Date(m.ts).toLocaleTimeString()}  ${who}:  ${m.text}`);

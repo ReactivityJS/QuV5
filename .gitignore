@@ -12,5 +12,8 @@ demo/.app-shell-data/
 # generated at demo/app-shell-relay.mjs startup (real app-admin pubkey baked in) - see demo/app-shell-web/build.mjs
 demo/app-shell-web/index.html
 
+# generated at packages/app-shell/relay-server.js startup (bundle.js + a per-deployment index.html)
+packages/app-shell/dist-web/
+
 # relay deployment data (see docs/v5-space-core-guide.md §5)
 relay-data/

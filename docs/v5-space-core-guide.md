@@ -531,6 +531,51 @@ where its own identity file persists across restarts/redeploys. Set it
 to an empty string to run a pure live-only relay instead (its identity
 then becomes ephemeral too — a new one every restart, logged loudly).
 
+### App Shell deployment (a separate relay/image)
+
+The relay above always serves the hardcoded chat demo — see
+`relay-server.js`'s own doc comment for why it deliberately stays that way
+("Relay bleibt Application-blind," architecture.md §1/§7). To serve
+`@qu/app-shell` — a generic app defined entirely by Qu content, see
+`architecture.md` §7 and `docs/app-shell-arbeitsauftrag.md` — build and run
+`packages/app-shell/Dockerfile` instead, on a **different port**: it's a
+separate relay/Space, not a replacement.
+
+```sh
+docker build -f packages/app-shell/Dockerfile -t qu-app-shell-relay .
+docker run -d -p 8082:8081 -v qu-app-shell-relay-data:/data qu-app-shell-relay
+```
+
+Or via the same compose file, opt-in (so plain `docker compose up` still
+starts only the chat relay above, unchanged):
+
+```sh
+docker compose -f docker-compose.space-relay.yml --profile app-shell up -d
+```
+
+It starts fine with no configuration — `http://localhost:8082/` (or
+whatever port you mapped) serves a plain setup page instead of an app until
+you configure `QU_APP_ADMIN_PUB` (a base64 Ed25519 PUBLIC key only — see
+`relay-server.js`'s own "ADMIN IDENTITY" doc comment; this relay never
+holds, needs, or is sent the app-admin's private key):
+
+```sh
+docker run -d -p 8082:8081 \
+  -e QU_APP_ADMIN_PUB='<base64 pubkey>' \
+  -e QU_MEMBERS_JSON='[{"pub":"<same as QU_APP_ADMIN_PUB>","xPub":"<its X25519 pubkey>"}]' \
+  -v qu-app-shell-relay-data:/data \
+  qu-app-shell-relay
+```
+
+Once running, seed (or edit) its content from a SEPARATE process that holds
+the app-admin's actual private key — `demo/install-app-shell-demo.mjs` is
+the reference implementation, and works unmodified against a real
+deployment:
+
+```sh
+node demo/install-app-shell-demo.mjs --relay wss://your-host --dir /path/to/your/app-admin-identity
+```
+
 ## 11. Granular events: notifications, presence, push, and debugging
 
 `@qu/events`'s `EventBus` is one dot-namespaced, wildcard-matching
@@ -707,9 +752,12 @@ server as the page/API.
 
 The SAME app is also served by `relay-server.js`/the Docker image (§10) -
 `demo:relay` bundles at startup for a fast local edit-reload loop, the
-Docker build bundles once at build time. This is a deliberate first step
-towards a real one, not the final destination - see `relay-server.js`'s
-own "SERVES AN APP" doc comment and architecture.md.
+Docker build bundles once at build time. This stays a fixed, hardcoded demo
+app on purpose - see `relay-server.js`'s own "SERVES AN APP" doc comment
+for why (`@qu/space-transport` never depends on an application-layer
+package). For a generic app defined entirely by Qu content instead, see the
+separate App Shell deployment (§10's own "App Shell deployment" subsection,
+and architecture.md §7).
 
 ## 15. Reconnect and resync
 

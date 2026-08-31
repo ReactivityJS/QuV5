@@ -87,6 +87,17 @@ caught two real bugs, now fixed and regression-tested (see `architecture.md`
 Yjs's own gapless per-author update ordering), and `resolvePage()` used to
 consider a page "ready" before its own `content` field had actually synced.
 
+**Production**: `demo/app-shell-relay.mjs`/`demo/install-app-shell-demo.mjs`
+above are the demo (CLI-argument-configured, persists identities under
+`demo/.app-shell-identities/`). For an actual deployment, use
+`packages/app-shell/relay-server.js` instead (its own `Dockerfile`,
+env-var-configured like `packages/space-transport`'s own `relay-server.js`)
+- see the root `README.md`'s "Deploying the App Shell" section or
+`docs/v5-space-core-guide.md` §10's "App Shell deployment" subsection.
+`demo/install-app-shell-demo.mjs` itself works UNMODIFIED against a real
+deployment via its own `--relay wss://your-host` flag - it's the reference
+installer, not demo-only code.
+
 ## Real thing: two clients, one relay, three terminals
 
 **Terminal 1 - the relay:**
@@ -255,12 +266,19 @@ and mirrors ciphertext it cannot decrypt.
   `Space` no longer CRASHES on this (an unhandled promise rejection used to
   terminate the whole CLI process the instant it happened - a real,
   now-fixed bug, see `debug.space.write.remote.undecryptable` in
-  `architecture.md` §6) but it also can't undo it: **if messages from one
-  person silently stop appearing, delete `demo/.data/` and restart
-  `demo:relay`** (a real app would instead call `Space.compactNode()` after
-  a membership change - see envelope.js's own "SNAPSHOT/COMPACTION" doc
-  comment - so every current member's copy reseals as one envelope encrypted
-  for the CURRENT member list, closing the gap for anyone who joins after).
+  `architecture.md` §6). **Both `chat.mjs` and `web/main.js` now also
+  actually close the gap**, not just avoid crashing on it: both wire up
+  `@qu/space-plugins`' `autoCompactOnJoin(space, bus, [ROOM])`, which
+  watches `space.member.joined` and calls `Space.compactNode()` the instant
+  it fires - so an EXISTING member's own copy reseals the room as one
+  envelope encrypted for the member list AS IT IS NOW, closing the gap for
+  whoever just joined, covering everything written from that point forward
+  (see `envelope.js`'s own "SNAPSHOT/COMPACTION" doc comment, and
+  `packages/space-plugins/test/auto-compact.test.js` for the regression
+  proof). What this does NOT do - and structurally can't - is retroactively
+  hand a late joiner history sealed before they existed; if that specific,
+  narrower gap ever matters, delete `demo/.data/` and restart `demo:relay`
+  to start fresh instead.
 - **The typed display name is NOT an account** - a browser tab's identity
   is a keypair generated once per browser/profile and kept in
   `localStorage` (see `web/main.js`'s own `loadOrCreateIdentity()`); the

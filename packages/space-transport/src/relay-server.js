@@ -100,13 +100,20 @@
  * SERVES AN APP on this SAME HTTP server/port, alongside the WebSocket
  * upgrade endpoint - `GET /` and `/index.html`, `GET /bundle.js`/`.map`,
  * `GET /members.json`, `POST /join` (see `relay-app-server.js`'s own doc
- * comment for what each does). TODAY that app is `demo/web/` - the same
- * browser chat client `demo/relay.mjs` serves - bundled at DOCKER BUILD
- * TIME (see the Dockerfile) so the runtime image needs no bundler. This
- * is a deliberate first step, not the final shape: the plan is for this
- * to become "the primary app the relay loads and defines on start,"
- * replacing today's demo content with a real one, without changing how
- * the relay itself serves it (see architecture.md).
+ * comment for what each does). That app is `demo/web/` - the same browser
+ * chat client `demo/relay.mjs` serves - bundled at DOCKER BUILD TIME (see
+ * the Dockerfile) so the runtime image needs no bundler.
+ *
+ * This file stays exactly that: a relay for the chat demo. The generic,
+ * "loads whatever app a Qu Space defines" successor
+ * (docs/app-shell-arbeitsauftrag.md, architecture.md §7) is `@qu/app-shell`
+ * - served by its OWN, SEPARATE entrypoint
+ * (`packages/app-shell/relay-server.js`, its own `Dockerfile`) rather than
+ * by replacing `demo/web/` here, specifically so `@qu/space-transport`
+ * (this package) never has to depend on an application-layer package -
+ * "Relay bleibt Application-blind" (architecture.md §1) stays true of
+ * THIS file, unconditionally, not just until an app got wired in. Run the
+ * two relays side by side (different ports/Spaces) to get both.
  *
  *   QU_ALLOW_JOIN           - default `true`. Whether `POST /join` lets
  *                             ANY caller register a self-generated
