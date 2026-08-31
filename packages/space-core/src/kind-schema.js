@@ -46,23 +46,48 @@
  *
  * `acl.write` names who may sign updates to a Node of this kind:
  *   - `'members'` - every space member may write (the original, still-
- *     simplest mode - full per-field/per-role ACL is real, separate work).
+ *     simplest mode - genuinely flat/shared write access, e.g. the built-in
+ *     admin realm's own console content, architecture.md §7 - "wir
+ *     berechtigen alle Admins des Relays gleichberechtigt," no single
+ *     owner).
  *   - `'owner'` - only the pubkey the Node's own `nodeId` cryptographically
  *     commits to may write (see `deriveOwnerNodeId()` below) - a
  *     self-certifying "~pub" identity/user-space, verifiable with ZERO
  *     relay-side state: the check is a pure function of `(nodeId,
  *     envelope.pub)`, nothing to bootstrap, no race between "who wrote
- *     first."
+ *     first." ONE Node per owner per Kind - see `'content'` below for many.
  *   - `'named'` - the owner (same self-certifying `nodeId` as `'owner'`)
  *     PLUS anyone the owner has explicitly authorized via a signed `grant`
  *     control message (see `@qu/space-transport`'s relay.js and
  *     `Space.grantWriter()`) - state the relay/a Space hold is 100%
  *     derived from signed messages they already verified, never invented.
+ *   - `'content'` - `'named'`'s MANY-PER-OWNER counterpart: real, per-Node,
+ *     grant-derived write-ACL (owner + explicit grantees, exactly like
+ *     `'named'`) for a Kind that has many Nodes per owner (a page per
+ *     route, a template per name, ...) instead of one. `Space.createNode()`
+ *     requires a `{path}` option for this mode and derives the id itself
+ *     via `deriveContentNodeId(callerPub, kind, path)` (below) - a pure,
+ *     self-certifying function of `(ownerPub, kind, path)`, the SAME idea
+ *     `deriveOwnerNodeId()` already gives `'owner'`/`'named'`, just with an
+ *     extra `path` component so many Nodes fit under one owner. Unlike
+ *     `'named'`, there is no owner-pubkey SHORTCUT in the write-ACL check
+ *     (an id alone cannot be inverted back to its `path`) - `createNode()`
+ *     issues the creating owner a SELF-grant transparently, before any
+ *     field write, so ordinary callers (`@qu/app-core`'s `createPage()`/
+ *     `createTemplate()`/`createStyle()`) need no code of their own beyond
+ *     passing `path` - see `grant.js`'s own doc comment for the exact
+ *     mechanics, and space.js's `createNode()`. THIS is the general,
+ *     Kind-agnostic "who may edit THIS specific page/event/post" primitive
+ *     any many-per-owner content Kind wants - chat, calendar, forum, and
+ *     CMS content alike, not something reinvented per app.
  * A Node's meta-stamp (see node.js's `stampMeta()`) follows `'public'`
  * visibility automatically when `acl.write === 'owner'`/`'named'` (an
  * identity Node's own existence/kind should be as discoverable as its
- * public fields), `'encrypted'` otherwise - matches the pre-existing
- * behavior for `'members'`-mode Kinds exactly.
+ * public fields), `'encrypted'` otherwise (`'members'`/`'content'`) -
+ * matches the pre-existing behavior for `'members'`-mode Kinds exactly; a
+ * Kind that wants many-per-owner content to ALSO be publicly discoverable
+ * overrides `metaVisibility` itself (see `@qu/app-core`'s `kinds.js`
+ * `publicMeta()` for why/how - unchanged by `'content'` mode's addition).
  *
  * `notifyTopics` (optional) is the closed vocabulary of notification hints
  * a write to a Node of this kind may attach (see envelope.js's `notify`
@@ -104,15 +129,17 @@ import { QuCrypto } from '@qu/core';
 
 const SHAPES = new Set(['atomic', 'text', 'list']);
 const VISIBILITIES = new Set(['encrypted', 'public']);
-const ACL_MODES = new Set(['members', 'owner', 'named']);
+const ACL_MODES = new Set(['members', 'owner', 'named', 'content']);
 const PERSISTENCE_MODES = new Set(['durable', 'volatile']);
 
 /** Prefix for a self-certifying owner/named Node id - see `deriveOwnerNodeId()`. Deliberately the same "~" convention Qu's earlier path-based identity Nodes used. */
 const OWNER_NODE_PREFIX = '~';
+/** Prefix for a self-certifying, many-per-owner `'content'`-ACL Node id - see `deriveContentNodeId()`. */
+const CONTENT_NODE_PREFIX = '~content:';
 
 /**
  * @param {string} kind
- * @param {{fields: Record<string, {shape: 'atomic'|'text'|'list', visibility?: 'encrypted'|'public'}>, acl?: {write?: 'members'|'owner'|'named'}, notifyTopics?: string[], persistence?: 'durable'|'volatile'}} def
+ * @param {{fields: Record<string, {shape: 'atomic'|'text'|'list', visibility?: 'encrypted'|'public'}>, acl?: {write?: 'members'|'owner'|'named'|'content'}, notifyTopics?: string[], persistence?: 'durable'|'volatile'}} def
  */
 export function defineKind(kind, { fields, acl = { write: 'members' }, notifyTopics = [], persistence = 'durable' }) {
   if (!kind || typeof kind !== 'string') throw new Error('defineKind: "kind" must be a non-empty string');
@@ -148,9 +175,11 @@ export function defineKind(kind, { fields, acl = { write: 'members' }, notifyTop
     acl: Object.freeze({ ...acl }),
     notifyTopics: Object.freeze([...notifyTopics]),
     persistence,
-    // A 'members'-Kind Node's meta stays 'encrypted' (pre-existing behavior, unchanged); an 'owner'/'named'
-    // identity Node's meta is 'public' automatically - see this file's own doc comment.
-    metaVisibility: acl.write === 'members' ? 'encrypted' : 'public',
+    // A 'members'/'content'-Kind Node's meta stays 'encrypted' (pre-existing behavior for
+    // 'members', unchanged; 'content' follows it since it's equally many-per-owner content, not an
+    // identity); an 'owner'/'named' identity Node's meta is 'public' automatically - see this
+    // file's own doc comment.
+    metaVisibility: acl.write === 'members' || acl.write === 'content' ? 'encrypted' : 'public',
   });
 }
 
@@ -167,6 +196,28 @@ export function defineKind(kind, { fields, acl = { write: 'members' }, notifyTop
 export async function deriveOwnerNodeId(ownerPub, kind) {
   const digest = await QuCrypto.sha256(new TextEncoder().encode(`${kind}:${QuCrypto.toBase64(ownerPub)}`));
   return OWNER_NODE_PREFIX + QuCrypto.toBase64Url(digest);
+}
+
+/**
+ * Derives the self-certifying `nodeId` for an `acl.write: 'content'` Kind's
+ * ONE Node at `path` - `deriveOwnerNodeId()`'s many-per-owner counterpart
+ * (see this file's own doc comment on the `'content'` ACL mode). Pure
+ * function of `(ownerPub, kind, path)` - anyone who knows an owner's pubkey
+ * and a content path (a route, a template name, ...) can compute the exact
+ * Node id without asking anything "where is X." Verifying a write still
+ * needs a GRANT too (see `grant.js`) - unlike `deriveOwnerNodeId()`, this
+ * alone does not prove authorization, only IDENTIFIES the Node; `path`
+ * cannot be recovered from `nodeId` alone, so there is no owner-pubkey
+ * shortcut in the write-ACL check the way `'owner'`/`'named'` get one.
+ * @param {Uint8Array} ownerPub
+ * @param {string} kind
+ * @param {string} path - Any stable string identifying this one piece of content within `kind`.
+ * @returns {Promise<string>}
+ */
+export async function deriveContentNodeId(ownerPub, kind, path) {
+  if (!path || typeof path !== 'string') throw new Error('deriveContentNodeId: "path" must be a non-empty string');
+  const digest = await QuCrypto.sha256(new TextEncoder().encode(`${kind}:${QuCrypto.toBase64(ownerPub)}:${path}`));
+  return CONTENT_NODE_PREFIX + QuCrypto.toBase64Url(digest);
 }
 
 /** Small static registry, same public surface as EntityTypeRegistry (register/get/list) so the pattern stays familiar. */

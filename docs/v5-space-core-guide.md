@@ -183,7 +183,7 @@ live if I still need it" — see §5.
   by someone with no prior relationship to the writer — a `'owner'`-ACL
   identity Node's `pub`/`epub` fields being the canonical case (§7). No
   encryption at any layer; anyone, relay included, can read and verify it.
-- **`acl.write` has three modes**, all enforced by BOTH the relay and every
+- **`acl.write` has FOUR modes**, all enforced by BOTH the relay and every
   receiving `Space` (same check, `_isAuthorizedWriter()`/`buildWriteAcl()`):
   - `'members'` (default) — any current Space member.
   - `'owner'` — self-certifying: `nodeId = "~" + base64url(sha256(kind +
@@ -192,6 +192,7 @@ live if I still need it" — see §5.
     relay/Space bootstrap state, and the owner never needs to be
     registered as a flat "member" anywhere. `createNode()` auto-derives
     this id; any explicit `{id}` you pass is ignored for this mode.
+    ONE Node per owner per Kind.
   - `'named'` — the owner plus anyone they've authorized via a signed
     `grant` message: `await space.grantWriter(nodeId, kind, granteePub)`.
     State is 100% derived from verified grants, never invented. **Grant
@@ -201,6 +202,25 @@ live if I still need it" — see §5.
     rejected it (a real Yjs property: per-author updates integrate in
     strict order, so a peer that ever rejects one can never integrate a
     LATER one from the same doc either).
+  - `'content'` — `'named'`'s MANY-per-owner counterpart: `nodeId =
+    "~content:" + base64url(sha256(kind + ":" + base64(ownerPub) + ":" +
+    path))` (`deriveContentNodeId()`, kind-schema.js) — a route, a
+    template name, an event id, anything stable identifies `path`. Pass
+    `{path}` (not `{id}`) to `createNode()` for this mode — it derives the
+    id AND issues the creating identity a TRANSPARENT self-grant itself,
+    before attaching/writing anything, so ordinary content-creation code
+    never has to call `grantWriter()` for its own writes (only to extend
+    access to someone ELSE: `space.grantWriter(nodeId, kind, granteePub,
+    {path})` — same call as `'named'`, just with `path`). No owner-pubkey
+    shortcut in the write-ACL check exists (an id alone can't be inverted
+    back to `path`), so EVERY reader — including one reading the
+    ORIGINAL owner's own writes — needs to have actually seen a `grant`;
+    a relay durably replays past grants to a newly-subscribing peer for
+    exactly this reason (`relay.js`'s `grantStorageKey()`, a separate
+    storage key from the Node's own envelope log so compaction never
+    wipes it). This is `@qu/app-core`'s `qu-page`/`qu-template`/`qu-style`
+    - genuine per-owner content on a Relay hosting several independently-
+    owned apps, not "any Space member may write any page."
 
 ## 4. Real network: WebSocket transport + relay
 
@@ -575,6 +595,59 @@ deployment:
 ```sh
 node demo/install-app-shell-demo.mjs --relay wss://your-host --dir /path/to/your/app-admin-identity
 ```
+
+For everyday content maintenance AFTER that initial seed — adding/editing
+templates, styles, and pages — an app-admin doesn't need to re-run an
+installer script at all: `@qu/app-core`'s `installCms()`
+(`packages/app-shell/cms-bundle.js`) writes a small in-browser CMS editor
+into the app's OWN Space once (`installCms(space)`, same identity as
+above), then `https://your-host/#/cms` (open as that SAME identity) lists
+existing templates/styles/pages and lets you create or edit them straight
+from the browser — see architecture.md §7's "The built-in CMS editor" for
+how it's wired.
+
+**PLATFORM mode (several apps, one relay, a confidential admin realm)** —
+instead of one fixed `QU_APP_ADMIN_PUB`, set `QU_RELAY_ADMIN_PUB` (takes
+priority when both are set) — see architecture.md §7's "The Platform
+layer" for the full model. An app-admin the relay should accept ORDINARY
+content writes from still needs a STATIC, boot-time `QU_APP_ADMIN_PUBS`
+entry (a JSON array); an identity trusted to manage the built-in admin
+console needs a `QU_RELAY_ADMIN_MEMBERS_JSON` entry instead (a SEPARATE,
+genuinely confidential Space — its own `{pub, xPub}` list, never just a
+write-ACL grant):
+
+```sh
+docker run -d -p 8082:8081 \
+  -e QU_RELAY_ADMIN_PUB='<base64 relay-admin pubkey>' \
+  -e QU_APP_ADMIN_PUBS='["<base64 app-admin pubkey 1>","<base64 app-admin pubkey 2>"]' \
+  -e QU_RELAY_ADMIN_MEMBERS_JSON='[{"pub":"<base64>","xPub":"<base64>"}]' \
+  -v qu-app-shell-relay-data:/data \
+  qu-app-shell-relay
+```
+
+Bootstrap the built-in admin console ONCE (a real, separate process, run by
+whoever holds the identity listed in `QU_RELAY_ADMIN_MEMBERS_JSON` above —
+its private key never touches the relay):
+
+```sh
+node packages/app-shell/bin/install-admin-console.mjs \
+  --relay wss://your-host --prefix admin --dir ./admin-identity
+```
+
+This installs the console's own content (a `qu-admin-app` manifest, a
+template, one page with a "register an app" form) into the admin realm,
+then registers the `"admin"` alias in the MAIN space — a completely
+ordinary registry entry, not a special path the router hardcodes. From a
+browser signed in as that SAME identity, open `https://your-host/#/admin`:
+the console renders from installed content (not framework-built DOM), lists
+already-registered apps, and lets that identity register a new one — the
+app's own content still needs to be installed separately by whoever holds
+that app-admin's private key, e.g. via `installAppBundle()` (`@qu/app-core`'s
+Dev API) from your own script, the same way `demo/install-app-shell-demo.mjs`
+seeds a single app today. A visitor who is NOT in
+`QU_RELAY_ADMIN_MEMBERS_JSON` sees only a plain "not found" at `#/admin` —
+the admin realm's content is genuinely `'encrypted'`-visibility, sealed for
+that member list alone, not merely hidden by the console's own UI.
 
 ## 11. Granular events: notifications, presence, push, and debugging
 

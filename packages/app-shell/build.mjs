@@ -8,14 +8,18 @@
  *     `demo/web/build.mjs` bundles the chat demo's `main.js` - see that
  *     file's own doc comment on why that avoids needing a bundler in the
  *     runtime image).
- *   - `renderIndexHtml({appAdminPub})` — a pure string template, no I/O.
- *     THIS piece is inherently PER-DEPLOYMENT (it embeds one specific
- *     app-admin's pubkey into `<qu-app-shell app-admin-pub="...">, docs
- *     §5) - it has to run at BOOT time from whatever pubkey THIS
- *     deployment is configured with, never baked into a shared image ahead
- *     of time. `appAdminPub: null` renders a plain SETUP page instead -
- *     "an empty App Shell" (docs §3/§32) needs to say so on the page,
- *     not silently serve a shell that can never resolve a manifest.
+ *   - `renderIndexHtml({appAdminPub, relayAdminPub})` — a pure string
+ *     template, no I/O. THIS piece is inherently PER-DEPLOYMENT (it embeds
+ *     one specific identity's pubkey into `<qu-app-shell app-admin-pub="...">`
+ *     or `<qu-app-shell relay-admin-pub="...">`, docs §5/§19-21) - it has to
+ *     run at BOOT time from whatever pubkey THIS deployment is configured
+ *     with, never baked into a shared image ahead of time. `relayAdminPub`
+ *     takes priority over `appAdminPub` when both are set (a platform
+ *     deployment, `startPlatform()`, serves however many apps its
+ *     `qu-platform-apps` registry lists - see `shell.js`'s own doc comment
+ *     on the same priority). Neither set renders a plain SETUP page instead
+ *     - "an empty App Shell" (docs §3/§32) needs to say so on the page, not
+ *     silently serve a shell that can never resolve a manifest.
  *
  * Used by two callers: `demo/app-shell-web/build.mjs` (the in-repo demo,
  * which also writes an on-disk identity file for convenience) and this
@@ -45,9 +49,9 @@ export async function buildAppShellBundle({ outDir = join(here, 'dist') } = {}) 
   return { outfile };
 }
 
-/** @param {{appAdminPub: Uint8Array|null}} params @returns {string} full `index.html` markup. */
-export function renderIndexHtml({ appAdminPub }) {
-  if (!appAdminPub) {
+/** @param {{appAdminPub?: Uint8Array|null, relayAdminPub?: Uint8Array|null}} params @returns {string} full `index.html` markup. */
+export function renderIndexHtml({ appAdminPub = null, relayAdminPub = null } = {}) {
+  if (!appAdminPub && !relayAdminPub) {
     return `<!doctype html>
 <html lang="de">
   <head>
@@ -57,17 +61,25 @@ export function renderIndexHtml({ appAdminPub }) {
   <body style="font-family: sans-serif; max-width: 40rem; margin: 3rem auto; line-height: 1.5;">
     <h1>Qu App Shell</h1>
     <p>Dieser Relay liefert die App Shell aus, aber es ist noch keine Anwendung
-      zugeordnet (<code>QU_APP_ADMIN_PUB</code> ist nicht gesetzt).</p>
+      und kein Relay-Admin zugeordnet (weder <code>QU_APP_ADMIN_PUB</code> noch
+      <code>QU_RELAY_ADMIN_PUB</code> ist gesetzt).</p>
     <ol>
-      <li>Erzeuge eine App-Admin-Identity (ein normales Ed25519/X25519-Schlüsselpaar,
+      <li>Erzeuge eine Identity (ein normales Ed25519/X25519-Schlüsselpaar,
         z.B. mit <code>QuCrypto.generateKeypair()</code> aus <code>@qu/core</code>) -
         der private Schlüssel bleibt bei dir, dieser Relay bekommt ihn nie zu sehen.</li>
-      <li>Setze deren öffentlichen Signing-Schlüssel (base64) als
-        <code>QU_APP_ADMIN_PUB</code> in der Relay-Konfiguration und starte den
-        Relay neu.</li>
-      <li>Installiere eine erste Anwendung aus einem separaten Prozess, der den
+      <li>Für EINE einzelne App: setze deren öffentlichen Signing-Schlüssel (base64) als
+        <code>QU_APP_ADMIN_PUB</code>. Für eine PLATTFORM aus mehreren Apps unter
+        Pfad-Präfixen: setze stattdessen <code>QU_RELAY_ADMIN_PUB</code> (und ggf.
+        <code>QU_APP_ADMIN_PUBS</code>/<code>QU_RELAY_ADMIN_MEMBERS_JSON</code>) -
+        siehe <code>architecture.md</code> §7. Danach den Relay neu starten.</li>
+      <li>EINZELNE App: installiere sie aus einem separaten Prozess, der den
         privaten Schlüssel hält:
         <pre>node demo/install-app-shell-demo.mjs --relay wss://&lt;dieser-host&gt; --dir &lt;pfad-zu-deiner-app-admin-identity&gt;</pre>
+        PLATTFORM: jede App ist ohne Registrierung bereits unter ihrer eigenen
+        Owner-Id erreichbar; die eingebaute <code>#/admin</code>-Konsole selbst
+        wird einmalig über
+        <pre>node packages/app-shell/bin/install-admin-console.mjs --relay wss://&lt;dieser-host&gt;</pre>
+        installiert (siehe dessen eigener Kommentar).
       </li>
     </ol>
     <p>Siehe <code>docs/app-shell-arbeitsauftrag.md</code> und <code>architecture.md</code> §7.</p>
@@ -75,6 +87,9 @@ export function renderIndexHtml({ appAdminPub }) {
 </html>
 `;
   }
+  const rootAttr = relayAdminPub
+    ? `relay-admin-pub="${QuCrypto.toBase64(relayAdminPub)}"`
+    : `app-admin-pub="${QuCrypto.toBase64(appAdminPub)}"`;
   return `<!doctype html>
 <html lang="de">
   <head>
@@ -83,7 +98,7 @@ export function renderIndexHtml({ appAdminPub }) {
     <title>Qu</title>
   </head>
   <body>
-    <qu-app-shell app-admin-pub="${QuCrypto.toBase64(appAdminPub)}"></qu-app-shell>
+    <qu-app-shell ${rootAttr}></qu-app-shell>
 
     <script type="module" src="/bundle.js"></script>
   </body>

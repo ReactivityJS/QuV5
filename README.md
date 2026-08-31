@@ -123,3 +123,12 @@ the matching private key) and `QU_MEMBERS_JSON` for that same identity - see
 the guide's "App Shell deployment" subsection for the full walkthrough,
 including how to seed content with `demo/install-app-shell-demo.mjs`
 pointed at a real deployment.
+
+For SEVERAL apps behind one relay instead of one fixed app, set
+`QU_RELAY_ADMIN_PUB` (+ `QU_APP_ADMIN_PUBS`, a JSON array) instead - every
+app is reachable at its own owner id with zero registration, and a
+`QU_RELAY_ADMIN_MEMBERS_JSON`-configured admin can additionally register
+prettier path-prefix aliases through a built-in `#/admin` console - itself
+genuinely installed Qu content in its own confidential Space, not hardcoded
+UI. See architecture.md §7's "The Platform layer" and the guide's own
+"PLATFORM mode" walkthrough right after the single-app one above.

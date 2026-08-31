@@ -5,16 +5,20 @@
  * future `qu-*` component registry, a separate concern). Its
  * `connectedCallback` runs the FRONT half of the boot sequence (Identity ->
  * join -> Transport -> Space, docs §4) and hands the result to `boot.js`'s
- * `startApp()` for the rest.
+ * `startApp()`/`startPlatform()` for the rest.
  *
- * `app-admin-pub` is read from the element's own attribute, never
- * hardcoded - it is the ONE thing that tells an otherwise-generic App
- * Shell which application's content to load (docs §5). A real deployment
- * sets it in the `index.html` a Relay serves, alongside this script -
- * see `public/index.html` in this package for the reference markup, and
- * this package's own README/docs pointer for how a Relay would serve this
- * file the same way `relay-app-server.js` already serves `demo/web/`
- * today (see that file's own "SERVES AN APP" doc comment).
+ * ONE of two attributes decides what gets booted, never both - the ONE
+ * thing that tells an otherwise-generic App Shell what to load (docs §5):
+ *   - `app-admin-pub` - a SINGLE app, `startApp()` (docs §5-18).
+ *   - `relay-admin-pub` - a PLATFORM of however many apps that identity's
+ *     `qu-platform-apps` registry lists, path-prefix-routed,
+ *     `startPlatform()` (docs §19-21) - takes priority if both are set.
+ * A real deployment sets whichever one in the `index.html` a Relay serves,
+ * alongside this script - see `public/index.html` in this package for the
+ * reference markup, and this package's own README/docs pointer for how a
+ * Relay would serve this file the same way `relay-app-server.js` already
+ * serves `demo/web/` today (see that file's own "SERVES AN APP" doc
+ * comment).
  *
  * THIS FILE ONLY LOADS IN A BROWSER (or a DOM-shimmed environment, e.g.
  * jsdom with `HTMLElement`/`customElements` on `globalThis`) - it is
@@ -24,15 +28,19 @@
  * under plain Node.
  */
 import { QuCrypto } from '@qu/core';
-import { Space } from '@qu/space-core';
+import { Space, deriveOwnerNodeId } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport/ws-client-transport';
-import { loadOrCreateIdentity, joinSpace, IDENTITY_STORAGE_KEY } from './identity.js';
-import { startApp } from './boot.js';
+import { EventBus } from '@qu/events';
+import { autoCompactOnJoin } from '@qu/space-plugins';
+import { deriveContentNodeId, adminAppManifestKind, adminTemplateKind, adminPageKind, ADMIN_REALM_ANCHOR } from '@qu/app-core';
+import { loadOrCreateIdentity, joinSpace, fetchMembers, IDENTITY_STORAGE_KEY } from './identity.js';
+import { startApp, startPlatform } from './boot.js';
 
 export class QuAppShell extends HTMLElement {
   async connectedCallback() {
     try {
-      const appAdminPub = QuCrypto.fromBase64(this.getAttribute('app-admin-pub'));
+      const relayAdminPubB64 = this.getAttribute('relay-admin-pub');
+      const appAdminPubB64 = this.getAttribute('app-admin-pub');
       const relayUrl = this.getAttribute('relay-url') ?? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
       const name = this.getAttribute('display-name') ?? `visitor-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -43,7 +51,37 @@ export class QuAppShell extends HTMLElement {
       await transport.connect();
       const space = new Space({ identity, members, transport });
 
-      startApp({ space, appAdminPub, mountEl: this, window });
+      if (relayAdminPubB64) {
+        // The admin realm's own transport/Space - see relay-server.js's own "ADMIN REALM" doc
+        // comment for the server side of this `/admin-ws` convention. Built lazily (boot.js only
+        // calls this the first time a route actually resolves into `realm: 'admin'`) - the SAME
+        // identity as the main Space (no separate admin identity to manage), it just may or may not
+        // turn out to be one of the admin realm's own configured members.
+        const connectAdminSpace = async () => {
+          const adminUrl = relayUrl.replace(/\/?$/, '') + '/admin-ws';
+          const httpBase = relayUrl.startsWith('wss:') ? relayUrl.replace(/^wss:/, 'https:') : relayUrl.replace(/^ws:/, 'http:');
+          const adminMembers = await fetchMembers({ baseUrl: httpBase, path: '/admin-members.json' }).catch(() => []);
+          const adminTransport = new WsClientTransport(adminUrl);
+          await adminTransport.connect();
+          const adminBus = new EventBus();
+          const adminSpace = new Space({ identity, members: adminMembers, transport: adminTransport, bus: adminBus });
+          // The admin realm's content is genuinely 'encrypted' (kinds.js's "THE ADMIN REALM" doc
+          // comment) - unlike the main Space's own public app content, it DOES have the late-joiner
+          // gap `@qu/space-plugins`' autoCompactOnJoin() exists to close (see that file's own doc
+          // comment). Only the BUILT-IN console's own well-known ids are covered here - any OTHER
+          // admin-realm content a deployment installs later would need its own `.watch(nodeId)` call
+          // to stay reachable for a newly added admin, a currently undocumented gap for anything
+          // beyond this one console.
+          const manifestId = await deriveOwnerNodeId(ADMIN_REALM_ANCHOR, adminAppManifestKind.kind);
+          const templateId = await deriveContentNodeId(ADMIN_REALM_ANCHOR, adminTemplateKind.kind, 'main');
+          const pageId = await deriveContentNodeId(ADMIN_REALM_ANCHOR, adminPageKind.kind, '/');
+          autoCompactOnJoin(adminSpace, adminBus, [manifestId, templateId, pageId]);
+          return adminSpace;
+        };
+        startPlatform({ space, relayAdminPub: QuCrypto.fromBase64(relayAdminPubB64), connectAdminSpace, mountEl: this, window });
+      } else {
+        startApp({ space, appAdminPub: QuCrypto.fromBase64(appAdminPubB64), mountEl: this, window });
+      }
     } catch (err) {
       this.textContent = `Qu App Shell: boot failed - ${err.message}`;
       throw err;

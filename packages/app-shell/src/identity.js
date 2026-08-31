@@ -93,3 +93,25 @@ export async function joinSpace({ fetchImpl = fetch, baseUrl = '', name, identit
   const rawMembers = await membersRes.json();
   return rawMembers.map((m) => ({ pub: QuCrypto.fromBase64(m.pub), xPub: QuCrypto.fromBase64(m.xPub) }));
 }
+
+/**
+ * READ-ONLY counterpart to `joinSpace()` for the admin realm's own,
+ * separate relay-forwarder (see `packages/app-shell/relay-server.js`'s own
+ * "ADMIN REALM" doc comment): admin-Space membership is a STATIC, boot-time
+ * configured list, never self-registered (no `/join`-equivalent exists on
+ * that endpoint on purpose - see this file's own top doc comment on why
+ * `joinSpace()`'s open self-registration is right for the MAIN, public
+ * Space but would defeat the admin realm's whole point here) - this only
+ * ever READS whoever is currently configured, which lets `boot.js`
+ * construct a `Space` with the right recipient list regardless of whether
+ * the CURRENT browser identity happens to be one of them (if it isn't,
+ * that `Space` still constructs fine, it just can never decrypt anything -
+ * the relay's own subscribe-gate rejects it even earlier, see relay.js).
+ * @param {{fetchImpl?: typeof fetch, baseUrl?: string, path?: string}} params - `path` defaults to the main Space's own `/members.json`; the admin realm's read-only counterpart is served at a DIFFERENT path (`/admin-members.json` - see `relay-server.js`'s own "ADMIN REALM" doc comment), same origin/port.
+ * @returns {Promise<Array<{pub: Uint8Array, xPub: Uint8Array}>>}
+ */
+export async function fetchMembers({ fetchImpl = fetch, baseUrl = '', path = '/members.json' } = {}) {
+  const membersRes = await fetchImpl(`${baseUrl}${path}`);
+  const rawMembers = await membersRes.json();
+  return rawMembers.map((m) => ({ pub: QuCrypto.fromBase64(m.pub), xPub: QuCrypto.fromBase64(m.xPub) }));
+}

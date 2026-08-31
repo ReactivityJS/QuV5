@@ -4,8 +4,8 @@
  * Runtime interprets what they mean, `@qu/space-core`/the Relay never do
  * (architecture.md §1, "Relay bleibt Application-blind").
  *
- * TWO DIFFERENT ACL SHAPES, chosen by CARDINALITY, not by "how important"
- * a Kind is:
+ * THREE DIFFERENT ACL SHAPES, chosen by CARDINALITY and by who's allowed
+ * to write, not by "how important" a Kind is:
  *
  *   - `qu-app` (the App Manifest) and `qu-route-registry` are SINGLETONS -
  *     exactly one per app owner. `acl.write: 'named'` fits them exactly as
@@ -20,19 +20,29 @@
  *     here.
  *
  *   - `qu-page`/`qu-template`/`qu-style` are MANY-PER-OWNER (one per
- *     route/template-name/style-name). `acl.write: 'members'` is what lets
- *     `Space.createNode()` honor a caller-supplied, content-addressed id
- *     (see `content-id.js`'s own doc comment for the full "why") instead of
- *     collapsing every page onto the same self-certifying Node.
+ *     route/template-name/style-name) AND want REAL, exclusive per-owner
+ *     write-ACL - not "any Space member," which would let ANY joined
+ *     visitor overwrite ANY app's pages the instant several independently-
+ *     owned apps share one relay (architecture.md §7's "The Platform
+ *     layer" - the concrete case that surfaced this gap). `acl.write:
+ *     'content'` (`@qu/space-core`'s kind-schema.js) is exactly this: the
+ *     owner (plus anyone they've explicitly `grantWriter(id, kind,
+ *     granteePub, {path})`ed - the SAME primitive `'named'` already uses,
+ *     just many-per-owner) may write, self-certifying via
+ *     `deriveContentNodeId(ownerPub, kind, path)`, no relay-side
+ *     membership needed to SUBSCRIBE either. This is a GLOBAL Qu
+ *     primitive, not an app-core invention - any many-per-owner content
+ *     Kind (a calendar event, a forum post, a chat room) wants the exact
+ *     same "who may edit THIS ONE thing" answer.
  *
  * `publicMeta()` BELOW IS NOT COSMETIC - it fixes a real bug found while
  * building the first real-relay App Shell demo (`demo/app-shell-relay.mjs`/
- * `demo/install-app-shell-demo.mjs`): `defineKind()` always derives
- * `'members'`-mode Kind's META-STAMP visibility as `'encrypted'` (see
- * kind-schema.js's own doc comment), REGARDLESS of what visibility the
- * Kind's own FIELDS declare. A Node's meta-stamp is its Y.Doc's very FIRST
- * update (`node.js`'s `stampMeta()`), sealed for whoever was in the
- * WRITER's OWN member list AT THAT MOMENT. Because Yjs integrates one
+ * `demo/install-app-shell-demo.mjs`): `defineKind()` always derives a
+ * `'members'`/`'content'`-mode Kind's META-STAMP visibility as
+ * `'encrypted'` (see kind-schema.js's own doc comment), REGARDLESS of what
+ * visibility the Kind's own FIELDS declare. A Node's meta-stamp is its
+ * Y.Doc's very FIRST update (`node.js`'s `stampMeta()`), sealed for
+ * whoever was a valid recipient AT THAT MOMENT. Because Yjs integrates one
  * author's updates as a strictly ordered, gapless sequence (see grant.js's
  * "WRITE-BEFORE-GRANT IS A TRAP" doc comment for the exact same property
  * applied to grants), a reader who cannot decrypt THAT FIRST update - e.g.
@@ -48,12 +58,12 @@
  * The fix stays entirely in THIS package - `@qu/space-core` needs no
  * change: `stampMeta()` reads `kindSchema.metaVisibility` off whatever
  * Kind-Schema object it's handed, so a Kind-Schema whose `acl.write` is
- * still `'members'` (so `Space.createNode()` still honors a
- * content-addressed `{id}`) but whose `metaVisibility` is overridden to
- * `'public'` gets exactly what this Kind actually needs: content-addressed
- * ids for write-ACL purposes, `'public'`-mode envelopes (no recipient list,
- * no decryption, no gap possible) for EVERY write including the founding
- * one. `Space.compactNode()`'s own uniform-visibility check (see space.js)
+ * still `'content'` (so id-derivation/grants keep working exactly as
+ * kind-schema.js defines them) but whose `metaVisibility` is overridden to
+ * `'public'` gets exactly what this Kind actually needs: real per-owner
+ * write-ACL AND `'public'`-mode envelopes (no recipient list, no
+ * decryption, no gap possible) for EVERY write including the founding one.
+ * `Space.compactNode()`'s own uniform-visibility check (see space.js)
  * still holds - meta and every field here are ALL `'public'` - so these
  * Nodes remain compactable too, a nice confirmation this isn't fighting
  * the framework's own invariants, just correcting `defineKind()`'s
@@ -96,7 +106,72 @@ export const routeRegistryKind = defineKind('qu-route-registry', {
   acl: { write: 'named' },
 });
 
-/** One page (docs §7). Node id = `deriveContentNodeId(ownerPub, 'qu-page', route)`. */
+/** Enumerates every `qu-template` name an app owner has published (one per app-admin, self-certifying) - the SAME "registry Node, not a query" pattern `routeRegistryKind` above already uses, for a CMS-style editor (`@qu/app-shell`'s `cms-ui.js`) to list "every template" without a relay-side "list every Node of this Kind" query, which doesn't exist. `dev.js`'s `createTemplate()` appends to this itself - a caller never has to remember a separate "publish" call the way pages/routes historically did. */
+export const templateRegistryKind = defineKind('qu-template-registry', {
+  fields: {
+    /** `Array<{name: string}>` - see resolver.js's `resolveTemplateNames()`. */
+    templates: { shape: 'list', visibility: 'public' },
+  },
+  acl: { write: 'named' },
+});
+
+/** Enumerates every `qu-style` name an app owner has published - see `templateRegistryKind`'s own doc comment, identical shape/reasoning. */
+export const styleRegistryKind = defineKind('qu-style-registry', {
+  fields: {
+    /** `Array<{name: string}>` - see resolver.js's `resolveStyleNames()`. */
+    styles: { shape: 'list', visibility: 'public' },
+  },
+  acl: { write: 'named' },
+});
+
+/**
+ * THE PLATFORM APP REGISTRY (docs/app-shell-arbeitsauftrag.md §19-21) - one
+ * per relay-admin, mapping a URL PATH PREFIX to the `qu-app` that owns it:
+ * `Array<{prefix: string, appAdminPub: string (base64), name: string}>`.
+ * This is what lets ONE App Shell deployment host SEVERAL independent apps
+ * (a messenger at `#/messages`, a forum at `#/forum`, ...), each with its
+ * OWN app-admin identity/content, without the Shell or the Relay ever
+ * hardcoding which apps exist - see `platform.js`'s `PlatformRuntime` for
+ * how a route gets split into `(prefix, subPath)` and delegated to the
+ * matching app's own `AppRuntime`.
+ *
+ * Same singleton-per-owner shape as `appManifestKind`/`routeRegistryKind`
+ * (`acl.write: 'named'`, self-certifying id, no membership gate to even
+ * discover it) - a relay-admin is just another identity, not a relay-side
+ * superuser (docs §19: "Das Relay soll nicht einfach selbst als
+ * allmächtiger Benutzer auftreten"). Registering an app here does NOT
+ * grant its app-admin anything beyond a routing slot - each app's own
+ * content stays governed entirely by ITS OWN `acl.write`/`grantWriter()`,
+ * exactly as if it were the only app on the relay.
+ *
+ * ONLY ADDITIVE for now - `ListField` (see `@qu/space-core`'s `field.js`)
+ * has no removal primitive, so there is no `unregisterApp()`; the Dev
+ * API/admin UI built on this can only ever grow the list. Real, separate
+ * work if "unmount an app" is ever needed (see docs' own "Nicht-Ziele").
+ */
+export const platformAppsKind = defineKind('qu-platform-apps', {
+  fields: {
+    /**
+     * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'admin'}>`
+     * - see `dev.js`'s `registerApp()`/`platform.js`'s `PlatformRuntime`.
+     * `realm: 'admin'` entries (`appAdminPub: null`) route into the
+     * confidential admin realm (see this file's own "THE ADMIN REALM" doc
+     * comment) instead of an ordinary owner-pubkey-addressed app - the
+     * SAME registry, the SAME `'public'`-visibility mapping (an alias
+     * existing, and which realm it points at, is not itself a secret -
+     * only the realm's own CONTENT is), no separate mechanism. This
+     * mapping is itself only a convenience: `PlatformRuntime.resolveForPath()`
+     * falls back to treating an UNREGISTERED prefix as a literal
+     * base64url-encoded owner pubkey when nothing here matches, so no
+     * app-admin needs a relay-admin's cooperation just to be reachable at
+     * all - registering a prefix here only ever adds a prettier alias.
+     */
+    apps: { shape: 'list', visibility: 'public' },
+  },
+  acl: { write: 'named' },
+});
+
+/** One page (docs §7). Node id = `deriveContentNodeId(ownerPub, 'qu-page', route)`. Write-ACL: the owner, plus anyone explicitly `grantWriter(id, 'qu-page', granteePub, {path: route})`ed - see kind-schema.js's own "THE 'content' ACL mode" doc comment. */
 export const pageKind = publicMeta(
   defineKind('qu-page', {
     fields: {
@@ -105,26 +180,109 @@ export const pageKind = publicMeta(
       template: { shape: 'atomic', visibility: 'public' }, // a qu-template PATH
       content: { shape: 'text', visibility: 'public' }, // real Y.Text - collaborative editing "for free" (docs §7)
     },
-    acl: { write: 'members' },
+    acl: { write: 'content' },
   })
 );
 
-/** One template (docs §8). Node id = `deriveContentNodeId(ownerPub, 'qu-template', name)`. */
+/** One template (docs §8). Node id = `deriveContentNodeId(ownerPub, 'qu-template', name)`. Same write-ACL as `pageKind` - see its own doc comment. */
 export const templateKind = publicMeta(
   defineKind('qu-template', {
     fields: {
       html: { shape: 'text', visibility: 'public' },
     },
-    acl: { write: 'members' },
+    acl: { write: 'content' },
   })
 );
 
-/** One style sheet (docs §11). Node id = `deriveContentNodeId(ownerPub, 'qu-style', name)`. */
+/** One style sheet (docs §11). Node id = `deriveContentNodeId(ownerPub, 'qu-style', name)`. Same write-ACL as `pageKind` - see its own doc comment. */
 export const styleKind = publicMeta(
   defineKind('qu-style', {
     fields: {
       css: { shape: 'text', visibility: 'public' },
     },
-    acl: { write: 'members' },
+    acl: { write: 'content' },
   })
 );
+
+/**
+ * THE ADMIN REALM (architecture.md §7 "The Platform layer", revised) — a
+ * genuinely CONFIDENTIAL counterpart to the five Kinds above, for content
+ * only a relay's own admins may ever read: same fields/shapes as
+ * `qu-app`/`qu-page`/`qu-template`/`qu-style`/`qu-platform-apps`, but every
+ * field keeps `defineKind()`'s DEFAULT `visibility: 'encrypted'` (no
+ * `publicMeta()` wrapper - that wrapper exists specifically to make
+ * `qu-page` etc. PLAINTEXT for anyone who joins the relay's ordinary,
+ * open-join Space; admin content wants the opposite). Encryption alone does
+ * nothing without a correspondingly SMALL, curated recipient list - see
+ * `packages/app-shell/relay-server.js`'s own "ADMIN REALM" doc comment: the
+ * admin realm is served from a wholly SEPARATE `Space`/relay-forwarder
+ * instance, whose `members` are the relay's configured admin identities
+ * ONLY (never open-join), so `'encrypted'`-visibility content here is
+ * sealed for exactly that small list - an ordinary visitor of the main,
+ * public Space is never a member of THIS one and so can never decrypt
+ * anything here, not even with the relay's own cooperation (see
+ * envelope.js - the relay itself never holds an X25519 private key).
+ *
+ * `acl.write: 'members'` here (not `'named'`, unlike `qu-app`/
+ * `qu-platform-apps` above) is DELIBERATE: the admin realm has no single
+ * "owner" identity - "wir berechtigen in dem Space alle Admins des
+ * Relays" (the user's own framing) - any configured admin should be able
+ * to manage it, exactly the same flat-membership-is-the-ACL model
+ * `qu-page`/`qu-template`/`qu-style` already use for an ordinary app's
+ * OWN co-authors, just scoped to a members list that IS the admin set
+ * instead of "whoever joined this relay."
+ *
+ * Node ids need no real owner pubkey to stay unique - there is exactly
+ * ONE admin realm per relay, so `ADMIN_REALM_ANCHOR` is a fixed, public,
+ * NON-cryptographic 32-byte constant (nobody's private key corresponds to
+ * it - it is never used to verify a signature, only fed through the exact
+ * same `deriveOwnerNodeId()`/`deriveContentNodeId()` functions every other
+ * Kind here already uses, purely as a stable hash input) - see
+ * `dev.js`'s `createAdminApp()`/`createAdminPage()`/etc. and
+ * `resolver.js`/`runtime.js`'s optional `kinds` override for how
+ * `ContentResolver`/`AppRuntime` reuse their EXACT existing id-derivation
+ * code paths for this, unchanged, just handed this constant instead of a
+ * real app-admin's pubkey.
+ */
+export const ADMIN_REALM_ANCHOR = new Uint8Array(32);
+ADMIN_REALM_ANCHOR.set(new TextEncoder().encode('qu-admin-realm'));
+
+/** Admin-realm counterpart to `appManifestKind` - see this file's own "THE ADMIN REALM" doc comment. */
+export const adminAppManifestKind = defineKind('qu-admin-app', {
+  fields: {
+    name: { shape: 'atomic' },
+    version: { shape: 'atomic' },
+    rootTemplate: { shape: 'atomic' },
+    defaultRoute: { shape: 'atomic' },
+    theme: { shape: 'atomic' },
+    metadata: { shape: 'atomic' },
+  },
+  acl: { write: 'members' },
+});
+
+/** Admin-realm counterpart to `pageKind`. Node id = `deriveContentNodeId(ADMIN_REALM_ANCHOR, 'qu-admin-page', route)`. */
+export const adminPageKind = defineKind('qu-admin-page', {
+  fields: {
+    route: { shape: 'atomic' },
+    title: { shape: 'atomic' },
+    template: { shape: 'atomic' },
+    content: { shape: 'text' },
+  },
+  acl: { write: 'members' },
+});
+
+/** Admin-realm counterpart to `templateKind`. Node id = `deriveContentNodeId(ADMIN_REALM_ANCHOR, 'qu-admin-template', name)`. */
+export const adminTemplateKind = defineKind('qu-admin-template', {
+  fields: {
+    html: { shape: 'text' },
+  },
+  acl: { write: 'members' },
+});
+
+/** Admin-realm counterpart to `styleKind`. Node id = `deriveContentNodeId(ADMIN_REALM_ANCHOR, 'qu-admin-style', name)`. */
+export const adminStyleKind = defineKind('qu-admin-style', {
+  fields: {
+    css: { shape: 'text' },
+  },
+  acl: { write: 'members' },
+});

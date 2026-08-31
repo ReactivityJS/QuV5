@@ -369,6 +369,40 @@ Anfang an gilt.
 
 ## 19-21. Admin Identity, Rollen, ACL-Erweiterung (grundlegend angepasst)
 
+**Status: `relay-admin`-Rolle implementiert, inkl. eines echt vertraulichen
+Admin-Realms**, siehe architecture.md §7 ("The Platform layer"). Statt (wie
+unten ursprünglich skizziert) Owner globaler Content-Kinds zu sein, ist die
+`relay-admin`-Rolle in ZWEI Teilen umgesetzt:
+
+1. Ein additiv-only Registry-Kind (`qu-platform-apps`, `'named'`-ACL auf
+   die Relay-Admin-Pubkey), das Pfad-Präfixe auf App-Admin-Pubkeys
+   abbildet — `@qu/app-core`'s `PlatformRuntime`/`installAppBundle()`/
+   `registerApp()`. Registrierung ist rein optional/kosmetisch: jede App
+   ist per Default bereits unter ihrer eigenen Owner-Id erreichbar, ganz
+   ohne Mitwirkung des relay-admin (`PlatformRuntime.resolveForPath()`s
+   eigener Fallback).
+2. Ein ECHTER, separater, vertraulicher `Space`/Relay-Forwarder (der
+   "Admin-Realm", eigene `members`-Liste via `QU_RELAY_ADMIN_MEMBERS_JSON`,
+   erreicht über `/admin-ws`) für alles, was tatsächlich NUR für Admins
+   lesbar sein soll — inklusive der eingebauten `#/admin`-Konsole selbst,
+   die als GEWÖHNLICHER, installierter Qu-Content dort lebt
+   (`packages/app-shell/admin-console-bundle.js` +
+   `bin/install-admin-console.mjs`), nicht als Framework-Sonderfall.
+
+Bewusst KEIN Superuser über gewöhnlichen App-Content: ein `app-admin`
+bleibt alleiniger Owner seines eigenen `qu-app`/`qu-page`/`qu-template`/
+`qu-style`, der relay-admin entscheidet nur, WELCHE bereits installierten
+Apps unter welchem Präfix eine Alias-Adresse bekommen (bzw. wer den
+Admin-Realm lesen/schreiben darf — dort gilt `acl.write: 'members'`, jeder
+konfigurierte Admin gleichberechtigt, kein Einzel-Owner). Relay-seitige ACL
+für mehrere App-Admins bleibt eine STATISCHE, beim Relay-Start
+konfigurierte Liste (`QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_PUB` in
+`packages/app-shell/relay-server.js`) — aus dem selben Grund, aus dem
+`QU_MEMBERS_JSON` das bereits ist (`resolveKindSchema` wird synchron
+aufgerufen, siehe `relay-resolver.js`s eigener Kommentar). Live-Discovery
+neuer App-Admins ohne Relay-Neustart bleibt offen (siehe architecture.md §7,
+letzter Absatz).
+
 **Anpassung:** Das Original unterstellt eine bereits vorhandene, erweiterbare
 ACL-Hierarchie (Space → Namespace → Kind → Node → Field). Die gibt es nicht.
 Was es gibt: **Kind-weite** ACL (`members`/`owner`/`named`) plus
@@ -451,14 +485,20 @@ Route-Registry-Update. Ein Bundle-Import (`manifest.json` + `templates/` +
 ...) iteriert einfach über dieselben `createNode`-Aufrufe. Kein neuer
 Mechanismus, nur Tooling oberhalb der Kind-Schemas aus Abschnitt 5-11.
 
-## 26-27. Publishing/Drafts, CMS-Fähigkeit (unverändert, als Ausblick)
+## 26-27. Publishing/Drafts, CMS-Fähigkeit (Publishing/Drafts unverändert
+als Ausblick; ein In-Browser-CMS-Editor ist inzwischen gebaut)
 
-Beides bleibt bewusst außerhalb von Phase 1 (siehe Original-Abschnitt 34,
-unverändert übernommen). Wichtig für die Datenmodellierung jetzt: `content`
-als `Y.Text` bzw. später Section-Liste (Abschnitt 7) verhindert nichts davon
-— ein `status`-Feld (`draft|published|archived`) lässt sich jederzeit
-nachträglich zu `pageKind` hinzufügen, ohne bestehende Nodes zu brechen
-(Yjs-Maps sind da tolerant).
+Publish/Draft-States (ein `status`-Feld `draft|published|archived` auf
+`pageKind`) bleiben bewusst außerhalb von Phase 1 (siehe Original-Abschnitt
+34, unverändert übernommen) — `content` als `Y.Text` verhindert das nicht,
+das Feld lässt sich jederzeit nachträglich ergänzen (Yjs-Maps sind da
+tolerant). Die CMS-Fähigkeit selbst — Templates/Styles im Browser anlegen
+und Page-Daten über einen Editor speichern, statt nur über die CLI-Dev-API
+— ist dagegen inzwischen gebaut: `packages/app-shell/cms-bundle.js` +
+`src/cms-actions.js`, siehe `architecture.md` §7's "The built-in CMS
+editor" für die vollständige Beschreibung. Draft/Publish bleibt trotzdem
+offen — der Editor schreibt immer direkt, es gibt noch keinen
+Zwischenzustand.
 
 ## 28-29. Framework/Application Content trennen, Relay bleibt
 Application-blind (bestätigt, keine Änderung)

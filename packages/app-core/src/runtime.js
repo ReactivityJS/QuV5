@@ -15,9 +15,9 @@
 import { ContentResolver } from './resolver.js';
 
 export class AppRuntime {
-  /** @param {import('@qu/space-core').Space} space @param {{appAdminPub: Uint8Array|string}} params */
-  constructor(space, { appAdminPub }) {
-    this._resolver = new ContentResolver(space, { appAdminPub });
+  /** @param {import('@qu/space-core').Space} space @param {{appAdminPub: Uint8Array|string, kinds?: object}} params - `kinds` forwarded to `ContentResolver` unchanged, see its own doc comment. */
+  constructor(space, { appAdminPub, kinds }) {
+    this._resolver = new ContentResolver(space, { appAdminPub, kinds });
   }
 
   /** @returns {Promise<object|null>} See `ContentResolver.resolveManifest()`. */
@@ -28,6 +28,16 @@ export class AppRuntime {
   /** @returns {Promise<Array<{route, title}>>} See `ContentResolver.resolveRoutes()`. */
   resolveRoutes(options) {
     return this._resolver.resolveRoutes(options);
+  }
+
+  /** @returns {Promise<Array<{name}>>} See `ContentResolver.resolveTemplateNames()`. */
+  resolveTemplateNames(options) {
+    return this._resolver.resolveTemplateNames(options);
+  }
+
+  /** @returns {Promise<Array<{name}>>} See `ContentResolver.resolveStyleNames()`. */
+  resolveStyleNames(options) {
+    return this._resolver.resolveStyleNames(options);
   }
 
   /**
