@@ -1,9 +1,13 @@
-# Demo: text exchange between Qu clients
+# Demos
 
-A small, runnable proof that two independent processes can exchange
-collaboratively-synced text through a Qu V5 relay, with every participant
-identified by their **Qu public-key fingerprint** (`QuCrypto.fingerprint()`,
-`packages/core/src/crypto.js`) instead of a self-reported name or a raw key.
+Runnable proofs at two layers: the CORE framework (`@qu/core`/
+`@qu/space-core` - two independent processes exchanging collaboratively-
+synced text through a Qu V5 relay, every participant identified by their
+**Qu public-key fingerprint**, `QuCrypto.fingerprint()`, instead of a
+self-reported name or a raw key), and the App layer (`@qu/app-shell` - a
+whole app, or platform of apps, defined entirely by Qu content, with a
+built-in Admin-UI and CMS editor - see "The platform, bootstrapped in one
+command" further down, now the featured "real relay" demo).
 
 ## Fastest path: zero setup
 
@@ -98,12 +102,39 @@ env-var-configured like `packages/space-transport`'s own `relay-server.js`)
 deployment via its own `--relay wss://your-host` flag - it's the reference
 installer, not demo-only code.
 
-## Real thing: two clients, one relay, three terminals
+## The platform, bootstrapped in one command: Admin-UI + a CMS-managed shell-app
+
+```sh
+docker compose -f docker-compose.space-relay.yml up -d   # the DEFAULT relay - @qu/app-shell, platform mode
+npm run bootstrap:platform
+```
+
+(Or, without Docker: `npm run relay` in one terminal, `npm run bootstrap:platform`
+in another - both default to the same `ws://localhost:8081`.)
+
+The fastest way to see the whole App layer story working together: a real
+relay, a real Admin-UI (installed Qu content, not framework-built DOM), and
+a real shell-app whose templates/styles/pages are stored AND edited through
+its own CMS editor. `bootstrap:platform` (`packages/app-shell/bin/
+bootstrap-platform.mjs`) generates two local identities, configures the
+relay for PLATFORM mode via `.env`, installs the built-in admin console,
+creates a demo shell-app with its CMS editor installed, and prints the
+exact URLs plus copy-pasteable browser devtools snippets so you can
+actually act as either identity. See that script's own doc comment, or
+the root `README.md`'s "Deploying the App Shell" section, for the full
+walkthrough - including what to do if it tells you to restart the relay
+and re-run it (a one-time thing, on a totally fresh setup only).
+
+## Legacy: the old hardcoded chat demo (two clients, one relay, three terminals)
+
+This is the ORIGINAL demo this repository started from - `@qu/space-transport`'s
+own relay serving a fixed, hardcoded chat app, unrelated to the App layer
+above. Still fully supported, just no longer the featured "real relay" demo.
 
 **Terminal 1 - the relay:**
 
 ```sh
-npm run demo:relay
+npm run demo:legacy-chat-relay
 ```
 
 First run auto-creates `alice`/`bob` identities under `demo/.identities/`
@@ -115,13 +146,13 @@ to `demo/.data/` on disk.
 **Terminal 2:**
 
 ```sh
-npm run demo:alice
+npm run demo:legacy-chat-alice
 ```
 
 **Terminal 3:**
 
 ```sh
-npm run demo:bob
+npm run demo:legacy-chat-bob
 ```
 
 Each prints its own fingerprint on connect. Type a line in either terminal
@@ -132,15 +163,15 @@ name and fingerprint, e.g.:
 14:02:11  alice [a1b2-c3d4-e5f6-0102]:  Hallo Bob!
 ```
 
-Stop with Ctrl+C. Restart `demo:relay` any time you add a third CLI identity
+Stop with Ctrl+C. Restart `demo:legacy-chat-relay` any time you add a third CLI identity
 (`node demo/chat.mjs carol`) so it picks up the new member.
 
 ## In the browser
 
-`demo:relay` also serves a browser client on the SAME port:
+`demo:legacy-chat-relay` also serves a browser client on the SAME port:
 
 ```sh
-npm run demo:relay
+npm run demo:legacy-chat-relay
 # then open http://localhost:8081/ in two browser tabs/profiles
 ```
 
@@ -149,7 +180,7 @@ tab generates its OWN keypair on the spot (Web Crypto, kept in
 `localStorage` - this browser/profile only) and registers its public halves
 with the running relay via `POST /join` - no restart, no pre-existing
 identity file needed, and no private key ever leaves the browser. A browser
-tab and a CLI `demo:alice`/`demo:bob` can chat in the same room live, since
+tab and a CLI `demo:legacy-chat-alice`/`demo:legacy-chat-bob` can chat in the same room live, since
 both are just members of the same relay-managed Space.
 
 The page also has a "Debug-Log" checkbox (`@qu/events`' `createDebugLogger()`
@@ -176,8 +207,8 @@ HTTPS.
 Every message attaches a granular `notify` hint (`@qu/events`' `EventBus`
 topics, see `docs/v5-space-core-guide.md` §11): a plain line is
 `notify.topic: 'message'`, a line starting with `@bob` (a known member) is
-`notify.topic: 'mention'` addressed just to bob. Stop `demo:bob` (Ctrl+C)
-but leave `demo:relay` and `demo:alice` running, then type a message (or
+`notify.topic: 'mention'` addressed just to bob. Stop `demo:legacy-chat-bob` (Ctrl+C)
+but leave `demo:legacy-chat-relay` and `demo:legacy-chat-alice` running, then type a message (or
 `@bob ...`) in alice's terminal - the RELAY's own terminal logs a line
 like:
 
@@ -187,7 +218,7 @@ like:
 
 That line is the `push-handler.js` plugin reacting to the relay's
 presence-gated `relay.notify.**` events (`online: false`, since bob's
-`Space` never sent its connect-time "hello") - restart `demo:bob` and send
+`Space` never sent its connect-time "hello") - restart `demo:legacy-chat-bob` and send
 another message: the same code path now sees `online: true` and stays
 silent, since bob's live connection already got it.
 
@@ -209,7 +240,7 @@ silent, since bob's live connection already got it.
 - `demo/auto-demo.mjs` - the same mechanism, in-process, no relay/terminal
   needed - see `npm run demo` above.
 - `demo/web/` - the browser client (`index.html` + `main.js`), esbuild-
-  bundled into `dist/bundle.js` automatically on `demo:relay` startup (see
+  bundled into `dist/bundle.js` automatically on `demo:legacy-chat-relay` startup (see
   `demo/web/build.mjs`; `npm run build:web` to bundle standalone). Imports
   `@qu/space-transport`'s dedicated `./ws-client-transport` subpath, not
   its main entry, specifically to stay browser-safe (see that file's own
@@ -240,7 +271,7 @@ and mirrors ciphertext it cannot decrypt.
   it, see `docs/v5-space-core-guide.md` §10), not something unique to this
   local demo.
 - A member added after another client's `Space` was already constructed
-  (via `demo:relay` restart for the CLI, or `/join` for the browser) is
+  (via `demo:legacy-chat-relay` restart for the CLI, or `/join` for the browser) is
   invisible to that client until it learns about them - the CLI demo
   requires a restart; the browser demo learns REACTIVELY, not by polling:
   `relay.mjs`'s `/join` calls `relay.addMember()`, which broadcasts
@@ -277,7 +308,7 @@ and mirrors ciphertext it cannot decrypt.
   `packages/space-plugins/test/auto-compact.test.js` for the regression
   proof). What this does NOT do - and structurally can't - is retroactively
   hand a late joiner history sealed before they existed; if that specific,
-  narrower gap ever matters, delete `demo/.data/` and restart `demo:relay`
+  narrower gap ever matters, delete `demo/.data/` and restart `demo:legacy-chat-relay`
   to start fresh instead.
 - **The typed display name is NOT an account** - a browser tab's identity
   is a keypair generated once per browser/profile and kept in

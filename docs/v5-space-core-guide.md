@@ -480,6 +480,13 @@ real write-ACL before anything happens with it.
 
 ## 10. Docker deployment
 
+This section covers `@qu/space-transport`'s own hardcoded chat-demo relay -
+via Compose, now the opt-in `legacy-chat` profile (add `--profile
+legacy-chat` to every `docker compose` command below). **For the DEFAULT
+relay** - `@qu/app-shell` in PLATFORM mode, an Admin-UI, and CMS-managed
+shell-apps - see this section's own "App Shell deployment" subsection
+right after it; `docker compose up` alone now starts THAT one.
+
 ```sh
 # From the repo root:
 docker build -f packages/space-transport/Dockerfile -t qu-space-relay .
@@ -489,7 +496,7 @@ docker build -f packages/space-transport/Dockerfile -t qu-space-relay .
 docker build -f packages/space-transport/Dockerfile -t qu-space-relay \
   https://github.com/ReactivityJS/QuV5.git#main
 
-docker run -d -p 8081:8081 \
+docker run -d -p 8083:8081 \
   -v qu-space-relay-data:/data \
   qu-space-relay
 ```
@@ -507,19 +514,19 @@ build context; `-f` is what selects this particular Dockerfile within it.
 That's a complete, runnable relay — no `QU_MEMBERS_JSON` required (see §4
 on why: it's optional, only gates `'members'`-mode Kinds, and the relay's
 own identity for federation is auto-generated/persisted under `/data`, not
-something you provide). Open `http://localhost:8081/` and you'll see a
+something you provide). Open `http://localhost:8083/` and you'll see a
 browser app: `relay-server.js` also serves one on this same port (today,
-the same `demo/web/` chat client `npm run demo:relay` serves - bundled at
-Docker BUILD TIME, not on every boot - see the Dockerfile). `POST /join`
-lets anyone reaching the port join as a new `'members'`-mode member with
-no authentication beyond well-formed keys - a deliberate current default
-("this image should be immediately usable"), turned off with
-`QU_ALLOW_JOIN=false` once you want membership fixed to `QU_MEMBERS_JSON`
-only. Add `QU_MEMBERS_JSON` when you also have your own `'members'`-mode
-Kinds beyond the demo:
+the same `demo/web/` chat client `npm run demo:legacy-chat-relay` serves -
+bundled at Docker BUILD TIME, not on every boot - see the Dockerfile).
+`POST /join` lets anyone reaching the port join as a new `'members'`-mode
+member with no authentication beyond well-formed keys - a deliberate
+current default ("this image should be immediately usable"), turned off
+with `QU_ALLOW_JOIN=false` once you want membership fixed to
+`QU_MEMBERS_JSON` only. Add `QU_MEMBERS_JSON` when you also have your own
+`'members'`-mode Kinds beyond the demo:
 
 ```sh
-docker run -d -p 8081:8081 \
+docker run -d -p 8083:8081 \
   -e QU_MEMBERS_JSON='[{"pub":"...","xPub":"..."}, {"pub":"...","xPub":"..."}]' \
   -v qu-space-relay-data:/data \
   qu-space-relay
@@ -536,12 +543,12 @@ docker run --rm -v qu-space-relay-data:/data qu-space-relay \
 Or via the provided compose file:
 
 ```sh
-docker compose -f docker-compose.space-relay.yml up -d
+docker compose -f docker-compose.space-relay.yml --profile legacy-chat up -d
 # with members, federation, and/or locking down joining:
-export QU_MEMBERS_JSON='[{"pub":"...","xPub":"..."}, {"pub":"...","xPub":"..."}]'
+export QU_LEGACY_CHAT_MEMBERS_JSON='[{"pub":"...","xPub":"..."}, {"pub":"...","xPub":"..."}]'
 export QU_FEDERATE_UPSTREAM_URL='ws://another-relay-host:8081'
-export QU_ALLOW_JOIN=false
-docker compose -f docker-compose.space-relay.yml up -d
+export QU_LEGACY_CHAT_ALLOW_JOIN=false
+docker compose -f docker-compose.space-relay.yml --profile legacy-chat up -d
 ```
 
 `QU_RELAY_DATA_DIR` (default `/data`, backed by the `qu-space-relay-data`
@@ -551,36 +558,53 @@ where its own identity file persists across restarts/redeploys. Set it
 to an empty string to run a pure live-only relay instead (its identity
 then becomes ephemeral too — a new one every restart, logged loudly).
 
-### App Shell deployment (a separate relay/image)
+### App Shell deployment (the DEFAULT relay/image)
 
-The relay above always serves the hardcoded chat demo — see
-`relay-server.js`'s own doc comment for why it deliberately stays that way
-("Relay bleibt Application-blind," architecture.md §1/§7). To serve
-`@qu/app-shell` — a generic app defined entirely by Qu content, see
-`architecture.md` §7 and `docs/app-shell-arbeitsauftrag.md` — build and run
-`packages/app-shell/Dockerfile` instead, on a **different port**: it's a
-separate relay/Space, not a replacement.
+`@qu/app-shell` — a generic app (or, in PLATFORM mode, several) defined
+entirely by Qu content, see `architecture.md` §7 and
+`docs/app-shell-arbeitsauftrag.md` — is now the DEFAULT service
+`docker compose -f docker-compose.space-relay.yml up -d` starts, built from
+`packages/app-shell/Dockerfile` — a SEPARATE image/Space from the hardcoded
+chat demo further up in this section (which moved to an opt-in
+`legacy-chat` profile, `--profile legacy-chat`, so add that flag to every
+`docker compose` command above if you want IT instead/as well — same
+"Relay bleibt Application-blind" reasoning, `relay-server.js`'s own doc
+comment, keeps the framework layer from ever depending on an
+application-layer package).
+
+**Fastest path to something actually running** — the built-in admin
+console AND one CMS-managed demo shell-app, both real content:
 
 ```sh
-docker build -f packages/app-shell/Dockerfile -t qu-app-shell-relay .
-docker run -d -p 8082:8081 -v qu-app-shell-relay-data:/data qu-app-shell-relay
+docker compose -f docker-compose.space-relay.yml up -d   # starts the (now default) app-shell relay
+npm run bootstrap:platform                                # ONE command, run from your own machine
 ```
 
-Or via the same compose file, opt-in (so plain `docker compose up` still
-starts only the chat relay above, unchanged):
+`bootstrap:platform` (`packages/app-shell/bin/bootstrap-platform.mjs`)
+generates a `relay-admin` and a `demo-app-admin` identity locally, writes
+their PUBLIC keys into `.env` (merging into whatever you've already
+configured there, never overwriting your own entries), and — once the
+relay has (re)started with that config, which the first run tells you to
+do — installs the admin console, creates a demo shell-app with its own CMS
+editor installed, and registers both `#/admin` and `#/demo`. It prints the
+exact URLs plus ready-to-paste browser devtools snippets so you can
+actually act as either identity locally. Safe to re-run any time (every
+step checks first, never re-creates content that already exists — see its
+own doc comment on why that matters for `Y.Text` fields specifically).
+
+The rest of this subsection is the equivalent BY-HAND walkthrough — useful
+for a real deployment where you want full control over each identity/step
+rather than the one-shot script above.
+
+It starts fine with no configuration — `http://localhost:8081/` (or
+whatever port you mapped) serves a plain setup page instead of an app/
+platform until you configure `QU_APP_ADMIN_PUB` (a base64 Ed25519 PUBLIC
+key only — see `relay-server.js`'s own "ADMIN IDENTITY" doc comment; this
+relay never holds, needs, or is sent the app-admin's private key) for a
+SINGLE fixed app:
 
 ```sh
-docker compose -f docker-compose.space-relay.yml --profile app-shell up -d
-```
-
-It starts fine with no configuration — `http://localhost:8082/` (or
-whatever port you mapped) serves a plain setup page instead of an app until
-you configure `QU_APP_ADMIN_PUB` (a base64 Ed25519 PUBLIC key only — see
-`relay-server.js`'s own "ADMIN IDENTITY" doc comment; this relay never
-holds, needs, or is sent the app-admin's private key):
-
-```sh
-docker run -d -p 8082:8081 \
+docker run -d -p 8081:8081 \
   -e QU_APP_ADMIN_PUB='<base64 pubkey>' \
   -e QU_MEMBERS_JSON='[{"pub":"<same as QU_APP_ADMIN_PUB>","xPub":"<its X25519 pubkey>"}]' \
   -v qu-app-shell-relay-data:/data \
@@ -606,18 +630,21 @@ existing templates/styles/pages and lets you create or edit them straight
 from the browser — see architecture.md §7's "The built-in CMS editor" for
 how it's wired.
 
-**PLATFORM mode (several apps, one relay, a confidential admin realm)** —
-instead of one fixed `QU_APP_ADMIN_PUB`, set `QU_RELAY_ADMIN_PUB` (takes
-priority when both are set) — see architecture.md §7's "The Platform
-layer" for the full model. An app-admin the relay should accept ORDINARY
-content writes from still needs a STATIC, boot-time `QU_APP_ADMIN_PUBS`
-entry (a JSON array); an identity trusted to manage the built-in admin
-console needs a `QU_RELAY_ADMIN_MEMBERS_JSON` entry instead (a SEPARATE,
-genuinely confidential Space — its own `{pub, xPub}` list, never just a
-write-ACL grant):
+**PLATFORM mode (several apps, one relay, a confidential admin realm,
+NOW THE DEFAULT)** — `bootstrap:platform` above already does everything
+below in one command; read on if you want to do it by hand or understand
+what it's actually doing. Instead of one fixed `QU_APP_ADMIN_PUB`, set
+`QU_RELAY_ADMIN_PUB` (takes priority when both are set) — see
+architecture.md §7's "The Platform layer" for the full model. An app-admin
+the relay should accept ORDINARY content writes from still needs a
+STATIC, boot-time `QU_APP_ADMIN_PUBS` entry (a JSON array); an identity
+trusted to manage the built-in admin console needs a
+`QU_RELAY_ADMIN_MEMBERS_JSON` entry instead (a SEPARATE, genuinely
+confidential Space — its own `{pub, xPub}` list, never just a write-ACL
+grant):
 
 ```sh
-docker run -d -p 8082:8081 \
+docker run -d -p 8081:8081 \
   -e QU_RELAY_ADMIN_PUB='<base64 relay-admin pubkey>' \
   -e QU_APP_ADMIN_PUBS='["<base64 app-admin pubkey 1>","<base64 app-admin pubkey 2>"]' \
   -e QU_RELAY_ADMIN_MEMBERS_JSON='[{"pub":"<base64>","xPub":"<base64>"}]' \
@@ -800,13 +827,19 @@ directory, or `npm test` from the repo root to run everything.
 
 ## 14. Try it yourself: the demos
 
-`demo/` has two runnable proofs (see `demo/README.md` for full detail):
+The FEATURED, real-relay-and-browser demo is now the App Shell platform
+one - see §10's own "App Shell deployment" subsection right above:
+`docker compose -f docker-compose.space-relay.yml up -d` (the default
+service) + `npm run bootstrap:platform` gets you a real Admin-UI and a
+CMS-managed shell-app in one command. `demo/` itself still has two
+zero/small-setup proofs of the CORE framework, unrelated to the App layer
+(see `demo/README.md` for full detail):
 
 ```sh
-npm run demo            # zero-setup: one process, simulates chat AND owner-node identity discovery
-npm run demo:relay      # real relay, terminal 1 - also serves a browser client at http://localhost:8081/
-npm run demo:alice      # real client "alice", terminal 2
-npm run demo:bob        # real client "bob", terminal 3 - type in either, watch it appear in the other
+npm run demo                    # zero-setup: one process, simulates chat AND owner-node identity discovery
+npm run demo:legacy-chat-relay  # real relay, terminal 1 - also serves a browser client at http://localhost:8081/
+npm run demo:legacy-chat-alice  # real client "alice", terminal 2
+npm run demo:legacy-chat-bob    # real client "bob", terminal 3 - type in either, watch it appear in the other
 ```
 
 `npm run demo` (`demo/auto-demo.mjs`) runs two scenarios in one process: a
@@ -816,21 +849,24 @@ peer — never a Space member, never previously connected — discovers and
 reads knowing only the owner's pubkey (part 2, §7/§3's `'owner'` mode in
 action). Exits non-zero if anything doesn't converge as expected.
 
-`demo:relay` serves a small browser page on that SAME port (`demo/web/`,
-esbuild-bundled at startup) - open it in two tabs, pick a name, and chat
-live with each other or with a CLI `demo:alice`/`demo:bob` in the same
-room. Point a reverse proxy at this one port for HTTPS/TLS-offloading - it
-never needs a second port, the WebSocket upgrade rides the same HTTP
-server as the page/API.
+`demo:legacy-chat-relay` serves a small browser page on that SAME port
+(`demo/web/`, esbuild-bundled at startup) - open it in two tabs, pick a
+name, and chat live with each other or with a CLI
+`demo:legacy-chat-alice`/`demo:legacy-chat-bob` in the same room. Point a
+reverse proxy at this one port for HTTPS/TLS-offloading - it never needs a
+second port, the WebSocket upgrade rides the same HTTP server as the
+page/API.
 
-The SAME app is also served by `relay-server.js`/the Docker image (§10) -
-`demo:relay` bundles at startup for a fast local edit-reload loop, the
-Docker build bundles once at build time. This stays a fixed, hardcoded demo
-app on purpose - see `relay-server.js`'s own "SERVES AN APP" doc comment
-for why (`@qu/space-transport` never depends on an application-layer
-package). For a generic app defined entirely by Qu content instead, see the
-separate App Shell deployment (§10's own "App Shell deployment" subsection,
-and architecture.md §7).
+The SAME app is also served by `@qu/space-transport`'s own
+`relay-server.js`/its Docker image, now behind the `legacy-chat` Compose
+profile (§10) - `demo:legacy-chat-relay` bundles at startup for a fast
+local edit-reload loop, the Docker build bundles once at build time. This
+stays a fixed, hardcoded demo app on purpose - see that file's own "SERVES
+AN APP" doc comment for why (`@qu/space-transport` never depends on an
+application-layer package). For a generic app (or, in PLATFORM mode,
+several, each with its own CMS editor) defined entirely by Qu content
+instead, see §10's own "App Shell deployment" subsection - now the
+DEFAULT relay - and architecture.md §7.
 
 ## 15. Reconnect and resync
 
