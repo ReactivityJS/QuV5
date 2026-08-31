@@ -577,8 +577,33 @@ console AND one CMS-managed demo shell-app, both real content:
 
 ```sh
 docker compose -f docker-compose.space-relay.yml up -d   # starts the (now default) app-shell relay
-npm run bootstrap:platform                                # ONE command, run from your own machine
+npm run bootstrap:platform                                # run on your HOST - see below if you'd rather not need Node.js there
 ```
+
+**No Node.js on your host, Docker only** — run the SAME script via
+`docker exec` (the container already has Node + every dependency) TWICE,
+with one step in between. This is not optional ordering: the first run
+writes a `.env` with the newly generated public keys, but INSIDE the
+container's own filesystem — `docker compose` only ever reads `.env` from
+your host's project directory, at `up`/recreate time, so that write alone
+changes nothing no matter how many times you repeat it in place, and the
+container has no way to restart itself from within either. The script
+detects this and tells you so, with this exact recipe, if a run can't
+finish yet:
+
+```sh
+docker exec -ti $(docker ps -qf name=<your-compose-project>) npm run bootstrap:platform
+# -> generates identities, writes .env INSIDE the container, can't finish yet
+docker compose -f docker-compose.space-relay.yml cp qu-app-shell-relay:/app/.env ./.env
+docker compose -f docker-compose.space-relay.yml up -d   # recreates the container WITH that .env
+docker exec -ti $(docker ps -qf name=<your-compose-project>) npm run bootstrap:platform
+# -> same identities (already generated and persisted), now finishes
+```
+
+No private key is lost between the two runs - the identities are already
+persisted (under `packages/app-shell/.platform-identities/` inside the
+container) after the first one; the second just reuses and finishes with
+them.
 
 `bootstrap:platform` (`packages/app-shell/bin/bootstrap-platform.mjs`)
 generates a `relay-admin` and a `demo-app-admin` identity locally, writes

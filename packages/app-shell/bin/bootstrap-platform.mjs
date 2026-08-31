@@ -46,7 +46,7 @@
  *     [--relay ws://localhost:8081] [--dir packages/app-shell/.platform-identities] \
  *     [--dotenv .env] [--prefix demo]
  */
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
@@ -165,6 +165,43 @@ async function mergeEnvFile(envFile, { relayAdminPubB64, appAdminPubB64, relayAd
   await writeFile(envFile, next, 'utf8');
 }
 
+/**
+ * Detects `docker exec`-into-a-running-container execution - `/.dockerenv`
+ * is created by the Docker runtime itself inside every container it starts
+ * (an established, widely-relied-on convention, not something this repo
+ * invents). MATTERS A LOT here specifically: `mergeEnvFile()` above writes
+ * `--dotenv` (default `.env` at the repo root) on WHATEVER filesystem this
+ * process is running on - if that's the CONTAINER's own (ephemeral, not
+ * volume-mounted - only `/data` is), the result is a `.env` file `docker
+ * compose` on the HOST never sees, since Compose's `${VAR}` substitution
+ * reads the HOST's own `.env` at `docker compose up` time, not anything
+ * inside an already-running container. Worse, "restart the relay" (this
+ * script's own generic advice when writes never get acked) is not
+ * ACTIONABLE from inside a `docker exec` shell at all - a process has no
+ * way to restart its own container from within. See `printDockerRecoveryHint()`
+ * for what to say instead.
+ */
+async function isInContainer() {
+  try {
+    await access('/.dockerenv');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function printDockerRecoveryHint(envFile) {
+  console.log('  You appear to be running INSIDE the container (docker exec) - a .env written here');
+  console.log(`  (${envFile}) lives on the CONTAINER's own filesystem, not your host's, so \`docker`);
+  console.log('  compose\' never sees it, and this container cannot restart itself from within. Run');
+  console.log('  these from your HOST shell instead (NOT inside this container):');
+  console.log('');
+  console.log('    docker compose -f docker-compose.space-relay.yml cp qu-app-shell-relay:/app/.env ./.env');
+  console.log('    docker compose -f docker-compose.space-relay.yml up -d   # recreates the container with it');
+  console.log('');
+  console.log('  Then run this exact `docker exec ... npm run bootstrap:platform` command again to finish.');
+}
+
 /** Plain `POST /join`, the SAME self-registration mechanism a real browser's `shell.js`/`identity.js` uses - see this file's own top doc comment on why this is used instead of also managing `QU_MEMBERS_JSON`. */
 async function joinMainSpace(httpBase, identity, name) {
   const res = await fetch(`${httpBase}/join`, {
@@ -224,6 +261,14 @@ async function main() {
     relayAdminMember: { pub: QuCrypto.toBase64(relayAdmin.signingPub), xPub: QuCrypto.toBase64(relayAdmin.xPublicKey) },
   });
   console.log(`  wrote platform config -> ${envFile}\n`);
+
+  const inContainer = await isInContainer();
+  if (inContainer) {
+    console.log('⚠ Running inside a container (docker exec) - this .env write alone will NOT reach');
+    console.log('  `docker compose` on your host. Read on: this run may still finish (if the relay was');
+    console.log('  already configured by a PREVIOUS bootstrap run), but if it ends with the same warning');
+    console.log('  as below, that\'s why.\n');
+  }
 
   console.log(`Checking ${httpBase}/healthz ...`);
   const healthy = await waitForHealthy(httpBase, { attempts: 5, interval: 800 });
@@ -331,8 +376,12 @@ async function main() {
 
   if (!adminOk || !mainOk || !demoOk) {
     console.log('\n⚠ Some writes were never write-acked by the relay - this usually means it is still running with an');
-    console.log('  OLDER config (the .env change above needs a restart to take effect). (Re)start the relay, then');
-    console.log('  re-run this exact command - every step here is safe to repeat.');
+    console.log('  OLDER config (the .env change above needs a restart to take effect).');
+    if (inContainer) {
+      printDockerRecoveryHint(envFile);
+    } else {
+      console.log('  (Re)start the relay, then re-run this exact command - every step here is safe to repeat.');
+    }
     process.exitCode = 1;
     return;
   }

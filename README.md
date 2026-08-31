@@ -118,20 +118,50 @@ now the DEFAULT service - no `--profile` needed.
 Starts fine with zero configuration (a setup page instead of a platform).
 The fastest way to an actually-configured platform - the built-in admin
 console AND one CMS-managed demo shell-app, both real content, not
-placeholders - is ONE command from your own machine (never inside the
-container: this relay must never see anyone's private key):
+placeholders - is one script (`packages/app-shell/bin/bootstrap-
+platform.mjs`, `npm run bootstrap:platform`), run either way below:
+
+**With Node.js on your host:**
 
 ```sh
 npm run bootstrap:platform
 ```
 
-Generates a `relay-admin` and a `demo-app-admin` identity locally, writes
-their public keys into `.env` (safe to re-run, never overwrites anything
-you've configured by hand), and - once the relay above has (re)started
-with that config - installs the admin console, creates a demo shell-app,
-installs its CMS editor, and registers both under `#/admin` and `#/demo`.
-Prints the exact URLs to open plus ready-to-paste browser devtools
-snippets so you can actually act as either identity. See
+One command, done - see below for what it actually does.
+
+**Docker only, no local Node.js:** the SAME script also runs fine via
+`docker exec` (the container already has Node + every dependency), but
+needs to be run TWICE with one step in between, because of what it
+writes: a `.env` with the generated public keys, which `docker compose`
+only ever reads from your HOST's OWN project directory to configure the
+container at `up`/recreate time - a `.env` written INSIDE an
+already-running container lives on THAT container's own filesystem
+instead, invisible to `docker compose`, and the container has no way to
+restart itself from within either way:
+
+```sh
+docker exec -ti $(docker ps -qf name=<your-compose-project>) npm run bootstrap:platform
+# -> generates identities, writes .env INSIDE the container, then tells you it can't finish yet
+docker compose -f docker-compose.space-relay.yml cp qu-app-shell-relay:/app/.env ./.env
+docker compose -f docker-compose.space-relay.yml up -d   # recreates the container WITH that .env
+docker exec -ti $(docker ps -qf name=<your-compose-project>) npm run bootstrap:platform
+# -> same identities (already generated), now finishes: installs content, prints the URLs
+```
+
+No private key is ever lost between these two runs - the identities were
+already generated and persisted (inside the container, under
+`packages/app-shell/.platform-identities/`) by the first one; the second
+run just reuses them. The script itself detects it's running inside a
+container and prints this exact recipe if a run can't finish yet, so this
+isn't something you need to memorize.
+
+Either way, it generates a `relay-admin` and a `demo-app-admin` identity,
+writes their public keys into `.env` (safe to re-run, never overwrites
+anything you've configured there by hand), and - once the relay has
+(re)started with that config - installs the admin console, creates a demo
+shell-app, installs its CMS editor, and registers both under `#/admin`
+and `#/demo`. Prints the exact URLs to open plus ready-to-paste browser
+devtools snippets so you can actually act as either identity. See
 `packages/app-shell/bin/bootstrap-platform.mjs`'s own doc comment for the
 full "why," and the guide's own "App Shell deployment" subsection for the
 env-var reference if you'd rather configure it by hand.
