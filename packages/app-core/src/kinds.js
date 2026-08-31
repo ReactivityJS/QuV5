@@ -96,6 +96,39 @@ export const routeRegistryKind = defineKind('qu-route-registry', {
   acl: { write: 'named' },
 });
 
+/**
+ * THE PLATFORM APP REGISTRY (docs/app-shell-arbeitsauftrag.md §19-21) - one
+ * per relay-admin, mapping a URL PATH PREFIX to the `qu-app` that owns it:
+ * `Array<{prefix: string, appAdminPub: string (base64), name: string}>`.
+ * This is what lets ONE App Shell deployment host SEVERAL independent apps
+ * (a messenger at `#/messages`, a forum at `#/forum`, ...), each with its
+ * OWN app-admin identity/content, without the Shell or the Relay ever
+ * hardcoding which apps exist - see `platform.js`'s `PlatformRuntime` for
+ * how a route gets split into `(prefix, subPath)` and delegated to the
+ * matching app's own `AppRuntime`.
+ *
+ * Same singleton-per-owner shape as `appManifestKind`/`routeRegistryKind`
+ * (`acl.write: 'named'`, self-certifying id, no membership gate to even
+ * discover it) - a relay-admin is just another identity, not a relay-side
+ * superuser (docs §19: "Das Relay soll nicht einfach selbst als
+ * allmächtiger Benutzer auftreten"). Registering an app here does NOT
+ * grant its app-admin anything beyond a routing slot - each app's own
+ * content stays governed entirely by ITS OWN `acl.write`/`grantWriter()`,
+ * exactly as if it were the only app on the relay.
+ *
+ * ONLY ADDITIVE for now - `ListField` (see `@qu/space-core`'s `field.js`)
+ * has no removal primitive, so there is no `unregisterApp()`; the Dev
+ * API/admin UI built on this can only ever grow the list. Real, separate
+ * work if "unmount an app" is ever needed (see docs' own "Nicht-Ziele").
+ */
+export const platformAppsKind = defineKind('qu-platform-apps', {
+  fields: {
+    /** `Array<{prefix: string, appAdminPub: string, name: string}>` - see `dev.js`'s `registerApp()`/`platform.js`'s `PlatformRuntime`. */
+    apps: { shape: 'list', visibility: 'public' },
+  },
+  acl: { write: 'named' },
+});
+
 /** One page (docs §7). Node id = `deriveContentNodeId(ownerPub, 'qu-page', route)`. */
 export const pageKind = publicMeta(
   defineKind('qu-page', {

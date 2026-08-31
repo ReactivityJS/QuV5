@@ -12,8 +12,11 @@
  * them and hand it here - this function knows nothing about HOW it was
  * built, only that it behaves like one.
  */
-import { AppRuntime, HashRouter } from '@qu/app-core';
+import { AppRuntime, HashRouter, PlatformRuntime } from '@qu/app-core';
 import { renderPage } from '@qu/app-renderer';
+import { renderAdminPage, renderLandingPage } from './platform-ui.js';
+
+const ADMIN_ROUTE_PREFIX = '/admin/relay';
 
 /**
  * @param {{space: import('@qu/space-core').Space, appAdminPub: Uint8Array, mountEl: Element, window: {location: object, document: Document, addEventListener: Function, removeEventListener: Function}, styleId?: string, resolveTimeout?: number}} params
@@ -31,4 +34,46 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
   });
   router.start();
   return { runtime, router };
+}
+
+/**
+ * THE MULTI-APP / PLATFORM VARIANT (docs §19-21): instead of one fixed
+ * `appAdminPub`, resolves the CURRENT route against the relay-admin's
+ * `qu-platform-apps` registry (`@qu/app-core`'s `PlatformRuntime`) to
+ * decide WHICH installed app owns it, then delegates to an ordinary
+ * `AppRuntime` for that app's own `appAdminPub` - each app stays exactly
+ * as unaware it's mounted under a prefix as it would be as the only app on
+ * the relay. Two routes are intercepted BEFORE that delegation, never
+ * forwarded to any app:
+ *   - `#/admin/relay` (`ADMIN_ROUTE_PREFIX`) - the built-in relay-admin
+ *     console (`platform-ui.js`'s `renderAdminPage()`) - not Space
+ *     content, framework UI.
+ *   - anything matching NO registered prefix - a plain landing page
+ *     listing installed apps (`renderLandingPage()`), instead of an
+ *     app-shaped 404 for a route that was never an app's to 404 on.
+ * @param {{space: import('@qu/space-core').Space, relayAdminPub: Uint8Array, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
+ * @returns {{platform: PlatformRuntime, router: HashRouter}}
+ */
+export function startPlatform({ space, relayAdminPub, mountEl, window, styleId, resolveTimeout }) {
+  const platform = new PlatformRuntime(space, { relayAdminPub });
+  const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
+  const router = new HashRouter({
+    window,
+    onChange: async (route) => {
+      if (route === ADMIN_ROUTE_PREFIX || route.startsWith(`${ADMIN_ROUTE_PREFIX}/`)) {
+        await renderAdminPage({ mountEl, doc: window.document, space, relayAdminPub, platform });
+        return;
+      }
+      const match = await platform.resolveForPath(route, timeoutOpt);
+      if (!match) {
+        await renderLandingPage({ mountEl, doc: window.document, platform });
+        return;
+      }
+      const runtime = new AppRuntime(space, { appAdminPub: match.appAdminPub });
+      const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
+      renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+    },
+  });
+  router.start();
+  return { platform, router };
 }

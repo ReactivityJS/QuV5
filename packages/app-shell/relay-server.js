@@ -60,14 +60,38 @@
  *   QU_RELAY_DATA_DIR - default "/data". Set "" to disable mirroring.
  *   QU_APP_ADMIN_PUB  - Base64 Ed25519 pubkey of the app-admin identity
  *                        whose `qu-app` Manifest this Shell loads (see
- *                        `@qu/app-core`'s `kinds.js`). Without this, the
- *                        relay still starts (never a hard failure - an
- *                        operator should be able to stand up the relay
- *                        FIRST, decide/generate the app-admin identity
- *                        SEPARATELY, same posture `relay-server.js` takes
- *                        with `QU_MEMBERS_JSON`) but serves a plain setup
- *                        page instead of booting any app - see
- *                        `build.mjs`'s `renderIndexHtml()`.
+ *                        `@qu/app-core`'s `kinds.js`) - SINGLE-APP mode.
+ *                        Ignored if `QU_RELAY_ADMIN_PUB` is also set (see
+ *                        below). Without either, the relay still starts
+ *                        (never a hard failure - an operator should be able
+ *                        to stand up the relay FIRST, decide/generate the
+ *                        admin identity SEPARATELY, same posture
+ *                        `relay-server.js` takes with `QU_MEMBERS_JSON`) but
+ *                        serves a plain setup page instead of booting any
+ *                        app - see `build.mjs`'s `renderIndexHtml()`.
+ *   QU_RELAY_ADMIN_PUB - Base64 Ed25519 pubkey of the RELAY-ADMIN identity
+ *                        (docs §19-21) - PLATFORM mode: takes priority over
+ *                        `QU_APP_ADMIN_PUB`, serves `@qu/app-shell`'s
+ *                        built-in `#/admin/relay` console instead of one
+ *                        fixed app, from which that identity can register
+ *                        however many apps under path prefixes (each such
+ *                        app-admin's OWN pubkey then needs to be added to
+ *                        `QU_APP_ADMIN_PUBS` below and the relay restarted -
+ *                        registering the app-admin PUBKEY here is what
+ *                        grants their write-ACL; the `#/admin/relay`
+ *                        registration itself only maps a path prefix to a
+ *                        pubkey the relay is already willing to trust).
+ *   QU_APP_ADMIN_PUBS - OPTIONAL, PLATFORM mode only. JSON array of base64
+ *                        Ed25519 pubkeys - every app-admin identity this
+ *                        relay should accept `qu-app`/`qu-route-registry`/
+ *                        content writes from (see `@qu/app-core`'s
+ *                        `createAppResolveKindSchema()` doc comment on why
+ *                        this has to be a STATIC, boot-time list rather than
+ *                        live-discovered from the relay-admin's own
+ *                        `qu-platform-apps` registry). The relay-admin
+ *                        identity itself does NOT need to be in this list -
+ *                        it writes `qu-platform-apps`, a separate Kind
+ *                        resolved via `QU_RELAY_ADMIN_PUB` above.
  *   QU_MEMBERS_JSON   - OPTIONAL. Same shape as `relay-server.js`'s own -
  *                        pre-authorize `'members'`-mode writers. The
  *                        app-admin identity itself needs to be IN here (or
@@ -99,6 +123,8 @@ const PORT = Number(process.env.QU_RELAY_PORT || 8081);
 const DATA_DIR = process.env.QU_RELAY_DATA_DIR ?? '/data';
 const ALLOW_JOIN = process.env.QU_ALLOW_JOIN !== 'false';
 const APP_ADMIN_PUB_B64 = process.env.QU_APP_ADMIN_PUB || null;
+const RELAY_ADMIN_PUB_B64 = process.env.QU_RELAY_ADMIN_PUB || null;
+const APP_ADMIN_PUBS_JSON = process.env.QU_APP_ADMIN_PUBS || null;
 const WEB_DIR = join(HERE, 'dist-web');
 
 let members = [];
@@ -112,14 +138,27 @@ if (membersJson) {
   }
 }
 
+function parsePub(label, b64) {
+  try {
+    const pub = QuCrypto.fromBase64(b64);
+    if (pub.length !== 32) throw new Error('expected 32 raw bytes');
+    return pub;
+  } catch (err) {
+    console.error(`[qu-app-shell-relay] ${label} is not a valid base64 Ed25519 pubkey:`, err.message);
+    process.exit(1);
+  }
+}
+
 async function main() {
-  let appAdminPub = null;
-  if (APP_ADMIN_PUB_B64) {
+  const appAdminPub = APP_ADMIN_PUB_B64 ? parsePub('QU_APP_ADMIN_PUB', APP_ADMIN_PUB_B64) : null;
+  const relayAdminPub = RELAY_ADMIN_PUB_B64 ? parsePub('QU_RELAY_ADMIN_PUB', RELAY_ADMIN_PUB_B64) : null;
+
+  let appAdminPubs = [];
+  if (APP_ADMIN_PUBS_JSON) {
     try {
-      appAdminPub = QuCrypto.fromBase64(APP_ADMIN_PUB_B64);
-      if (appAdminPub.length !== 32) throw new Error('expected 32 raw bytes');
+      appAdminPubs = JSON.parse(APP_ADMIN_PUBS_JSON).map((b64) => parsePub('QU_APP_ADMIN_PUBS', b64));
     } catch (err) {
-      console.error('[qu-app-shell-relay] QU_APP_ADMIN_PUB is not a valid base64 Ed25519 pubkey:', err.message);
+      console.error('[qu-app-shell-relay] QU_APP_ADMIN_PUBS is not valid JSON:', err.message);
       process.exit(1);
     }
   }
@@ -129,17 +168,20 @@ async function main() {
   // serves /bundle.js from "<webDir>/dist/bundle.js" - the SAME convention demo/web/'s own build
   // uses - so the bundle goes under WEB_DIR/dist, not WEB_DIR itself.
   const { outfile } = await buildAppShellBundle({ outDir: join(WEB_DIR, 'dist') });
-  await writeFile(join(WEB_DIR, 'index.html'), renderIndexHtml({ appAdminPub }), 'utf8');
+  await writeFile(join(WEB_DIR, 'index.html'), renderIndexHtml({ appAdminPub, relayAdminPub }), 'utf8');
   console.log(`[qu-app-shell-relay] bundled -> ${outfile}`);
-  if (!appAdminPub) {
+  if (!appAdminPub && !relayAdminPub) {
     console.warn(
-      '[qu-app-shell-relay] QU_APP_ADMIN_PUB is not set - serving a setup page instead of an app. See this file\'s own doc comment.'
+      '[qu-app-shell-relay] neither QU_APP_ADMIN_PUB nor QU_RELAY_ADMIN_PUB is set - serving a setup page instead of an app. See this file\'s own doc comment.'
     );
   }
 
   const storage = DATA_DIR ? createFileStore(DATA_DIR) : null;
   const bus = new EventBus();
-  const resolveKindSchema = appAdminPub ? await createAppResolveKindSchema({ appAdminPub }) : () => true;
+  const resolveKindSchema =
+    appAdminPub || relayAdminPub || appAdminPubs.length > 0
+      ? await createAppResolveKindSchema({ appAdminPub, appAdminPubs, relayAdminPub })
+      : () => true;
 
   const httpServer = createServer((req, res) => handleRequest(req, res));
   const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: true });
@@ -160,7 +202,11 @@ async function main() {
 
   httpServer.listen(PORT, () => {
     const mirrorNote = storage ? `mirroring to ${DATA_DIR}` : 'NO mirroring (live-only, QU_RELAY_DATA_DIR is empty)';
-    const appNote = appAdminPub ? `serving app-admin ${APP_ADMIN_PUB_B64}` : 'NO app configured (QU_APP_ADMIN_PUB unset - see /)';
+    const appNote = relayAdminPub
+      ? `PLATFORM mode, relay-admin ${RELAY_ADMIN_PUB_B64}, ${appAdminPubs.length} known app-admin(s)`
+      : appAdminPub
+        ? `serving app-admin ${APP_ADMIN_PUB_B64}`
+        : 'NO app configured (QU_APP_ADMIN_PUB / QU_RELAY_ADMIN_PUB unset - see /)';
     console.log(`[qu-app-shell-relay] listening on :${PORT} - ${appNote}, ${mirrorNote}`);
     console.log(`[qu-app-shell-relay] open http://localhost:${PORT}/ in a browser - join is ${ALLOW_JOIN ? 'OPEN to anyone (QU_ALLOW_JOIN=false to lock it down)' : 'DISABLED (QU_ALLOW_JOIN=false)'}`);
   });

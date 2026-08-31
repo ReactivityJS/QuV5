@@ -5,5 +5,5 @@
  * that file's own doc comment. Import `@qu/app-shell/shell` directly (or
  * `./shell.js` from this package) in a browser entry point.
  */
-export { startApp } from './boot.js';
+export { startApp, startPlatform } from './boot.js';
 export { loadOrCreateIdentity, joinSpace, IDENTITY_STORAGE_KEY } from './identity.js';

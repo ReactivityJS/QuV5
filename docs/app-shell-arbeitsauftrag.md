@@ -369,6 +369,26 @@ Anfang an gilt.
 
 ## 19-21. Admin Identity, Rollen, ACL-Erweiterung (grundlegend angepasst)
 
+**Status: `relay-admin`-Rolle als Platform-Installer implementiert**, siehe
+architecture.md §7 ("The Platform layer"). Statt (wie unten ursprünglich
+skizziert) Owner globaler Content-Kinds zu sein, ist die `relay-admin`-Rolle
+konkret als eigenständiges, additiv-only Registry-Kind umgesetzt
+(`qu-platform-apps`, `'named'`-ACL auf die Relay-Admin-Pubkey), das
+Pfad-Präfixe auf App-Admin-Pubkeys abbildet — `@qu/app-core`'s
+`PlatformRuntime`/`installAppBundle()`/`registerApp()`, `@qu/app-shell`'s
+`startPlatform()` + eingebaute `#/admin/relay`-Konsole. Bewusst KEIN
+Superuser über App-Content: ein `app-admin` bleibt alleiniger Owner seines
+eigenen `qu-app`/`qu-page`/`qu-template`/`qu-style`, der relay-admin
+entscheidet nur, WELCHE bereits installierten Apps unter welchem Präfix
+erreichbar sind. Relay-seitige ACL für mehrere App-Admins bleibt eine
+STATISCHE, beim Relay-Start konfigurierte Liste
+(`QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_PUB` in
+`packages/app-shell/relay-server.js`) — aus dem selben Grund, aus dem
+`QU_MEMBERS_JSON` das bereits ist (`resolveKindSchema` wird synchron
+aufgerufen, siehe `relay-resolver.js`s eigener Kommentar). Live-Discovery
+neuer App-Admins ohne Relay-Neustart bleibt offen (siehe architecture.md §7,
+letzter Absatz).
+
 **Anpassung:** Das Original unterstellt eine bereits vorhandene, erweiterbare
 ACL-Hierarchie (Space → Namespace → Kind → Node → Field). Die gibt es nicht.
 Was es gibt: **Kind-weite** ACL (`members`/`owner`/`named`) plus

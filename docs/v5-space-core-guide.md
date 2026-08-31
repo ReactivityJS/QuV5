@@ -576,6 +576,32 @@ deployment:
 node demo/install-app-shell-demo.mjs --relay wss://your-host --dir /path/to/your/app-admin-identity
 ```
 
+**PLATFORM mode (several apps, one relay-admin)** — instead of one fixed
+`QU_APP_ADMIN_PUB`, set `QU_RELAY_ADMIN_PUB` (takes priority when both are
+set) to serve the built-in `#/admin/relay` console instead of a single app —
+see architecture.md §7's "The Platform layer" for the full model
+(`qu-platform-apps` registry, `PlatformRuntime`, `registerApp()`). Every
+app-admin the relay should accept writes from still needs a STATIC,
+boot-time `QU_APP_ADMIN_PUBS` entry (a JSON array) — registering an app
+through the console only maps a path prefix to a pubkey the relay is
+already willing to trust, it does not itself grant that pubkey write access:
+
+```sh
+docker run -d -p 8082:8081 \
+  -e QU_RELAY_ADMIN_PUB='<base64 relay-admin pubkey>' \
+  -e QU_APP_ADMIN_PUBS='["<base64 app-admin pubkey 1>","<base64 app-admin pubkey 2>"]' \
+  -v qu-app-shell-relay-data:/data \
+  qu-app-shell-relay
+```
+
+From a browser signed in as the relay-admin identity, open
+`https://your-host/#/admin/relay`: it lists already-registered apps and
+offers a form to register a new one (prefix + that app's app-admin pubkey +
+display name) — the app's own content still needs to be installed
+separately by whoever holds that app-admin's private key, e.g. via
+`installAppBundle()` (`@qu/app-core`'s Dev API) from your own script, the
+same way `demo/install-app-shell-demo.mjs` seeds a single app today.
+
 ## 11. Granular events: notifications, presence, push, and debugging
 
 `@qu/events`'s `EventBus` is one dot-namespaced, wildcard-matching

@@ -48,6 +48,14 @@ services:
       # at / instead). Generate an app-admin identity yourself (QuCrypto.generateKeypair() from
       # @qu/core) and set its base64 signing pubkey here.
       QU_APP_ADMIN_PUB: ${QU_APP_ADMIN_PUB:-}
+      # PLATFORM mode instead of the single app above (docs §19-21) - set a relay-admin's base64
+      # signing pubkey here to serve the built-in #/admin/relay console instead, from which that
+      # identity can register however many apps under path prefixes. Takes priority over
+      # QU_APP_ADMIN_PUB when both are set - see relay-server.js's own doc comment.
+      QU_RELAY_ADMIN_PUB: ${QU_RELAY_ADMIN_PUB:-}
+      # PLATFORM mode only - JSON array of every app-admin pubkey this relay should accept content
+      # writes from (a STATIC, boot-time list - see relay-server.js's own doc comment on why).
+      QU_APP_ADMIN_PUBS: ${QU_APP_ADMIN_PUBS:-}
       # REQUIRED (once you have QU_APP_ADMIN_PUB) for the app-admin to actually be able to write
       # qu-page/qu-template/qu-style content - see @qu/app-core's kinds.js on why those are
       # 'members'-ACL. At minimum: [{"pub":"<same as QU_APP_ADMIN_PUB>","xPub":"<its X25519 pubkey>"}].

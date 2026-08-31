@@ -576,6 +576,75 @@ on. Wired into both `demo/chat.mjs` and `demo/web/main.js`; see
 `packages/space-plugins/test/auto-compact.test.js` for the regression
 proof and `demo/README.md`'s Caveats section for the full mechanics.
 
+**The Platform layer (docs §19-21): several apps, one Relay, one
+relay-admin.** Everything above assumes a Relay serves exactly one app,
+owned by one app-admin. `@qu/app-core`'s `platformAppsKind` (`kinds.js`) +
+`PlatformRuntime` (`platform.js`) + `installAppBundle()`/`registerApp()`
+(`dev.js`), and `@qu/app-shell`'s `startPlatform()` (`boot.js`) +
+`platform-ui.js` add a second, separate way to boot the SAME `@qu/app-shell`
+that instead serves however many independently-owned apps a
+**relay-admin** — a role distinct from any app's own app-admin, deliberately
+NOT a superuser over app content, only over WHICH apps are mounted and
+under which path prefix — has installed:
+
+- `qu-platform-apps` is a `'named'`-ACL Kind, one per relay-admin
+  (`deriveOwnerNodeId(relayAdminPub, ...)`, self-certifying like `qu-app`/
+  `qu-route-registry`), holding an additive-only `ListField` of
+  `{prefix, appAdminPub, name}` — `ListField` has no removal primitive, so
+  there is no `unregisterApp()`; a real "remove" would need a soft-delete
+  flag on the app's own record, not attempted here.
+- `installAppBundle(space, {app, template, pages, ...})` — a plain-object
+  Dev API bundle (no packaging format, no build step) that seeds an app's
+  manifest/templates/styles/pages in one call, on top of the SAME primitives
+  `createApp()`/`createTemplate()`/`createPage()` already provide
+  individually. `registerApp(relayAdminSpace, {prefix, appAdminPub, name})`
+  is the separate, relay-admin-signed write that mounts an already-installed
+  app under a path prefix — installing content and registering a route are
+  two different identities' writes on purpose (an app-admin installs their
+  own app; only the relay-admin decides it's reachable).
+- `PlatformRuntime.resolveForPath(route)` strips a route's leading path
+  segment, looks it up in the resolved `qu-platform-apps` list, and returns
+  `{appAdminPub, subPath}` for an ordinary `AppRuntime` to take over from
+  there — each app stays exactly as unaware it's mounted under a prefix as
+  it would be as the only app on the relay.
+- `startPlatform({space, relayAdminPub, mountEl, window})` is `startApp()`'s
+  multi-app sibling: it intercepts `#/admin/relay` (a relay-admin console,
+  `platform-ui.js`'s `renderAdminPage()` — lists installed apps and offers a
+  form to `registerApp()` a new one) and any route matching no registered
+  prefix (a plain landing page, `renderLandingPage()`) before delegating
+  everything else to `PlatformRuntime`. `shell.js` picks `startPlatform()`
+  over `startApp()` when its `<qu-app-shell>` element carries a
+  `relay-admin-pub` attribute instead of `app-admin-pub` (priority order
+  documented in `shell.js`'s own doc comment) — one Shell, one JS bundle,
+  either mode, decided per-deployment by which attribute `index.html` sets.
+- **The admin console's write-ACL is enforced by the Relay, not the UI**:
+  `renderAdminPage()` shows a courtesy warning when the visiting identity
+  isn't the relay-admin and disables its submit button, but that is UI
+  politeness only — the actual enforcement is that `qu-platform-apps` is
+  `'named'`-ACL for the relay-admin's pubkey specifically, so a non-admin's
+  `registerApp()` write is rejected by the relay exactly like any other
+  unauthorized write in this framework, regardless of what the page shows.
+- **Relay-side ACL for MULTIPLE app-admins is necessarily a STATIC,
+  boot-time list**, not live-discovered from `qu-platform-apps`:
+  `resolveKindSchema(nodeId)` is a plain synchronous function
+  (`relay.js` never awaits it), so recognizing a brand-new app-admin the
+  instant someone registers them would need the relay to run its own live,
+  subscribed `Space` watching that registry — real, separate work, not
+  attempted here. `createAppResolveKindSchema({appAdminPubs, relayAdminPub})`
+  (`relay-resolver.js`) therefore takes the same operational posture
+  `relay-server.js`'s own `QU_MEMBERS_JSON` already does: a relay-admin adds
+  a new app-admin's pubkey to `QU_APP_ADMIN_PUBS` and restarts the relay.
+  `packages/app-shell/relay-server.js` wires this up via `QU_RELAY_ADMIN_PUB`
+  (takes priority over the single-app `QU_APP_ADMIN_PUB` when both are set)
+  and `QU_APP_ADMIN_PUBS` (a JSON array) — see that file's own doc comment
+  for the full env-var reference, and `docker-compose.space-relay.yml`'s
+  `qu-app-shell-relay` service for the same two variables wired through
+  Compose.
+
 Field-level/namespace ACL (docs §21), signed Executable Modules (§17 Stufe
-3), and publish/draft states (§26) remain explicitly future work — see
-docs/app-shell-arbeitsauftrag.md's own "Nicht-Ziele".
+3), publish/draft states (§26), a standalone CLI for `installAppBundle()`/
+`registerApp()` (only the Dev API itself exists so far, invoked from a
+script or the admin console's own form), and live/dynamic app-admin
+discovery (the "static list, relay restart" tradeoff above) remain
+explicitly future work — see docs/app-shell-arbeitsauftrag.md's own
+"Nicht-Ziele".
