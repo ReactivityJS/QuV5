@@ -37,6 +37,14 @@
  * visitor at all (docs/app-shell-arbeitsauftrag.md §12's own documented
  * tradeoff), reusing the relay's existing self-service membership, not a
  * new "public content" ACL mode.
+ *
+ * `loadOrCreateIdentity()` is exactly the "remember me" primitive: create
+ * once, persist under `IDENTITY_STORAGE_KEY`, silently reload the SAME
+ * identity on every later call for that key - `shell.js`'s own boot flow
+ * already relies on this, and `dev-console.js`'s `window.Qu` (loaded on
+ * the relay's own unconfigured setup page, `build.mjs`'s `renderIndexHtml()`)
+ * calls this SAME function for the SAME key, deliberately - no separate
+ * persistence mechanism to keep in sync.
  */
 import { QuCrypto } from '@qu/core';
 
@@ -44,11 +52,36 @@ import { QuCrypto } from '@qu/core';
 export const IDENTITY_STORAGE_KEY = 'qu-identity';
 
 /**
+ * One in-flight promise per `key`, not per call - `storage.getItem()` is
+ * synchronous, but generating a FRESH keypair genuinely isn't (Web
+ * Crypto), so two callers racing for the same never-yet-created `key` on
+ * the SAME page load (e.g. `dev-console.js`'s `window.Qu` and `shell.js`'s
+ * own `<qu-app-shell>` boot, now that both can run on one page) would
+ * otherwise both see "nothing stored yet," both generate their OWN
+ * separate keypair, and both write - the second write silently winning,
+ * leaving whichever caller got the first (now-orphaned, unpersisted)
+ * keypair permanently out of sync with what's actually in storage. Keying
+ * by `key` (not a single global lock) keeps two DIFFERENT identities
+ * (different storage keys, e.g. distinct demo scripts) fully independent.
+ */
+const inFlight = new Map();
+
+/**
  * @param {{getItem: (key: string) => string|null, setItem: (key: string, value: string) => void}} storage - e.g. `localStorage`.
  * @param {string} key
  * @returns {Promise<{signingKey: Uint8Array, signingPub: Uint8Array, xPrivateKey: Uint8Array, xPublicKey: Uint8Array}>}
  */
-export async function loadOrCreateIdentity(storage, key) {
+export function loadOrCreateIdentity(storage, key) {
+  const existing = inFlight.get(key);
+  if (existing) return existing;
+  const promise = loadOrCreateIdentityOnce(storage, key).finally(() => {
+    if (inFlight.get(key) === promise) inFlight.delete(key);
+  });
+  inFlight.set(key, promise);
+  return promise;
+}
+
+async function loadOrCreateIdentityOnce(storage, key) {
   const raw = storage.getItem(key);
   if (raw) {
     const obj = JSON.parse(raw);

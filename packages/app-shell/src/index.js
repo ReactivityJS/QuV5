@@ -7,3 +7,4 @@
  */
 export { startApp, startPlatform } from './boot.js';
 export { loadOrCreateIdentity, joinSpace, fetchMembers, IDENTITY_STORAGE_KEY } from './identity.js';
+export { initDevConsole } from './dev-console.js';

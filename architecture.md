@@ -774,6 +774,33 @@ extends this to "let a SPECIFIC other identity maintain exactly this
 page" (the `ownerPub` parameter on every `edit*()` call is what makes a
 grantee's write actually target the OWNER's Node id, not their own).
 
+**The relay's own unconfigured setup page is itself a working Qu identity
+tool, not just static instructions** (`build.mjs`'s `renderIndexHtml()`,
+the "neither QU_APP_ADMIN_PUB nor QU_RELAY_ADMIN_PUB is set" branch): it
+now loads the SAME `/bundle.js` a configured deployment serves, which
+`shell.js` runs unconditionally regardless of whether a `<qu-app-shell>`
+element exists on the page (`dev-console.js`'s `initDevConsole()`,
+called at the bottom of `shell.js`). This assigns `window.Qu` - the
+identity `loadOrCreateIdentity()` already creates-once-and-persists under
+`IDENTITY_STORAGE_KEY` (`identity.js`, the SAME "remember me" mechanism
+an ordinary visitor's boot already uses, not a second one invented for
+this) - and renders its base64 signing/X25519 pubkeys into any
+`[data-qu-pub]`/`[data-qu-xpub]` element the page declares, which the
+setup page's own markup does: an operator sees their bootstrapping
+identity's exact `QU_APP_ADMIN_PUB`/`QU_RELAY_ADMIN_PUB` value on the page
+itself, no devtools or separate script required just to GENERATE and
+copy it (a `Qu.regenerate()` console call is still there for anyone who
+wants a fresh one). Two identity-bootstrapping code paths on ONE page
+(this dev console AND, once configured, `<qu-app-shell>`'s own boot) can
+now legitimately race for the SAME storage key on the SAME page load -
+`identity.js`'s `loadOrCreateIdentity()` de-duplicates concurrent callers
+per key (an in-flight promise cache) specifically because of this, not
+just as defensive programming: without it, two callers racing a
+never-yet-created key would each generate their OWN keypair (Web Crypto
+key generation is genuinely async, unlike the synchronous `storage.getItem()`
+check that precedes it), with the second write silently orphaning the
+first.
+
 Field-level/namespace ACL (docs §21), signed Executable Modules (§17 Stufe
 3), publish/draft states (§26), editing the ADMIN REALM's own console
 content through this same CMS UI (its `qu-admin-*` Kinds have no
