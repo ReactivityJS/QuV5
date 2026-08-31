@@ -26,6 +26,13 @@
  * plain-Node-importable, see that file's own doc comment) since a bare
  * `class extends HTMLElement` throws the moment this module evaluates
  * under plain Node.
+ *
+ * ALSO INITIALIZES `window.Qu` UNCONDITIONALLY (`initDevConsole()`,
+ * `dev-console.js`), independent of whether a `<qu-app-shell>` element
+ * exists on the page at all - this is what lets the relay's own
+ * UNCONFIGURED setup page (`build.mjs`'s `renderIndexHtml()`) load this
+ * SAME bundle and offer a working identity-bootstrapping console before
+ * any app/platform is even configured. See that file's own doc comment.
  */
 import { QuCrypto } from '@qu/core';
 import { Space, deriveOwnerNodeId } from '@qu/space-core';
@@ -34,6 +41,7 @@ import { EventBus } from '@qu/events';
 import { autoCompactOnJoin } from '@qu/space-plugins';
 import { deriveContentNodeId, adminAppManifestKind, adminTemplateKind, adminPageKind, ADMIN_REALM_ANCHOR } from '@qu/app-core';
 import { loadOrCreateIdentity, joinSpace, fetchMembers, IDENTITY_STORAGE_KEY } from './identity.js';
+import { initDevConsole } from './dev-console.js';
 import { startApp, startPlatform } from './boot.js';
 
 export class QuAppShell extends HTMLElement {
@@ -92,3 +100,5 @@ export class QuAppShell extends HTMLElement {
 if (typeof customElements !== 'undefined' && !customElements.get('qu-app-shell')) {
   customElements.define('qu-app-shell', QuAppShell);
 }
+
+initDevConsole().catch((err) => console.error('Qu dev console failed to initialize:', err));

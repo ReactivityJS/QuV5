@@ -63,14 +63,35 @@ export function renderIndexHtml({ appAdminPub = null, relayAdminPub = null } = {
     <p>Dieser Relay liefert die App Shell aus, aber es ist noch keine Anwendung
       und kein Relay-Admin zugeordnet (weder <code>QU_APP_ADMIN_PUB</code> noch
       <code>QU_RELAY_ADMIN_PUB</code> ist gesetzt).</p>
+
+    <h2>Deine Browser-Identity</h2>
+    <p>Diese Seite lädt bereits die App-Shell-Bundle (<code>/bundle.js</code>) und
+      erzeugt/lädt damit automatisch eine Identity in diesem Browser - genau der
+      "remember me"-Mechanismus (<code>loadOrCreateIdentity()</code>), den ein
+      späterer Besuch als Visitor sowieso schon nutzt. Der private Schlüssel bleibt
+      ausschließlich in <code>localStorage</code> dieses Browsers - dieser Relay
+      bekommt ihn nie zu sehen.</p>
+    <p>Signing-Pubkey (für <code>QU_APP_ADMIN_PUB</code> / <code>QU_RELAY_ADMIN_PUB</code> /
+      <code>QU_APP_ADMIN_PUBS</code>): <code data-qu-pub>lädt…</code></p>
+    <p>X25519-Pubkey (für <code>QU_MEMBERS_JSON</code> / <code>QU_RELAY_ADMIN_MEMBERS_JSON</code>,
+      jeweils als <code>{"pub":"…","xPub":"…"}</code>): <code data-qu-xpub>lädt…</code></p>
+    <p>Für Skripte/die Konsole steht <code>window.Qu</code> bereit -
+      <code>Qu.pub</code>/<code>Qu.xPub</code> (bereits oben angezeigt),
+      <code>Qu.identity</code> (die vollen Schlüssel), oder
+      <code>await Qu.regenerate()</code> für eine komplett neue Identity
+      (unwiderruflich - eine bereits irgendwo hinterlegte Pubkey wird dadurch
+      für diesen Browser unbrauchbar).</p>
+
+    <h2>Nächste Schritte</h2>
     <ol>
-      <li>Erzeuge eine Identity (ein normales Ed25519/X25519-Schlüsselpaar,
-        z.B. mit <code>QuCrypto.generateKeypair()</code> aus <code>@qu/core</code>) -
-        der private Schlüssel bleibt bei dir, dieser Relay bekommt ihn nie zu sehen.</li>
-      <li>Für EINE einzelne App: setze deren öffentlichen Signing-Schlüssel (base64) als
-        <code>QU_APP_ADMIN_PUB</code>. Für eine PLATTFORM aus mehreren Apps unter
-        Pfad-Präfixen: setze stattdessen <code>QU_RELAY_ADMIN_PUB</code> (und ggf.
-        <code>QU_APP_ADMIN_PUBS</code>/<code>QU_RELAY_ADMIN_MEMBERS_JSON</code>) -
+      <li>Am schnellsten: <pre>npm run bootstrap:platform</pre> - erzeugt eine EIGENE
+        (server-seitige) Identity, konfiguriert PLATTFORM-Modus automatisch und
+        installiert Admin-Konsole + eine CMS-verwaltete Demo-Shell-App. Siehe
+        <code>packages/app-shell/bin/bootstrap-platform.mjs</code>.</li>
+      <li>Von Hand, mit DEINER Browser-Identity von oben: für EINE einzelne App setze
+        deren Pubkey als <code>QU_APP_ADMIN_PUB</code>. Für eine PLATTFORM aus mehreren
+        Apps unter Pfad-Präfixen: setze stattdessen <code>QU_RELAY_ADMIN_PUB</code>
+        (und ggf. <code>QU_APP_ADMIN_PUBS</code>/<code>QU_RELAY_ADMIN_MEMBERS_JSON</code>) -
         siehe <code>architecture.md</code> §7. Danach den Relay neu starten.</li>
       <li>EINZELNE App: installiere sie aus einem separaten Prozess, der den
         privaten Schlüssel hält:
@@ -83,6 +104,8 @@ export function renderIndexHtml({ appAdminPub = null, relayAdminPub = null } = {
       </li>
     </ol>
     <p>Siehe <code>docs/app-shell-arbeitsauftrag.md</code> und <code>architecture.md</code> §7.</p>
+
+    <script type="module" src="/bundle.js"></script>
   </body>
 </html>
 `;

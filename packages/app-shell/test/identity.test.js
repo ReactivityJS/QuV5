@@ -4,7 +4,7 @@ import { loadOrCreateIdentity, joinSpace } from '../src/identity.js';
 
 function fakeStorage() {
   const map = new Map();
-  return { getItem: (k) => map.get(k) ?? null, setItem: (k, v) => map.set(k, v) };
+  return { getItem: (k) => map.get(k) ?? null, setItem: (k, v) => map.set(k, v), removeItem: (k) => map.delete(k) };
 }
 
 test('loadOrCreateIdentity() generates a new identity once, then returns the SAME one on every later call', async () => {
@@ -13,6 +13,23 @@ test('loadOrCreateIdentity() generates a new identity once, then returns the SAM
   const second = await loadOrCreateIdentity(storage, 'test-identity');
   assert.deepEqual(Array.from(first.signingPub), Array.from(second.signingPub));
   assert.deepEqual(Array.from(first.signingKey), Array.from(second.signingKey));
+});
+
+test('loadOrCreateIdentity() called TWICE CONCURRENTLY for the same never-yet-created key does not generate two different keypairs - both callers get the SAME identity, and only one ends up persisted', async () => {
+  const storage = fakeStorage();
+  // Both calls start before either has finished - key generation is genuinely async (Web Crypto),
+  // so without de-duplication both would see "nothing stored yet" and each generate its own
+  // keypair, the second write silently clobbering the first (see identity.js's own doc comment on
+  // why dev-console.js's window.Qu and shell.js's <qu-app-shell> boot can now race for this exact
+  // key on the same page).
+  const [first, second] = await Promise.all([loadOrCreateIdentity(storage, 'race-key'), loadOrCreateIdentity(storage, 'race-key')]);
+  assert.deepEqual(Array.from(first.signingPub), Array.from(second.signingPub));
+  assert.deepEqual(Array.from(first.signingKey), Array.from(second.signingKey));
+
+  // And the persisted value matches what both callers got - a THIRD, later call reads back the
+  // exact same identity, not some orphaned third keypair.
+  const third = await loadOrCreateIdentity(storage, 'race-key');
+  assert.deepEqual(Array.from(first.signingPub), Array.from(third.signingPub));
 });
 
 test('loadOrCreateIdentity() with different storage keys yields different identities', async () => {
