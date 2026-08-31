@@ -129,10 +129,18 @@ export class ContentResolver {
     const styleKind = this._kinds.styleKind;
     const id = await deriveContentNodeId(this._appAdminPub, styleKind.kind, name);
     const { node, release } = await this._space.useNode(id, styleKind);
+    // 2000ms, not the generic 4000ms other resolve*() methods fall back to (kinds.js's
+    // ADMIN_KINDS/DEFAULT_KINDS resolveManifest()/resolvePage()/resolveTemplate() all share
+    // waitFor()'s own default) - a missing/never-configured theme is common enough that a shorter
+    // wait keeps that case snappy, but 'content'-ACL Kinds (kind-schema.js) now need a genuine
+    // extra round-trip (the creating owner's own transparent self-grant, see space.js's own
+    // createNode() doc comment) before their first write is even readable, so the OLD 1000ms could
+    // occasionally time out real, existing content under real network/CPU load - not just "no
+    // theme set."
     const css = await waitFor(() => {
       const value = node.field('css').get();
       return value !== '' ? value : null;
-    }, { timeout: timeout ?? 1000 });
+    }, { timeout: timeout ?? 2000 });
     release();
     return css ?? '';
   }

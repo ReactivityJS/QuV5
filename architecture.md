@@ -102,7 +102,7 @@ private key to attempt decryption with (`verifyEnvelope()` needs only a
 public key; `openUpdate()` needs the private key and the relay never gets
 one).
 
-### 3.2 Kind-Schema: shape × visibility, and three ACL modes
+### 3.2 Kind-Schema: shape × visibility, and FOUR ACL modes
 
 A field declares two INDEPENDENT properties (`kind-schema.js`):
 
@@ -114,12 +114,43 @@ A field declares two INDEPENDENT properties (`kind-schema.js`):
   self-describing in the resulting envelope from then on.
 
 `acl.write` names who may sign updates to a Node of this Kind:
-`'members'` (flat Space membership — the default), `'owner'`
-(self-certifying nodeId, zero relay state), `'named'` (owner + anyone
-they've signed a `grant` for). See `docs/v5-space-core-guide.md` §3 for
-the full behavioral contract, and `packages/space-core/src/grant.js`'s
-doc comment for the real Yjs property ("write-before-grant is a trap")
-that makes grant ORDERING matter.
+
+- **`'members'`** — flat Space membership (the default) — genuinely
+  SHARED write access, every member equally, no single owner (e.g. the
+  App Shell's built-in admin realm content, §7 below).
+- **`'owner'`** — self-certifying `nodeId` (`deriveOwnerNodeId(ownerPub,
+  kind)`), zero relay state, ONE Node per owner per Kind.
+- **`'named'`** — the owner (same self-certifying id as `'owner'`) plus
+  anyone they've signed a `grant` for.
+- **`'content'`** — `'named'`'s MANY-per-owner counterpart:
+  self-certifying `nodeId` via `deriveContentNodeId(ownerPub, kind, path)`
+  (a route, a template name, ...), real per-Node write-ACL (the owner —
+  granted to themselves TRANSPARENTLY by `Space.createNode()` the instant
+  they create it, no extra call needed — plus anyone else they've
+  explicitly `grantWriter(id, kind, granteePub, {path})`ed). This is the
+  primitive behind `@qu/app-core`'s `qu-page`/`qu-template`/`qu-style` (§7
+  below) — genuine per-owner exclusivity for many-Nodes-per-owner content,
+  not just flat `'members'`-mode sharing, and a GLOBAL Qu-level primitive
+  any many-per-owner content Kind wants (a calendar event, a forum post, a
+  chat room), not an app-core invention.
+
+See `docs/v5-space-core-guide.md` §3 for the full behavioral contract, and
+`packages/space-core/src/grant.js`'s doc comment for the real Yjs property
+("write-before-grant is a trap") that makes grant ORDERING matter —
+`'content'` mode has NO owner-pubkey shortcut in its write-ACL check
+(unlike `'owner'`/`'named'`: a `nodeId` alone cannot be inverted back to
+the `path` a verifier would need to recompute it), so EVERY reader,
+including one reading the ORIGINAL owner's own writes, needs to have
+actually seen a `grant` message — `@qu/space-transport`'s `relay.js`
+durably stores and REPLAYS grants to a newly-subscribing peer for exactly
+this reason (a separate storage key from the Node's own envelope log, so
+`Space.compactNode()` never wipes it — see `grantStorageKey()`'s own doc
+comment). `Space`'s own incoming-message handling, and the relay's,
+additionally SERIALIZE processing per peer (never overlapping two
+messages from the same sender) — necessary because `'content'`'s
+grant-then-write dependency is only safe if "arrived first" also means
+"finished processing first," which async crypto verification alone does
+not guarantee (see `Space._handleIncoming()`'s own doc comment).
 
 ### 3.3 Local-first sync and subscriber-tracking
 
@@ -455,23 +486,28 @@ Relay never learns what it's transporting is "a page" or "a template," and
   `router.js`, `runtime.js`, `dev.js`, `relay-resolver.js`) — declares the
   application-content Kind-Schemas (`qu-app` manifest, `qu-route-registry`,
   `qu-page`, `qu-template`, `qu-style`, all ordinary `defineKind()` calls)
-  and interprets them: `deriveContentNodeId(ownerPub, kind, path)`
-  (content-id.js) extends `deriveOwnerNodeId()`'s self-certifying-id idea
-  with a `path` component, so many pages/templates/styles can exist per
-  owner — which is also WHY those three Kinds are `acl.write: 'members'`
-  rather than `'owner'`/`'named'`: `Space.createNode()` only honors a
-  caller-supplied `{id}` for `'members'`-mode Kinds (see space.js), and the
-  accepted tradeoff (documented in kinds.js/content-id.js) is that reading
-  them requires actual Space membership — the app's manifest and route
-  registry stay `'owner'`/`'named'` (one per app, self-certifying, no
-  membership gate) so an app is discoverable pre-membership. `ContentResolver`
-  wraps `Space.useNode()` with a bounded wait for sync; `AppRuntime` combines
-  it with `HashRouter` (`#/<page>/...`) into one `resolveRoute()` call; `dev.js`
-  is the Dev/Admin API that bootstraps an empty Space into a working app;
-  `relay-resolver.js`'s `createAppResolveKindSchema()` builds the
-  `resolveKindSchema(nodeId)` a relay needs to actually enforce this ACL
-  (see relay.js's own doc comment on why an unresolvable nodeId can only
-  ever fall back to flat `'members'` ACL). Zero DOM dependency.
+  and interprets them. `qu-page`/`qu-template`/`qu-style` are
+  `acl.write: 'content'` (§3.2 above) — `deriveContentNodeId(ownerPub, kind,
+  path)` (re-exported from `@qu/space-core`, its canonical home, via
+  `content-id.js`) lets many pages/templates/styles exist per owner, each
+  with GENUINE per-owner write-ACL (the owner, or anyone they've explicitly
+  `grantWriter()`ed a specific route/name to) - not "any Space member," a
+  real gap on a Relay hosting several independently-owned apps (§7's own
+  "The Platform layer") that `'content'` mode closes. Subscribing to one
+  needs no relay-side membership either (self-certifying, like
+  `'owner'`/`'named'`) - the app's manifest and route registry stay
+  `'owner'`/`'named'` (one per app) so an app is discoverable
+  pre-membership the same way. `ContentResolver` wraps `Space.useNode()`
+  with a bounded wait for sync; `AppRuntime` combines it with `HashRouter`
+  (`#/<page>/...`) into one `resolveRoute()` call; `dev.js` is the
+  Dev/Admin API that bootstraps an empty Space into a working app (its
+  `createPage()`/`createTemplate()`/`createStyle()` only ever pass `path` -
+  `Space.createNode()` derives the id AND self-grants for `'content'`-ACL
+  Kinds itself, see space.js's own doc comment); `relay-resolver.js`'s
+  `createAppResolveKindSchema()` builds the `resolveKindSchema(nodeId)` a
+  relay needs to actually enforce this ACL (see relay.js's own doc comment
+  on why an unresolvable nodeId can only ever fall back to flat
+  `'members'` ACL). Zero DOM dependency.
 - **`@qu/app-renderer`** (`sanitizer.js`, `slots.js`, `styles.js`,
   `render.js`) — turns an `AppRuntime.resolveRoute()` plan into DOM:
   `sanitizeHtml()` strips `<script>`/`on*`/`javascript:` from any
@@ -532,19 +568,23 @@ they either shared one Space's own local state or ran fast enough to never
 hit the race:
 
 1. `kinds.js`'s `publicMeta()` — `defineKind()` always derives a
-   `'members'`-mode Kind's META-STAMP visibility as `'encrypted'`
-   (kind-schema.js), independent of what its FIELDS declare. A Node's
-   meta-stamp is its Y.Doc's very first update, sealed only for whoever was
-   a member AT CREATION TIME — and because Yjs integrates one author's
-   updates as a strictly ordered, gapless sequence (grant.js's own
-   "WRITE-BEFORE-GRANT IS A TRAP"), a visitor who joins LATER (the App
-   Shell's core use case) could never decrypt that first update and could
-   then never integrate ANY later update to that Node either, even though
-   every field on `qu-page`/`qu-template`/`qu-style` is `visibility:
-   'public'`. Content would silently, permanently never render for that
-   visitor. Fixed entirely in `@qu/app-core` (`metaVisibility` overridden to
-   `'public'` on an otherwise-unchanged, still-`'members'`-ACL Kind-Schema)
-   — no `@qu/space-core` change needed.
+   `'members'`/`'content'`-mode Kind's META-STAMP visibility as
+   `'encrypted'` (kind-schema.js), independent of what its FIELDS declare
+   (true when `qu-page`/`qu-template`/`qu-style` were still `'members'`-ACL,
+   and remains true now that they're `'content'`-ACL - the rule applies to
+   both modes identically, see §3.2 above). A Node's meta-stamp is its
+   Y.Doc's very first update, sealed only for whoever was a valid recipient
+   AT CREATION TIME — and because Yjs integrates one author's updates as a
+   strictly ordered, gapless sequence (grant.js's own "WRITE-BEFORE-GRANT
+   IS A TRAP"), a visitor who joins LATER (the App Shell's core use case)
+   could never decrypt that first update and could then never integrate
+   ANY later update to that Node either, even though every field on
+   `qu-page`/`qu-template`/`qu-style` is `visibility: 'public'`. Content
+   would silently, permanently never render for that visitor. Fixed
+   entirely in `@qu/app-core` (`metaVisibility` overridden to `'public'` on
+   an otherwise-unchanged Kind-Schema) — no `@qu/space-core` change needed
+   for THIS particular fix (the LATER move to `'content'`-ACL for real
+   per-owner write-ACL did need one, see §3.2's own doc comment).
 2. `resolver.js`'s `resolvePage()` used to gate readiness on the `title`
    field alone, then read `content` (a SEPARATE envelope) unconditionally —
    fine in-process (near-zero latency hides the race) but over a real

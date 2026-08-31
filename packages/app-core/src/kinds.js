@@ -4,8 +4,8 @@
  * Runtime interprets what they mean, `@qu/space-core`/the Relay never do
  * (architecture.md §1, "Relay bleibt Application-blind").
  *
- * TWO DIFFERENT ACL SHAPES, chosen by CARDINALITY, not by "how important"
- * a Kind is:
+ * THREE DIFFERENT ACL SHAPES, chosen by CARDINALITY and by who's allowed
+ * to write, not by "how important" a Kind is:
  *
  *   - `qu-app` (the App Manifest) and `qu-route-registry` are SINGLETONS -
  *     exactly one per app owner. `acl.write: 'named'` fits them exactly as
@@ -20,19 +20,29 @@
  *     here.
  *
  *   - `qu-page`/`qu-template`/`qu-style` are MANY-PER-OWNER (one per
- *     route/template-name/style-name). `acl.write: 'members'` is what lets
- *     `Space.createNode()` honor a caller-supplied, content-addressed id
- *     (see `content-id.js`'s own doc comment for the full "why") instead of
- *     collapsing every page onto the same self-certifying Node.
+ *     route/template-name/style-name) AND want REAL, exclusive per-owner
+ *     write-ACL - not "any Space member," which would let ANY joined
+ *     visitor overwrite ANY app's pages the instant several independently-
+ *     owned apps share one relay (architecture.md §7's "The Platform
+ *     layer" - the concrete case that surfaced this gap). `acl.write:
+ *     'content'` (`@qu/space-core`'s kind-schema.js) is exactly this: the
+ *     owner (plus anyone they've explicitly `grantWriter(id, kind,
+ *     granteePub, {path})`ed - the SAME primitive `'named'` already uses,
+ *     just many-per-owner) may write, self-certifying via
+ *     `deriveContentNodeId(ownerPub, kind, path)`, no relay-side
+ *     membership needed to SUBSCRIBE either. This is a GLOBAL Qu
+ *     primitive, not an app-core invention - any many-per-owner content
+ *     Kind (a calendar event, a forum post, a chat room) wants the exact
+ *     same "who may edit THIS ONE thing" answer.
  *
  * `publicMeta()` BELOW IS NOT COSMETIC - it fixes a real bug found while
  * building the first real-relay App Shell demo (`demo/app-shell-relay.mjs`/
- * `demo/install-app-shell-demo.mjs`): `defineKind()` always derives
- * `'members'`-mode Kind's META-STAMP visibility as `'encrypted'` (see
- * kind-schema.js's own doc comment), REGARDLESS of what visibility the
- * Kind's own FIELDS declare. A Node's meta-stamp is its Y.Doc's very FIRST
- * update (`node.js`'s `stampMeta()`), sealed for whoever was in the
- * WRITER's OWN member list AT THAT MOMENT. Because Yjs integrates one
+ * `demo/install-app-shell-demo.mjs`): `defineKind()` always derives a
+ * `'members'`/`'content'`-mode Kind's META-STAMP visibility as
+ * `'encrypted'` (see kind-schema.js's own doc comment), REGARDLESS of what
+ * visibility the Kind's own FIELDS declare. A Node's meta-stamp is its
+ * Y.Doc's very FIRST update (`node.js`'s `stampMeta()`), sealed for
+ * whoever was a valid recipient AT THAT MOMENT. Because Yjs integrates one
  * author's updates as a strictly ordered, gapless sequence (see grant.js's
  * "WRITE-BEFORE-GRANT IS A TRAP" doc comment for the exact same property
  * applied to grants), a reader who cannot decrypt THAT FIRST update - e.g.
@@ -48,12 +58,12 @@
  * The fix stays entirely in THIS package - `@qu/space-core` needs no
  * change: `stampMeta()` reads `kindSchema.metaVisibility` off whatever
  * Kind-Schema object it's handed, so a Kind-Schema whose `acl.write` is
- * still `'members'` (so `Space.createNode()` still honors a
- * content-addressed `{id}`) but whose `metaVisibility` is overridden to
- * `'public'` gets exactly what this Kind actually needs: content-addressed
- * ids for write-ACL purposes, `'public'`-mode envelopes (no recipient list,
- * no decryption, no gap possible) for EVERY write including the founding
- * one. `Space.compactNode()`'s own uniform-visibility check (see space.js)
+ * still `'content'` (so id-derivation/grants keep working exactly as
+ * kind-schema.js defines them) but whose `metaVisibility` is overridden to
+ * `'public'` gets exactly what this Kind actually needs: real per-owner
+ * write-ACL AND `'public'`-mode envelopes (no recipient list, no
+ * decryption, no gap possible) for EVERY write including the founding one.
+ * `Space.compactNode()`'s own uniform-visibility check (see space.js)
  * still holds - meta and every field here are ALL `'public'` - so these
  * Nodes remain compactable too, a nice confirmation this isn't fighting
  * the framework's own invariants, just correcting `defineKind()`'s
@@ -143,7 +153,7 @@ export const platformAppsKind = defineKind('qu-platform-apps', {
   acl: { write: 'named' },
 });
 
-/** One page (docs §7). Node id = `deriveContentNodeId(ownerPub, 'qu-page', route)`. */
+/** One page (docs §7). Node id = `deriveContentNodeId(ownerPub, 'qu-page', route)`. Write-ACL: the owner, plus anyone explicitly `grantWriter(id, 'qu-page', granteePub, {path: route})`ed - see kind-schema.js's own "THE 'content' ACL mode" doc comment. */
 export const pageKind = publicMeta(
   defineKind('qu-page', {
     fields: {
@@ -152,27 +162,27 @@ export const pageKind = publicMeta(
       template: { shape: 'atomic', visibility: 'public' }, // a qu-template PATH
       content: { shape: 'text', visibility: 'public' }, // real Y.Text - collaborative editing "for free" (docs §7)
     },
-    acl: { write: 'members' },
+    acl: { write: 'content' },
   })
 );
 
-/** One template (docs §8). Node id = `deriveContentNodeId(ownerPub, 'qu-template', name)`. */
+/** One template (docs §8). Node id = `deriveContentNodeId(ownerPub, 'qu-template', name)`. Same write-ACL as `pageKind` - see its own doc comment. */
 export const templateKind = publicMeta(
   defineKind('qu-template', {
     fields: {
       html: { shape: 'text', visibility: 'public' },
     },
-    acl: { write: 'members' },
+    acl: { write: 'content' },
   })
 );
 
-/** One style sheet (docs §11). Node id = `deriveContentNodeId(ownerPub, 'qu-style', name)`. */
+/** One style sheet (docs §11). Node id = `deriveContentNodeId(ownerPub, 'qu-style', name)`. Same write-ACL as `pageKind` - see its own doc comment. */
 export const styleKind = publicMeta(
   defineKind('qu-style', {
     fields: {
       css: { shape: 'text', visibility: 'public' },
     },
-    acl: { write: 'members' },
+    acl: { write: 'content' },
   })
 );
 

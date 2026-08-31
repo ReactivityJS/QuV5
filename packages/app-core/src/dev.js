@@ -2,11 +2,18 @@
  * DEV / ADMIN API — bootstraps an empty Space into a working app (docs
  * §25): thin wrappers around `Space.createNode()`, nothing more. Every
  * function here writes AS `space`'s own identity - that identity IS the
- * app-admin for whatever it creates (see kinds.js's own doc comment on why
- * `qu-page`/`qu-template`/`qu-style` are `'members'`-ACL: this is what lets
- * `createNode()` honor the content-addressed `id` these functions compute).
- * A reader elsewhere (`ContentResolver`) must be told that SAME identity's
- * pubkey as `appAdminPub` to find anything these functions create.
+ * app-admin (and, for `qu-page`/`qu-template`/`qu-style`, the initial
+ * OWNER - see kinds.js's own doc comment on why those are `acl.write:
+ * 'content'`) for whatever it creates. `Space.createNode()` derives the
+ * content-addressed id AND issues the creating identity a transparent
+ * self-grant itself for `'content'`-ACL Kinds (see space.js's own doc
+ * comment) - these functions only ever pass `path`, never compute/pass an
+ * `id` by hand. A reader elsewhere (`ContentResolver`) must be told that
+ * SAME identity's pubkey as `appAdminPub` to find anything these functions
+ * create. Extending write access to a SPECIFIC other identity (e.g. "let
+ * user X edit exactly this page") is `space.grantWriter(id, kind,
+ * granteePub, {path})` - not something this file wraps, since it is
+ * already exactly one call.
  */
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
@@ -30,22 +37,40 @@ export async function createApp(space, { name, version = '1.0', rootTemplate = n
   return space.createNode(appManifestKind, { name, version, rootTemplate, defaultRoute, theme, metadata });
 }
 
-/** Creates a template at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-template', name)`. */
+/** Creates a template at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-template', name)` - `Space.createNode()` derives it (and self-grants) itself, see this file's own top doc comment. */
 export async function createTemplate(space, { name, html }) {
-  const id = await deriveContentNodeId(space.identity.signingPub, templateKind.kind, name);
-  return space.createNode(templateKind, { html }, { id });
+  return space.createNode(templateKind, { html }, { path: name });
 }
 
-/** Creates a stylesheet at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-style', name)`. */
+/** Creates a stylesheet at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-style', name)` - see `createTemplate()`'s own doc comment. */
 export async function createStyle(space, { name, css }) {
-  const id = await deriveContentNodeId(space.identity.signingPub, styleKind.kind, name);
-  return space.createNode(styleKind, { css }, { id });
+  return space.createNode(styleKind, { css }, { path: name });
 }
 
-/** Creates a page at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-page', route)`. `template` is a template NAME (resolved via content-id.js at render time), not a Node id. */
+/** Creates a page at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-page', route)` - see `createTemplate()`'s own doc comment. `template` is a template NAME (resolved via content-id.js at render time), not a Node id. */
 export async function createPage(space, { route, title, template = null, content = '' }) {
-  const id = await deriveContentNodeId(space.identity.signingPub, pageKind.kind, route);
-  return space.createNode(pageKind, { route, title, template, content }, { id });
+  return space.createNode(pageKind, { route, title, template, content }, { path: route });
+}
+
+/**
+ * Extends write access to ONE specific piece of `'content'`-ACL content
+ * (a page, a template, a style) to ANOTHER identity - "let user X edit
+ * exactly this page," the concrete mechanism behind e.g. a relay-admin's
+ * "darf dieser User in seinem eigenen Space CMS-Inhalte pflegen" toggle
+ * (architecture.md §7). A thin, discoverable wrapper: `space.grantWriter()`
+ * (`@qu/space-core`) already does the actual work in one call - this only
+ * computes the matching `id` from `(kind, path)` first, so a caller never
+ * has to import `deriveContentNodeId` themselves just to grant access.
+ * MUST be called by `space`'s OWN identity being the content's actual
+ * owner (or an existing grantee - `grantWriter()` doesn't itself check
+ * this locally, the relay/every other Space does, see kind-schema.js's
+ * own doc comment) - a grant from anyone else is verifiably worthless.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{kind: object, path: string, granteePub: Uint8Array}} params - `kind` is the Kind-Schema object itself (`pageKind`/`templateKind`/`styleKind`, or an app's own `'content'`-ACL Kind), `path` the SAME route/name the content was created with.
+ */
+export async function grantContentWriter(space, { kind, path, granteePub }) {
+  const id = await deriveContentNodeId(space.identity.signingPub, kind.kind, path);
+  return space.grantWriter(id, kind.kind, granteePub, { path });
 }
 
 /**

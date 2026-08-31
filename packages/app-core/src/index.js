@@ -21,6 +21,7 @@ export {
   createTemplate,
   createStyle,
   createPage,
+  grantContentWriter,
   publishRoute,
   installAppBundle,
   registerApp,

@@ -183,7 +183,7 @@ live if I still need it" — see §5.
   by someone with no prior relationship to the writer — a `'owner'`-ACL
   identity Node's `pub`/`epub` fields being the canonical case (§7). No
   encryption at any layer; anyone, relay included, can read and verify it.
-- **`acl.write` has three modes**, all enforced by BOTH the relay and every
+- **`acl.write` has FOUR modes**, all enforced by BOTH the relay and every
   receiving `Space` (same check, `_isAuthorizedWriter()`/`buildWriteAcl()`):
   - `'members'` (default) — any current Space member.
   - `'owner'` — self-certifying: `nodeId = "~" + base64url(sha256(kind +
@@ -192,6 +192,7 @@ live if I still need it" — see §5.
     relay/Space bootstrap state, and the owner never needs to be
     registered as a flat "member" anywhere. `createNode()` auto-derives
     this id; any explicit `{id}` you pass is ignored for this mode.
+    ONE Node per owner per Kind.
   - `'named'` — the owner plus anyone they've authorized via a signed
     `grant` message: `await space.grantWriter(nodeId, kind, granteePub)`.
     State is 100% derived from verified grants, never invented. **Grant
@@ -201,6 +202,25 @@ live if I still need it" — see §5.
     rejected it (a real Yjs property: per-author updates integrate in
     strict order, so a peer that ever rejects one can never integrate a
     LATER one from the same doc either).
+  - `'content'` — `'named'`'s MANY-per-owner counterpart: `nodeId =
+    "~content:" + base64url(sha256(kind + ":" + base64(ownerPub) + ":" +
+    path))` (`deriveContentNodeId()`, kind-schema.js) — a route, a
+    template name, an event id, anything stable identifies `path`. Pass
+    `{path}` (not `{id}`) to `createNode()` for this mode — it derives the
+    id AND issues the creating identity a TRANSPARENT self-grant itself,
+    before attaching/writing anything, so ordinary content-creation code
+    never has to call `grantWriter()` for its own writes (only to extend
+    access to someone ELSE: `space.grantWriter(nodeId, kind, granteePub,
+    {path})` — same call as `'named'`, just with `path`). No owner-pubkey
+    shortcut in the write-ACL check exists (an id alone can't be inverted
+    back to `path`), so EVERY reader — including one reading the
+    ORIGINAL owner's own writes — needs to have actually seen a `grant`;
+    a relay durably replays past grants to a newly-subscribing peer for
+    exactly this reason (`relay.js`'s `grantStorageKey()`, a separate
+    storage key from the Node's own envelope log so compaction never
+    wipes it). This is `@qu/app-core`'s `qu-page`/`qu-template`/`qu-style`
+    - genuine per-owner content on a Relay hosting several independently-
+    owned apps, not "any Space member may write any page."
 
 ## 4. Real network: WebSocket transport + relay
 

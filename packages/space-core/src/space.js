@@ -127,7 +127,7 @@ import * as Y from 'yjs';
 import { QuCrypto } from '@qu/core';
 import { SpaceNode, stampMeta } from './node.js';
 import { sealUpdate, sealPublicUpdate, verifyEnvelope, openUpdate } from './envelope.js';
-import { deriveOwnerNodeId } from './kind-schema.js';
+import { deriveOwnerNodeId, deriveContentNodeId } from './kind-schema.js';
 import { signGrant, verifyGrant } from './grant.js';
 
 const REMOTE_ORIGIN = Symbol('space-core:remote-update');
@@ -186,7 +186,17 @@ export class Space {
     this._grants = new Map();
     /** @type {Map<string, number>} nodeId -> active reference count - see `useNode()`'s own doc comment below. */
     this._refCounts = new Map();
-    this._transport.onMessage((msg) => this._handleIncoming(msg.data));
+    // Serialized (never overlapping) - see _handleIncoming()'s own doc comment on why processing
+    // order must match ARRIVAL order for a 'content'-ACL Kind's grant-then-write sequence to be
+    // race-free, and why relying on each _handleIncoming() call's own internal await timing to
+    // "happen to" preserve order is not safe.
+    this._incomingQueue = Promise.resolve();
+    this._transport.onMessage((msg) => {
+      // .catch() here, not just on the chain's tail: an uncaught rejection from any ONE message
+      // must never wedge every LATER message behind it (a permanently-rejected chain would stop
+      // calling _handleIncoming() at all, silently) - see _handleIncoming()'s own doc comment.
+      this._incomingQueue = this._incomingQueue.then(() => this._handleIncoming(msg.data)).catch((err) => this._bus?.emit('debug.space.incoming.error', { message: err?.message }));
+    });
     this._transport.onStatusChange?.((update) => this._handleTransportStatus(update));
     this._sendHello(); // fire-and-forget, see this file's own doc comment.
   }
@@ -249,7 +259,7 @@ export class Space {
    * Returns this Node's write-ACL check, shaped exactly like
    * `verifyEnvelope()` wants: `(pubBase64) => boolean|Promise<boolean>`.
    * Branches on `kindSchema.acl.write` (see kind-schema.js's own doc
-   * comment on the three modes):
+   * comment on the four modes):
    *   - `'members'` - unchanged from before this Task: any current Space
    *     member (`this._members`), a flat, synchronous Set lookup.
    *   - `'owner'`/`'named'` - self-certifying: a signer is authorized iff
@@ -260,18 +270,28 @@ export class Space {
    *     their pubkey appears in `this._grants.get(nodeId)`, which is
    *     populated ONLY by `_handleIncoming()` verifying an actual signed
    *     `grant` message (see grant.js), never trusted from anywhere else.
+   *   - `'content'` - `'named'`'s many-per-owner counterpart: PURELY
+   *     grant-derived, no owner-pubkey shortcut (an id alone cannot be
+   *     inverted back to the `path` that would let a verifier recompute it
+   *     - see kind-schema.js's own doc comment) - `this._grants.get(nodeId)`
+   *     only, populated by `createNode()`'s own transparent self-grant for
+   *     the creating owner, or by an explicit `grantWriter(..., {path})`.
    * @param {object} kindSchema
    * @param {string} nodeId
    */
   _isAuthorizedWriter(kindSchema, nodeId) {
-    if (kindSchema?.acl?.write !== 'owner' && kindSchema?.acl?.write !== 'named') {
+    const mode = kindSchema?.acl?.write;
+    if (mode !== 'owner' && mode !== 'named' && mode !== 'content') {
       const writerPubs = new Set(this._members.map((m) => QuCrypto.toBase64(m.pub)));
       return (pubB64) => writerPubs.has(pubB64);
+    }
+    if (mode === 'content') {
+      return (pubB64) => this._grants.get(nodeId)?.has(pubB64) ?? false;
     }
     return async (pubB64) => {
       const ownerNodeId = await deriveOwnerNodeId(QuCrypto.fromBase64(pubB64), kindSchema.kind);
       if (ownerNodeId === nodeId) return true;
-      if (kindSchema.acl.write === 'named') return this._grants.get(nodeId)?.has(pubB64) ?? false;
+      if (mode === 'named') return this._grants.get(nodeId)?.has(pubB64) ?? false;
       return false;
     };
   }
@@ -294,9 +314,10 @@ export class Space {
    * @param {string} nodeId
    * @param {string} kind
    * @param {Uint8Array} granteePub
+   * @param {{path?: string}} [options] - REQUIRED (and must match how `nodeId` was actually derived) for an `acl.write: 'content'` Kind - see kind-schema.js's own doc comment; omit for `'named'`.
    */
-  async grantWriter(nodeId, kind, granteePub) {
-    const message = await signGrant({ nodeId, kind, granteePub }, this._identity);
+  async grantWriter(nodeId, kind, granteePub, { path } = {}) {
+    const message = await signGrant({ nodeId, kind, granteePub, path }, this._identity);
     await this._applyGrant(message);
     this._transport.send(message);
   }
@@ -312,14 +333,26 @@ export class Space {
   /**
    * @param {object} kindSchema - From defineKind()/KindRegistry.
    * @param {Record<string, *>} initialFields - Only 'atomic-encrypted'/'text' fields (list fields start empty; use `.field(name).push()`).
-   * @param {{id?: string}} [options] - `id` is IGNORED for an `'owner'`/`'named'`-ACL kindSchema:
-   *   its Node id is never a caller's choice, it is `deriveOwnerNodeId(this._identity.signingPub,
-   *   kindSchema.kind)` (see kind-schema.js) - self-certifying by construction, so there is
-   *   nothing to pass. For `'members'`-ACL kinds, omitting `id` picks a random one, same as before.
+   * @param {{id?: string, path?: string}} [options] - `id` is IGNORED for an `'owner'`/`'named'`/
+   *   `'content'`-ACL kindSchema: its Node id is never a caller's choice. `'owner'`/`'named'` derive
+   *   it as `deriveOwnerNodeId(this._identity.signingPub, kindSchema.kind)` (see kind-schema.js) -
+   *   self-certifying by construction. `'content'` REQUIRES `path` instead and derives
+   *   `deriveContentNodeId(this._identity.signingPub, kindSchema.kind, path)` - see that function's
+   *   own doc comment - then issues itself a SELF-grant (`grantWriter(id, kindSchema.kind,
+   *   this._identity.signingPub, {path})`) BEFORE attaching/writing anything, so the creating
+   *   identity is immediately an authorized writer without any extra call of its own (see
+   *   grant.js's own "WRITE-BEFORE-GRANT IS A TRAP" - this ordering is what avoids it). For
+   *   `'members'`-ACL kinds, omitting `id` picks a random one, same as before.
    * @returns {Promise<SpaceNode>}
    */
-  async createNode(kindSchema, initialFields = {}, { id = crypto.randomUUID() } = {}) {
-    if (kindSchema.acl.write !== 'members') id = await deriveOwnerNodeId(this._identity.signingPub, kindSchema.kind);
+  async createNode(kindSchema, initialFields = {}, { id = crypto.randomUUID(), path } = {}) {
+    if (kindSchema.acl.write === 'content') {
+      if (!path) throw new Error(`createNode: kind "${kindSchema.kind}" is 'content'-ACL - "path" is required`);
+      id = await deriveContentNodeId(this._identity.signingPub, kindSchema.kind, path);
+      await this.grantWriter(id, kindSchema.kind, this._identity.signingPub, { path });
+    } else if (kindSchema.acl.write !== 'members') {
+      id = await deriveOwnerNodeId(this._identity.signingPub, kindSchema.kind);
+    }
     // _attach() FIRST, so the update listener is already registered before
     // stampMeta()'s mutation happens - see stampMeta()'s doc comment for
     // why doing this the other way round permanently breaks sync for
@@ -430,13 +463,13 @@ export class Space {
    * chosen) or needlessly hide a 'public' field from non-members (if
    * 'encrypted' were chosen). A REAL, accepted consequence worth being
    * explicit about: `kindSchema.metaVisibility` is ALWAYS `'encrypted'`
-   * for an `acl.write: 'members'` Kind (see kind-schema.js), regardless of
-   * any individual field's own visibility - so a `'members'`-mode Kind can
-   * only ever be compacted whole if EVERY one of its fields is ALSO
-   * `'encrypted'` (the common/default case). A `'members'`-mode Kind with
-   * even one `'public'`-visibility field can never satisfy this check;
-   * such a Kind's fields still sync/persist correctly, they simply can't
-   * be compacted as one unit under this design.
+   * for an `acl.write: 'members'`/`'content'` Kind (see kind-schema.js),
+   * regardless of any individual field's own visibility - so such a Kind
+   * can only ever be compacted whole if EVERY one of its fields is ALSO
+   * `'encrypted'` (the common/default case). A Kind with even one
+   * `'public'`-visibility field can never satisfy this check; such a
+   * Kind's fields still sync/persist correctly, they simply can't be
+   * compacted as one unit under this design.
    * @param {string} id
    */
   async compactNode(id) {
@@ -609,6 +642,24 @@ export class Space {
     this._emitChangeEvents(nodeId, node, { origin: 'local', notify, authorPub: this._identity.signingPub });
   }
 
+  /**
+   * The constructor's own `onMessage` callback SERIALIZES calls into this
+   * (a promise chain, never overlapping calls) - this method's own body may
+   * `await` (crypto verification is genuinely async), so without that
+   * guarantee two messages that ARRIVE in order could still COMPLETE their
+   * processing out of order, whichever happens to have fewer/faster awaits
+   * - normally harmless, but a real race for `acl.write: 'content'` (see
+   * kind-schema.js): unlike `'owner'`/`'named'`, EVERY reader (including
+   * for the content owner's OWN writes) needs an explicit `grant` message
+   * processed first, no self-certifying shortcut - a `grant` that arrived
+   * first but whose async verification finishes SECOND would otherwise let
+   * the very next write past it lose the authorization race and be
+   * rejected outright, permanently gapping that author's Yjs update
+   * sequence (see grant.js's "WRITE-BEFORE-GRANT IS A TRAP"). Serial
+   * processing in arrival order is what makes `Space.createNode()`'s
+   * transparent self-grant-then-write sequence for `'content'`-ACL Kinds
+   * safe for ANY remote reader, not just the creator's own local state.
+   */
   async _handleIncoming(message) {
     const { nodeId, envelope, type, pub, xPub, name } = message;
     if (type === 'subscribe' || type === 'unsubscribe' || type === 'hello') return; // all three are relay-bound, not peer-bound (see _sendSubscribeRequest/unsubscribeNode/_sendHello) - defensive no-op if one ever reaches here anyway.

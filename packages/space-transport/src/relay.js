@@ -223,6 +223,23 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
   function storageFor(kindSchema) {
     return kindSchema?.persistence === 'volatile' ? volatileStorage : storage;
   }
+
+  /**
+   * A grant's own storage key - DELIBERATELY separate from `nodeId` itself
+   * (which only ever holds ENVELOPES, see handleWrite()) even though both
+   * live in the SAME storage adapter: `Space.compactNode()`/`storage.
+   * replace(nodeId, ...)` (see @qu/space-core's space.js) OVERWRITES a
+   * Node's entire envelope log with one snapshot - if grants shared that
+   * same key, compacting a `'content'`-ACL Node would silently WIPE every
+   * grant it ever had, including the creating owner's own self-grant (see
+   * kind-schema.js's own "THE 'content' ACL mode" doc comment on why
+   * `'content'` has no owner-pubkey shortcut - unlike `'owner'`/`'named'`,
+   * losing a grant is not recoverable by re-deriving anything). A separate
+   * key means compaction never touches it.
+   */
+  function grantStorageKey(nodeId) {
+    return `grant:${nodeId}`;
+  }
   // A local, mutable copy - addMember() (see the returned API, and this
   // file's own "DYNAMIC MEMBERSHIP" doc comment below) appends to THIS
   // array/Set, never to the caller's original `members` argument.
@@ -248,7 +265,33 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
   /** @type {Map<string, number>} nodeId -> how many envelopes this relay's mirror currently holds for it - the `seq` a WRITE-ACK reports (see this file's own "WRITE-ACK" doc comment). Reset to 1 on a snapshot/compaction (`storage.replace()`), incremented on every ordinary append - mirrors exactly what `storage.load(nodeId)` would return the length of, without an extra read per write. */
   const mirrorCount = new Map();
 
-  hub.registerRelay(async (fromPeerId, message) => {
+  /**
+   * @type {Map<string, Promise>} peerId -> the tail of that peer's own
+   * serialized message-processing chain. Neither hub implementation
+   * (`ws-server-hub.js`'s `ws.on('message', ...)`, `in-process-transport.js`'s
+   * `sendToRelay()`) AWAITS the handler registered below before delivering
+   * the NEXT message - each incoming message's processing (crypto
+   * verification is genuinely async) can therefore COMPLETE out of arrival
+   * order, exactly the same race `@qu/space-core`'s `Space` had to close on
+   * its own incoming side (see that file's own `_handleIncoming()` doc
+   * comment) for the identical reason: `acl.write: 'content'` (kind-
+   * schema.js) needs a `grant` message's effect (`grants.set(...)` below)
+   * to be VISIBLE before the write that depends on it is checked, and
+   * "arrived first" only guarantees that if "finishes processing first"
+   * also holds - which async work alone does not guarantee. Serialized
+   * PER PEER (not globally): different peers' messages have no ordering
+   * dependency on each other, so there is no reason to serialize their
+   * throughput together.
+   */
+  const peerQueues = new Map();
+
+  hub.registerRelay((fromPeerId, message) => {
+    const tail = (peerQueues.get(fromPeerId) ?? Promise.resolve()).then(() => dispatch(fromPeerId, message));
+    peerQueues.set(fromPeerId, tail.catch(() => {})); // never let one bad message wedge this peer's later ones.
+    return tail;
+  });
+
+  async function dispatch(fromPeerId, message) {
     if (message?.type === 'hello') {
       await handleHello(fromPeerId, message);
       return;
@@ -266,12 +309,13 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
       return;
     }
     await handleWrite(fromPeerId, message);
-  });
+  }
   hub.registerDisconnect?.((peerId) => {
     const pubB64 = presence.pubFor?.(peerId) ?? null;
     presence.disconnect(peerId);
     if (pubB64) bus?.emit('debug.relay.presence.offline', { pub: pubB64 });
     for (const peerIds of subscribers.values()) peerIds.delete(peerId); // a dropped connection stops being a forward target for everything it had subscribed to - see this file's own "SUBSCRIBER-TRACKING" doc comment on why a fresh connection must re-subscribe from scratch anyway.
+    peerQueues.delete(peerId); // that peer's own queue can never receive another message - nothing left to serialize.
   });
 
   /** See this file's own "A THIRD message shape" doc comment. */
@@ -311,14 +355,16 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
       return;
     }
     const pubB64 = QuCrypto.toBase64(pub);
-    // Same reasoning as buildWriteAcl() below: an 'owner'/'named' Node opted OUT of the flat
-    // membership model already (Task 3's whole point) - requiring membership just to SUBSCRIBE to
-    // one would silently strand a legitimate owner/grantee who was never added as a "member"
-    // anywhere, now that subscription (not mere connection) is what gates live forwarding at all.
-    // A 'members'-mode Kind (or an unresolvable nodeId - e.g. relay-server.js's own
-    // `resolveKindSchema: () => true`) keeps the original membership gate exactly as before.
+    // Same reasoning as buildWriteAcl() below: an 'owner'/'named'/'content' Node opted OUT of the
+    // flat membership model already (Task 3's whole point, extended to 'content' by the
+    // per-owner-content-ACL task) - requiring membership just to SUBSCRIBE to one would silently
+    // strand a legitimate owner/grantee who was never added as a "member" anywhere, now that
+    // subscription (not mere connection) is what gates live forwarding at all. A 'members'-mode
+    // Kind (or an unresolvable nodeId - e.g. relay-server.js's own `resolveKindSchema: () => true`)
+    // keeps the original membership gate exactly as before.
     const kindSchema = resolveKindSchema(nodeId);
-    const requiresMembership = kindSchema?.acl?.write !== 'owner' && kindSchema?.acl?.write !== 'named';
+    const contentAclModes = new Set(['owner', 'named', 'content']);
+    const requiresMembership = !contentAclModes.has(kindSchema?.acl?.write);
     if (requiresMembership && !isSpaceMember(pubB64)) {
       bus?.emit('debug.relay.subscribe.rejected', { nodeId, reason: 'not-member' });
       return; // not a member - no history for you, mirrored ciphertext or not.
@@ -334,11 +380,19 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
 
     const nodeStorage = storageFor(kindSchema);
     if (!nodeStorage) return; // nothing to catch up on - but the subscription itself is tracked either way, live pushes still reach this peer from here on.
+    // Grants FIRST, always - see grantStorageKey()'s own doc comment: a 'content'-ACL Node's
+    // envelopes (including its very first, from the creating owner) are only verifiable by a
+    // subscriber who has already seen the matching grant, exactly the "WRITE-BEFORE-GRANT IS A
+    // TRAP" ordering grant.js documents, just applied to catch-up replay instead of a live sequence.
+    const storedGrants = await nodeStorage.load(grantStorageKey(nodeId));
+    for (const grantMessage of storedGrants) {
+      hub.deliverTo(fromPeerId, 'relay', grantMessage);
+    }
     const envelopes = await nodeStorage.load(nodeId);
     for (const envelope of envelopes) {
       hub.deliverTo(fromPeerId, 'relay', { nodeId, envelope });
     }
-    bus?.emit('debug.relay.subscribe.replayed', { nodeId, count: envelopes.length });
+    bus?.emit('debug.relay.subscribe.replayed', { nodeId, count: envelopes.length, grants: storedGrants.length });
   }
 
   /**
@@ -383,6 +437,16 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     grants.get(nodeId).add(granteePubB64);
     bus?.emit('debug.relay.grant.received', { nodeId, granteePub: granteePubB64 });
 
+    // Durable, same storage adapter envelopes use (a distinct key - see grantStorageKey()'s own
+    // doc comment) - without this, a peer who subscribes to a 'content'-ACL Node AFTER this grant
+    // was broadcast (the relay restarted, or they simply weren't connected yet - the App Shell's
+    // own core "visitor arrives after the app-admin already published" scenario) would never learn
+    // the creating owner was ever authorized at all: unlike 'named', 'content' has no owner-pubkey
+    // shortcut (kind-schema.js), so EVERY reader needs to have actually seen a grant, not just the
+    // relay's own in-memory `grants` map (which handleSubscribe()'s envelope replay alone can't fix).
+    const kindSchema = resolveKindSchema(nodeId);
+    await storageFor(kindSchema)?.append(grantStorageKey(nodeId), message);
+
     // Reactive, same pattern as addMember()'s 'member-joined' broadcast: every OTHER already-
     // connected peer's own Space needs this exact grant too, to accept the new writer's future
     // remote writes locally (see @qu/space-core's space.js `_isAuthorizedWriter()`/`_applyGrant()`).
@@ -408,19 +472,29 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
    * so presence/push don't yet extend to them - revisit in the relay-
    * federation task, which has to rethink this gate anyway.
    *
-   * `kindSchema?.acl?.write` anything OTHER than exactly `'owner'`/`'named'`
-   * (including a relay like `relay-server.js`'s own that deliberately never
-   * resolves a real Kind-Schema at all, see that file's own doc comment) is
-   * treated as `'members'` - the flat, always-available fallback ACL every
-   * relay can enforce with zero Kind-Schema knowledge, matching this
-   * relay's exact behavior before this Task existed.
+   * `kindSchema?.acl?.write` anything OTHER than exactly `'owner'`/
+   * `'named'`/`'content'` (including a relay like `relay-server.js`'s own
+   * that deliberately never resolves a real Kind-Schema at all, see that
+   * file's own doc comment) is treated as `'members'` - the flat,
+   * always-available fallback ACL every relay can enforce with zero
+   * Kind-Schema knowledge, matching this relay's exact behavior before
+   * this Task existed. `'content'` (many-per-owner, e.g. `@qu/app-core`'s
+   * `qu-page`/`qu-template`/`qu-style`) is PURELY grant-derived - unlike
+   * `'named'`, there is no owner-pubkey shortcut (a `nodeId` alone cannot
+   * be inverted back to the `path` a verifier would need to recompute it -
+   * see `@qu/space-core`'s kind-schema.js) - `Space.createNode()` issues
+   * the creating owner a transparent SELF-grant instead (see that file's
+   * own doc comment), which arrives here as an ordinary signed `grant`
+   * message exactly like any other, verified by the SAME `verifyGrant()`.
    */
   function buildWriteAcl(kindSchema, nodeId) {
-    if (kindSchema?.acl?.write !== 'owner' && kindSchema?.acl?.write !== 'named') return isSpaceMember;
+    const mode = kindSchema?.acl?.write;
+    if (mode !== 'owner' && mode !== 'named' && mode !== 'content') return isSpaceMember;
+    if (mode === 'content') return (pubB64) => grants.get(nodeId)?.has(pubB64) ?? false;
     return async (pubB64) => {
       const ownerNodeId = await deriveOwnerNodeId(QuCrypto.fromBase64(pubB64), kindSchema.kind);
       if (ownerNodeId === nodeId) return true;
-      if (kindSchema.acl.write === 'named') return grants.get(nodeId)?.has(pubB64) ?? false;
+      if (mode === 'named') return grants.get(nodeId)?.has(pubB64) ?? false;
       return false;
     };
   }
