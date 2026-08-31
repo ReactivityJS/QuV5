@@ -21,9 +21,9 @@
 import { QuCrypto } from '@qu/core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { deriveContentNodeId } from './content-id.js';
-import { appManifestKind, routeRegistryKind, pageKind, templateKind, styleKind } from './kinds.js';
+import { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind } from './kinds.js';
 
-const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, pageKind, templateKind, styleKind };
+const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind };
 
 /** Polls `checkFn` until it returns a non-null/non-undefined value, or `timeout` elapses (then returns `null`). Local-first: usually resolves on the very first check when content is already in local storage. */
 async function waitFor(checkFn, { timeout = 4000, interval = 20 } = {}) {
@@ -108,6 +108,28 @@ export class ContentResolver {
     }, { timeout });
     release();
     return page;
+  }
+
+  /** @returns {Promise<Array<{name: string}>>} Every template name this app owner has published (`dev.js`'s `createTemplate()` auto-registers - see `kinds.js`'s own `templateRegistryKind` doc comment) - for a CMS-style editor to list "every template," never for resolving one already-known name (see `resolveTemplate()`). Empty array if no registry exists yet. */
+  async resolveTemplateNames({ timeout } = {}) {
+    const templateRegistryKind = this._kinds.templateRegistryKind;
+    const id = await deriveOwnerNodeId(this._appAdminPub, templateRegistryKind.kind);
+    const { node, release } = await this._space.useNode(id, templateRegistryKind);
+    await waitFor(() => (node.field('templates').length > 0 ? true : null), { timeout: timeout ?? 500 });
+    const templates = await node.field('templates').toArray();
+    release();
+    return templates.filter(Boolean);
+  }
+
+  /** @returns {Promise<Array<{name: string}>>} Every style name this app owner has published - see `resolveTemplateNames()`'s own doc comment, identical shape. */
+  async resolveStyleNames({ timeout } = {}) {
+    const styleRegistryKind = this._kinds.styleRegistryKind;
+    const id = await deriveOwnerNodeId(this._appAdminPub, styleRegistryKind.kind);
+    const { node, release } = await this._space.useNode(id, styleRegistryKind);
+    await waitFor(() => (node.field('styles').length > 0 ? true : null), { timeout: timeout ?? 500 });
+    const styles = await node.field('styles').toArray();
+    release();
+    return styles.filter(Boolean);
   }
 
   /** @param {string} name @returns {Promise<string|null>} A template's HTML, or `null` if unpublished/unsynced within `timeout`. */

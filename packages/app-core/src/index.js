@@ -1,6 +1,8 @@
 export {
   appManifestKind,
   routeRegistryKind,
+  templateRegistryKind,
+  styleRegistryKind,
   pageKind,
   templateKind,
   styleKind,
@@ -21,6 +23,9 @@ export {
   createTemplate,
   createStyle,
   createPage,
+  editTemplate,
+  editStyle,
+  editPage,
   grantContentWriter,
   publishRoute,
   installAppBundle,

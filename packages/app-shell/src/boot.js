@@ -15,6 +15,7 @@
 import { AppRuntime, HashRouter, PlatformRuntime, adminAppManifestKind, adminPageKind, adminTemplateKind, adminStyleKind, ADMIN_REALM_ANCHOR } from '@qu/app-core';
 import { renderPage } from '@qu/app-renderer';
 import { wireAdminConsole } from './admin-actions.js';
+import { wireCms } from './cms-actions.js';
 
 /** Passed as `AppRuntime`'s `kinds` override for `realm: 'admin'` routes - see `resolver.js`'s own doc comment on what this parametrizes. No `routeRegistryKind` entry: `AppRuntime.resolveRoute()` (the only method `startPlatform()` calls) never touches it - see `runtime.js`. */
 const ADMIN_KINDS = { appManifestKind: adminAppManifestKind, pageKind: adminPageKind, templateKind: adminTemplateKind, styleKind: adminStyleKind };
@@ -55,6 +56,7 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
     onChange: async (route) => {
       const plan = await runtime.resolveRoute(route, resolveTimeout ? { timeout: resolveTimeout } : undefined);
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+      await wireCms({ mountEl, doc: window.document, space, appAdminPub });
     },
   });
   router.start();
@@ -82,6 +84,11 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  * `wireAdminConsole()` (`admin-actions.js`) is the one bit of framework
  * interactivity that content-declared markup attaches to afterward (its
  * own doc comment explains why that's not a `<script>`-execution loophole).
+ * `wireCms()` (`cms-actions.js`) runs unconditionally for every OTHER
+ * (non-admin) route, on the exact same "content stays inert markup" terms
+ * - a correct no-op unless the resolved page happens to be the built-in
+ * CMS editor (`cms-bundle.js`'s `installCms()`), which any app-admin can
+ * install into their OWN app's Space, same as `startApp()` does below.
  * @param {{space: import('@qu/space-core').Space, relayAdminPub: Uint8Array, connectAdminSpace?: () => Promise<import('@qu/space-core').Space>, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
  *   `connectAdminSpace` - lazily builds (and this function memoizes) the
  *   Space connected to the admin realm's own relay-forwarder; only called
@@ -112,6 +119,7 @@ export function startPlatform({ space, relayAdminPub, connectAdminSpace, mountEl
       const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
       if (match.realm === 'admin') wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
+      else await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
     },
   });
   router.start();

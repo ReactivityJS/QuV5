@@ -21,6 +21,8 @@ import { deriveContentNodeId } from './content-id.js';
 import {
   appManifestKind,
   routeRegistryKind,
+  templateRegistryKind,
+  styleRegistryKind,
   pageKind,
   templateKind,
   styleKind,
@@ -32,24 +34,136 @@ import {
   ADMIN_REALM_ANCHOR,
 } from './kinds.js';
 
+/** Polls `checkFn` (may itself be async - `'atomic'`-shape fields' own `.get()` is a Promise, `'text'`-shape's is not, see field.js) until it returns truthy or `timeout` elapses - local here (not imported from resolver.js) so this file stays independent of that one; same shape as its own `waitFor()`. Used only by the `edit*()` functions below, to make sure a Node this Space hasn't seen before has actually finished syncing (its founding grant included - see kind-schema.js's own "THE 'content' ACL mode" doc comment) before writing to it. */
+async function waitForSync(checkFn, { timeout = 3000, interval = 20 } = {}) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    if (await checkFn()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, interval));
+  }
+}
+
+/** A `'text'`-shape field (field.js's `TextField`) has no `set()` - only `get()`/`insert()`/`delete()` (real Y.Text, collaborative-editing-shaped) - so "replace the whole value" is delete-everything-then-insert, two ordinary local mutations, not one. Both are synchronous/fire-and-forget on the field itself (see field.js) - the resulting Yjs updates still seal/send exactly like any other write, just as two envelopes instead of one. */
+function replaceText(field, value) {
+  const current = field.get();
+  if (current) field.delete(0, current.length);
+  if (value) field.insert(0, value);
+}
+
 /** Creates (or overwrites) this Space identity's App Manifest - see kinds.js's `appManifestKind`. */
 export async function createApp(space, { name, version = '1.0', rootTemplate = null, defaultRoute = '/', theme = null, metadata = '' }) {
   return space.createNode(appManifestKind, { name, version, rootTemplate, defaultRoute, theme, metadata });
 }
 
-/** Creates a template at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-template', name)` - `Space.createNode()` derives it (and self-grants) itself, see this file's own top doc comment. */
+/** One entry, deduplicated by `name` - shared by `createTemplate()`/`createStyle()` below so a caller never has to remember a separate "publish" call the way `qu-page`'s own `publishRoute()` historically needed (kept separate, unchanged, for backward compatibility). */
+async function registerContentName(space, registryKind, fieldName, name) {
+  const id = await deriveOwnerNodeId(space.identity.signingPub, registryKind.kind);
+  const node = space.getNode(id) ?? (await space.createNode(registryKind, {}, { id }));
+  const existing = await node.field(fieldName).toArray();
+  if (!existing.some((entry) => entry?.name === name)) await node.field(fieldName).push({ name });
+  return node;
+}
+
+/** Creates a template at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-template', name)` - `Space.createNode()` derives it (and self-grants) itself, see this file's own top doc comment. Also registers `name` into `templateRegistryKind` (kinds.js) so `ContentResolver.resolveTemplateNames()` can enumerate it - see `editTemplate()` for updating an EXISTING template instead of creating a new one. */
 export async function createTemplate(space, { name, html }) {
-  return space.createNode(templateKind, { html }, { path: name });
+  const node = await space.createNode(templateKind, { html }, { path: name });
+  await registerContentName(space, templateRegistryKind, 'templates', name);
+  return node;
 }
 
-/** Creates a stylesheet at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-style', name)` - see `createTemplate()`'s own doc comment. */
+/** Creates a stylesheet at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-style', name)` - see `createTemplate()`'s own doc comment (registry included). */
 export async function createStyle(space, { name, css }) {
-  return space.createNode(styleKind, { css }, { path: name });
+  const node = await space.createNode(styleKind, { css }, { path: name });
+  await registerContentName(space, styleRegistryKind, 'styles', name);
+  return node;
 }
 
-/** Creates a page at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-page', route)` - see `createTemplate()`'s own doc comment. `template` is a template NAME (resolved via content-id.js at render time), not a Node id. */
+/** Creates a page at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-page', route)` - see `createTemplate()`'s own doc comment. `template` is a template NAME (resolved via content-id.js at render time), not a Node id. Does NOT auto-register into `routeRegistryKind` (unlike `createTemplate()`/`createStyle()`'s own registries) - call `publishRoute()` separately, unchanged pre-existing behavior. */
 export async function createPage(space, { route, title, template = null, content = '' }) {
   return space.createNode(pageKind, { route, title, template, content }, { path: route });
+}
+
+/**
+ * UPDATES a Node the identity behind `ownerPub` already owns (created
+ * earlier - by THIS process or another one entirely, possibly a
+ * DIFFERENT identity than `space.identity` - see "GRANTED CO-EDITORS"
+ * below) - unlike `createTemplate()`, this never calls `Space.createNode()`
+ * again (which would derive a BRAND NEW, empty local `Y.Doc` unrelated to
+ * whatever this Node's existing remote history already is - silently
+ * orphaning it, not "updating" it). Instead: `Space.useNode()` (subscribes
+ * if not already attached, replaying any existing history INCLUDING the
+ * founding grant - kind-schema.js's own "THE 'content' ACL mode" doc
+ * comment on why that replay matters here specifically) then a field
+ * write on the result. Waits for the CURRENT value to actually be visible
+ * first - not because the write itself needs it, but because `useNode()`
+ * only guarantees its OWN subscribe request has been SENT, not that the
+ * reply (grant + history) has ARRIVED yet; without waiting, a write issued
+ * too early could lose the same "write raced ahead of its own grant" race
+ * `Space.createNode()`'s self-grant sequencing exists to avoid. In the CMS
+ * UI's own real usage this is normally an instant no-op: the editor
+ * already resolved (and displayed) the current value before offering
+ * "Save" at all, so the Node is already fully synced locally by the time
+ * this runs.
+ *
+ * GRANTED CO-EDITORS: `ownerPub` defaults to `space.identity.signingPub`
+ * (the common "edit my own content" case), but a `grantContentWriter()`ed
+ * identity is NOT the owner - the Node's id is still derived from the
+ * OWNER's pubkey (`deriveContentNodeId(ownerPub, kind, path)`, unchanged
+ * by who is granted), so a grantee must pass the real owner's pubkey
+ * explicitly. `space.identity` still signs the write either way - THAT
+ * signature (not `ownerPub`) is what the relay checks against its grants.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{name: string, html: string, ownerPub?: Uint8Array, timeout?: number}} params
+ */
+export async function editTemplate(space, { name, html, ownerPub = space.identity.signingPub, timeout } = {}) {
+  const id = await deriveContentNodeId(ownerPub, templateKind.kind, name);
+  const { node, release } = await space.useNode(id, templateKind);
+  const synced = await waitForSync(() => node.field('html').get() !== '', { timeout });
+  if (!synced) {
+    release();
+    throw new Error(`editTemplate: template "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createTemplate() for a genuinely new one`);
+  }
+  replaceText(node.field('html'), html);
+  release();
+  return node;
+}
+
+/** Style counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). */
+export async function editStyle(space, { name, css, ownerPub = space.identity.signingPub, timeout } = {}) {
+  const id = await deriveContentNodeId(ownerPub, styleKind.kind, name);
+  const { node, release } = await space.useNode(id, styleKind);
+  const synced = await waitForSync(() => node.field('css').get() !== '', { timeout });
+  if (!synced) {
+    release();
+    throw new Error(`editStyle: style "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createStyle() for a genuinely new one`);
+  }
+  replaceText(node.field('css'), css);
+  release();
+  return node;
+}
+
+/** Page counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). Only fields actually passed are updated; omit `title`/`template`/`content` to leave them unchanged. `title`/`template` are `'atomic'`-shape (`field.set()`); `content` is `'text'`-shape, see `replaceText()`'s own doc comment. */
+export async function editPage(space, { route, title, template, content, ownerPub = space.identity.signingPub, timeout } = {}) {
+  const id = await deriveContentNodeId(ownerPub, pageKind.kind, route);
+  const { node, release } = await space.useNode(id, pageKind);
+  // Wait for BOTH title AND content (separate envelopes - see resolver.js's own resolvePage() doc
+  // comment on why title alone isn't enough) - content specifically needs its Y.Text placeholder to
+  // already exist before replaceText()/insert() below can touch it (field.js's TextField.ytext
+  // getter throws otherwise), regardless of whether THIS call is even editing `content`.
+  const synced = await waitForSync(async () => {
+    const t = await node.field('title').get();
+    return t !== '' && node.field('content').get() !== '';
+  }, { timeout });
+  if (!synced) {
+    release();
+    throw new Error(`editPage: page "${route}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createPage() for a genuinely new one`);
+  }
+  if (title !== undefined) await node.field('title').set(title);
+  if (template !== undefined) await node.field('template').set(template);
+  if (content !== undefined) replaceText(node.field('content'), content);
+  release();
+  return node;
 }
 
 /**

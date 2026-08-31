@@ -742,15 +742,45 @@ separate member list) - see that file's own doc comment for the full
 env-var reference, and `docker-compose.space-relay.yml`'s
 `qu-app-shell-relay` service for the same variables wired through Compose.
 
+**The built-in CMS editor** (`packages/app-shell/cms-bundle.js` +
+`src/cms-actions.js`) closes the "in-browser page/template editor" gap the
+paragraphs above used to leave open: the SAME "installed content, not
+hardcoded framework DOM-building" pattern as the admin console, applied to
+an ORDINARY app's own templates/styles/pages instead of the platform's
+alias registry. `installCms(space)` writes one template (`__cms__`) + one
+page (`/cms`) into an app-admin's OWN Space via the ordinary
+`createTemplate()`/`createPage()` - `/cms` isn't a reserved route
+anywhere, it 404s like any unpublished route until installed, and is
+deliberately left OUT of `publishRoute()`'s registry so it never appears
+on a visitor-facing sitemap, the same way `#/admin` never appears in
+ordinary app navigation. `boot.js` calls `cms-actions.js`'s `wireCms()`
+unconditionally after every `renderPage()` in both `startApp()` and
+`startPlatform()` (main-realm apps only, not yet the admin realm itself -
+see `cms-bundle.js`'s own doc comment on why) - a cheap, correct no-op
+unless the rendered page happens to be the CMS editor, exactly
+`wireAdminConsole()`'s own posture, never a `<script>`-execution loophole
+(Stufe 1 still strips those regardless). Three sections (templates,
+styles, pages), each a list (one entry per name/route, click to load its
+CURRENT content into a form and lock that key field) plus a create/edit
+form - saving calls `@qu/app-core`'s Dev API `create*()`/`edit*()`
+functions directly, so write-ACL is enforced by the relay exactly like any
+other write, never by this UI. `edit*()` (`dev.js`) is the genuinely new
+primitive underneath this: unlike `create*()`, it never calls
+`Space.createNode()` again (which would derive a brand-new, disconnected
+local Y.Doc and silently orphan the Node's existing remote history) -
+`Space.useNode()` plus a direct field write instead, waiting for the
+Node's own founding grant to have synced first. `grantContentWriter()`
+extends this to "let a SPECIFIC other identity maintain exactly this
+page" (the `ownerPub` parameter on every `edit*()` call is what makes a
+grantee's write actually target the OWNER's Node id, not their own).
+
 Field-level/namespace ACL (docs §21), signed Executable Modules (§17 Stufe
-3), publish/draft states (§26), an in-browser page/template editor (today
-only the CLI-driven Dev API and the admin console's own narrow
-"register an app" form write content - see this section's own closing
-paragraph on the CMS framing this points toward), and live/dynamic
-app-admin discovery (the "static list, relay restart" tradeoff above)
-remain
-explicitly future work — see docs/app-shell-arbeitsauftrag.md's own
-"Nicht-Ziele".
+3), publish/draft states (§26), editing the ADMIN REALM's own console
+content through this same CMS UI (its `qu-admin-*` Kinds have no
+registries/`edit*()` counterparts yet - `bin/install-admin-console.mjs`
+remains the only way to update it), and live/dynamic app-admin discovery
+(the "static list, relay restart" tradeoff above) remain explicitly future
+work — see docs/app-shell-arbeitsauftrag.md's own "Nicht-Ziele".
 
 **Reading this as a CMS, not just a router:** the admin console proves the
 general shape - "UI legt sich selbst innerhalb des Storage an und hat
@@ -758,16 +788,18 @@ zuständige Admins" (the user's own framing) - a piece of UI is installed
 Qu content, owned by an identity with write-ACL over it, resolved and
 rendered through the same `AppRuntime`/`renderPage()` pipeline regardless
 of whether that content is a single page (Template + Style + Page data) or
-a more elaborate app (a forum, a chat). Nothing here is admin-realm-
-specific in principle: `installAppBundle()`/`installAdminAppBundle()` are
-already the SAME shape, `ContentResolver`'s `kinds` override already makes
-"which Kind-Schema set (and therefore which confidentiality tier) a piece
-of content resolves against" a parameter, not a hardcoded choice. What is
-genuinely NOT built yet, for this to be a general CMS rather than one
-built-in console: an in-browser WYSIWYG/editing surface for a page's own
-`content`/`html`/`css` fields (today only the CLI-driven Dev API and the
-admin console's own narrow "register an app" form write anything - editing
-an ordinary page's text still means re-running an installer script), and a
-generalized "any sufficiently-trusted identity can install a NEW kind of
-app" story beyond the two built-in shapes (an ordinary `qu-app` and the
-admin realm) - both real, separate work, not attempted in this pass.
+a more elaborate app (a forum, a chat). The CMS editor above is that
+framing carried all the way through for an ORDINARY app: templates and
+styles are now genuinely stored and edited THROUGH the UI, and page data
+filling those templates is saved through the same editor, no CLI/Dev-API
+script required for day-to-day content work. Nothing here is
+admin-realm-specific in principle: `installAppBundle()`/
+`installAdminAppBundle()` are already the SAME shape, `ContentResolver`'s
+`kinds` override already makes "which Kind-Schema set (and therefore which
+confidentiality tier) a piece of content resolves against" a parameter,
+not a hardcoded choice. What is genuinely NOT built yet, for this to be a
+fully general CMS: editing the admin realm's own content through this same
+UI (see above), and a generalized "any sufficiently-trusted identity can
+install a NEW kind of app" story beyond the two built-in shapes (an
+ordinary `qu-app` and the admin realm) - both real, separate work, not
+attempted in this pass.

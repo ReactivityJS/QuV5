@@ -485,14 +485,20 @@ Route-Registry-Update. Ein Bundle-Import (`manifest.json` + `templates/` +
 ...) iteriert einfach über dieselben `createNode`-Aufrufe. Kein neuer
 Mechanismus, nur Tooling oberhalb der Kind-Schemas aus Abschnitt 5-11.
 
-## 26-27. Publishing/Drafts, CMS-Fähigkeit (unverändert, als Ausblick)
+## 26-27. Publishing/Drafts, CMS-Fähigkeit (Publishing/Drafts unverändert
+als Ausblick; ein In-Browser-CMS-Editor ist inzwischen gebaut)
 
-Beides bleibt bewusst außerhalb von Phase 1 (siehe Original-Abschnitt 34,
-unverändert übernommen). Wichtig für die Datenmodellierung jetzt: `content`
-als `Y.Text` bzw. später Section-Liste (Abschnitt 7) verhindert nichts davon
-— ein `status`-Feld (`draft|published|archived`) lässt sich jederzeit
-nachträglich zu `pageKind` hinzufügen, ohne bestehende Nodes zu brechen
-(Yjs-Maps sind da tolerant).
+Publish/Draft-States (ein `status`-Feld `draft|published|archived` auf
+`pageKind`) bleiben bewusst außerhalb von Phase 1 (siehe Original-Abschnitt
+34, unverändert übernommen) — `content` als `Y.Text` verhindert das nicht,
+das Feld lässt sich jederzeit nachträglich ergänzen (Yjs-Maps sind da
+tolerant). Die CMS-Fähigkeit selbst — Templates/Styles im Browser anlegen
+und Page-Daten über einen Editor speichern, statt nur über die CLI-Dev-API
+— ist dagegen inzwischen gebaut: `packages/app-shell/cms-bundle.js` +
+`src/cms-actions.js`, siehe `architecture.md` §7's "The built-in CMS
+editor" für die vollständige Beschreibung. Draft/Publish bleibt trotzdem
+offen — der Editor schreibt immer direkt, es gibt noch keinen
+Zwischenzustand.
 
 ## 28-29. Framework/Application Content trennen, Relay bleibt
 Application-blind (bestätigt, keine Änderung)

@@ -106,6 +106,24 @@ export const routeRegistryKind = defineKind('qu-route-registry', {
   acl: { write: 'named' },
 });
 
+/** Enumerates every `qu-template` name an app owner has published (one per app-admin, self-certifying) - the SAME "registry Node, not a query" pattern `routeRegistryKind` above already uses, for a CMS-style editor (`@qu/app-shell`'s `cms-ui.js`) to list "every template" without a relay-side "list every Node of this Kind" query, which doesn't exist. `dev.js`'s `createTemplate()` appends to this itself - a caller never has to remember a separate "publish" call the way pages/routes historically did. */
+export const templateRegistryKind = defineKind('qu-template-registry', {
+  fields: {
+    /** `Array<{name: string}>` - see resolver.js's `resolveTemplateNames()`. */
+    templates: { shape: 'list', visibility: 'public' },
+  },
+  acl: { write: 'named' },
+});
+
+/** Enumerates every `qu-style` name an app owner has published - see `templateRegistryKind`'s own doc comment, identical shape/reasoning. */
+export const styleRegistryKind = defineKind('qu-style-registry', {
+  fields: {
+    /** `Array<{name: string}>` - see resolver.js's `resolveStyleNames()`. */
+    styles: { shape: 'list', visibility: 'public' },
+  },
+  acl: { write: 'named' },
+});
+
 /**
  * THE PLATFORM APP REGISTRY (docs/app-shell-arbeitsauftrag.md §19-21) - one
  * per relay-admin, mapping a URL PATH PREFIX to the `qu-app` that owns it:

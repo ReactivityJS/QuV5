@@ -596,6 +596,16 @@ deployment:
 node demo/install-app-shell-demo.mjs --relay wss://your-host --dir /path/to/your/app-admin-identity
 ```
 
+For everyday content maintenance AFTER that initial seed — adding/editing
+templates, styles, and pages — an app-admin doesn't need to re-run an
+installer script at all: `@qu/app-core`'s `installCms()`
+(`packages/app-shell/cms-bundle.js`) writes a small in-browser CMS editor
+into the app's OWN Space once (`installCms(space)`, same identity as
+above), then `https://your-host/#/cms` (open as that SAME identity) lists
+existing templates/styles/pages and lets you create or edit them straight
+from the browser — see architecture.md §7's "The built-in CMS editor" for
+how it's wired.
+
 **PLATFORM mode (several apps, one relay, a confidential admin realm)** —
 instead of one fixed `QU_APP_ADMIN_PUB`, set `QU_RELAY_ADMIN_PUB` (takes
 priority when both are set) — see architecture.md §7's "The Platform

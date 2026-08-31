@@ -30,6 +30,16 @@ export class AppRuntime {
     return this._resolver.resolveRoutes(options);
   }
 
+  /** @returns {Promise<Array<{name}>>} See `ContentResolver.resolveTemplateNames()`. */
+  resolveTemplateNames(options) {
+    return this._resolver.resolveTemplateNames(options);
+  }
+
+  /** @returns {Promise<Array<{name}>>} See `ContentResolver.resolveStyleNames()`. */
+  resolveStyleNames(options) {
+    return this._resolver.resolveStyleNames(options);
+  }
+
   /**
    * Resolves everything needed to render one route in one call: the
    * Manifest (for `theme`/`defaultRoute`/the fallback root template), the
