@@ -48,14 +48,22 @@ services:
       # at / instead). Generate an app-admin identity yourself (QuCrypto.generateKeypair() from
       # @qu/core) and set its base64 signing pubkey here.
       QU_APP_ADMIN_PUB: ${QU_APP_ADMIN_PUB:-}
-      # PLATFORM mode instead of the single app above (docs §19-21) - set a relay-admin's base64
-      # signing pubkey here to serve the built-in #/admin/relay console instead, from which that
-      # identity can register however many apps under path prefixes. Takes priority over
-      # QU_APP_ADMIN_PUB when both are set - see relay-server.js's own doc comment.
+      # PLATFORM mode instead of the single app above (architecture.md §7) - set a relay-admin's
+      # base64 signing pubkey here to own the qu-platform-apps alias registry, from which that
+      # identity can register however many already-installed apps under path prefixes. Takes
+      # priority over QU_APP_ADMIN_PUB when both are set - see relay-server.js's own doc comment.
       QU_RELAY_ADMIN_PUB: ${QU_RELAY_ADMIN_PUB:-}
-      # PLATFORM mode only - JSON array of every app-admin pubkey this relay should accept content
-      # writes from (a STATIC, boot-time list - see relay-server.js's own doc comment on why).
+      # PLATFORM mode only - JSON array of every ORDINARY app-admin pubkey this relay should accept
+      # content writes from (a STATIC, boot-time list - see relay-server.js's own doc comment on
+      # why). Irrelevant to the admin realm itself - see QU_RELAY_ADMIN_MEMBERS_JSON below.
       QU_APP_ADMIN_PUBS: ${QU_APP_ADMIN_PUBS:-}
+      # The CONFIDENTIAL admin realm's own membership (architecture.md §7's "ADMIN REALM") - a
+      # wholly separate Space/relay-forwarder from the main one above, reached at /admin-ws, never
+      # open-join. JSON array of {"pub","xPub"} (base64) - every identity trusted to read/write the
+      # built-in admin console's own content. Empty/unset still starts the admin realm (so it CAN be
+      # bootstrapped - see packages/app-shell/bin/install-admin-console.mjs) but nobody can decrypt
+      # anything written to it yet.
+      QU_RELAY_ADMIN_MEMBERS_JSON: ${QU_RELAY_ADMIN_MEMBERS_JSON:-}
       # REQUIRED (once you have QU_APP_ADMIN_PUB) for the app-admin to actually be able to write
       # qu-page/qu-template/qu-style content - see @qu/app-core's kinds.js on why those are
       # 'members'-ACL. At minimum: [{"pub":"<same as QU_APP_ADMIN_PUB>","xPub":"<its X25519 pubkey>"}].

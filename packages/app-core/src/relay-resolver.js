@@ -33,7 +33,7 @@
  * `'members'`-mode member already does today.
  */
 import { deriveOwnerNodeId } from '@qu/space-core';
-import { appManifestKind, routeRegistryKind, pageKind, platformAppsKind } from './kinds.js';
+import { appManifestKind, routeRegistryKind, pageKind, platformAppsKind, adminAppManifestKind, adminPageKind, ADMIN_REALM_ANCHOR } from './kinds.js';
 
 /** @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], relayAdminPub?: Uint8Array}} params - `appAdminPub` (singular) is a convenience alias for `appAdminPubs: [appAdminPub]`. @returns {Promise<(nodeId: string) => object>} */
 export async function createAppResolveKindSchema({ appAdminPub, appAdminPubs, relayAdminPub } = {}) {
@@ -47,4 +47,21 @@ export async function createAppResolveKindSchema({ appAdminPub, appAdminPubs, re
     if (nodeId === platformId) return platformAppsKind;
     return pageKind;
   };
+}
+
+/**
+ * THE ADMIN REALM'S OWN `resolveKindSchema` - for the SEPARATE relay-
+ * forwarder instance that serves it (see `packages/app-shell/relay-server.js`'s
+ * own "ADMIN REALM" doc comment), never the main one above: this realm has
+ * no per-owner disambiguation to do at all (there is exactly one admin
+ * realm, anchored on the fixed `ADMIN_REALM_ANCHOR` - kinds.js's own "THE
+ * ADMIN REALM" doc comment), so the only real branch is "the one manifest
+ * id" vs. "everything else" - same "any one Kind stands in for the rest,
+ * the relay only ever consults `acl`/`persistence`" reasoning
+ * `createAppResolveKindSchema()` above already documents for `pageKind`.
+ * @returns {Promise<(nodeId: string) => object>}
+ */
+export async function createAdminResolveKindSchema() {
+  const manifestId = await deriveOwnerNodeId(ADMIN_REALM_ANCHOR, adminAppManifestKind.kind);
+  return (nodeId) => (nodeId === manifestId ? adminAppManifestKind : adminPageKind);
 }

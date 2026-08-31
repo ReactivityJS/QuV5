@@ -123,7 +123,21 @@ export const routeRegistryKind = defineKind('qu-route-registry', {
  */
 export const platformAppsKind = defineKind('qu-platform-apps', {
   fields: {
-    /** `Array<{prefix: string, appAdminPub: string, name: string}>` - see `dev.js`'s `registerApp()`/`platform.js`'s `PlatformRuntime`. */
+    /**
+     * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'admin'}>`
+     * - see `dev.js`'s `registerApp()`/`platform.js`'s `PlatformRuntime`.
+     * `realm: 'admin'` entries (`appAdminPub: null`) route into the
+     * confidential admin realm (see this file's own "THE ADMIN REALM" doc
+     * comment) instead of an ordinary owner-pubkey-addressed app - the
+     * SAME registry, the SAME `'public'`-visibility mapping (an alias
+     * existing, and which realm it points at, is not itself a secret -
+     * only the realm's own CONTENT is), no separate mechanism. This
+     * mapping is itself only a convenience: `PlatformRuntime.resolveForPath()`
+     * falls back to treating an UNREGISTERED prefix as a literal
+     * base64url-encoded owner pubkey when nothing here matches, so no
+     * app-admin needs a relay-admin's cooperation just to be reachable at
+     * all - registering a prefix here only ever adds a prettier alias.
+     */
     apps: { shape: 'list', visibility: 'public' },
   },
   acl: { write: 'named' },
@@ -161,3 +175,86 @@ export const styleKind = publicMeta(
     acl: { write: 'members' },
   })
 );
+
+/**
+ * THE ADMIN REALM (architecture.md §7 "The Platform layer", revised) — a
+ * genuinely CONFIDENTIAL counterpart to the five Kinds above, for content
+ * only a relay's own admins may ever read: same fields/shapes as
+ * `qu-app`/`qu-page`/`qu-template`/`qu-style`/`qu-platform-apps`, but every
+ * field keeps `defineKind()`'s DEFAULT `visibility: 'encrypted'` (no
+ * `publicMeta()` wrapper - that wrapper exists specifically to make
+ * `qu-page` etc. PLAINTEXT for anyone who joins the relay's ordinary,
+ * open-join Space; admin content wants the opposite). Encryption alone does
+ * nothing without a correspondingly SMALL, curated recipient list - see
+ * `packages/app-shell/relay-server.js`'s own "ADMIN REALM" doc comment: the
+ * admin realm is served from a wholly SEPARATE `Space`/relay-forwarder
+ * instance, whose `members` are the relay's configured admin identities
+ * ONLY (never open-join), so `'encrypted'`-visibility content here is
+ * sealed for exactly that small list - an ordinary visitor of the main,
+ * public Space is never a member of THIS one and so can never decrypt
+ * anything here, not even with the relay's own cooperation (see
+ * envelope.js - the relay itself never holds an X25519 private key).
+ *
+ * `acl.write: 'members'` here (not `'named'`, unlike `qu-app`/
+ * `qu-platform-apps` above) is DELIBERATE: the admin realm has no single
+ * "owner" identity - "wir berechtigen in dem Space alle Admins des
+ * Relays" (the user's own framing) - any configured admin should be able
+ * to manage it, exactly the same flat-membership-is-the-ACL model
+ * `qu-page`/`qu-template`/`qu-style` already use for an ordinary app's
+ * OWN co-authors, just scoped to a members list that IS the admin set
+ * instead of "whoever joined this relay."
+ *
+ * Node ids need no real owner pubkey to stay unique - there is exactly
+ * ONE admin realm per relay, so `ADMIN_REALM_ANCHOR` is a fixed, public,
+ * NON-cryptographic 32-byte constant (nobody's private key corresponds to
+ * it - it is never used to verify a signature, only fed through the exact
+ * same `deriveOwnerNodeId()`/`deriveContentNodeId()` functions every other
+ * Kind here already uses, purely as a stable hash input) - see
+ * `dev.js`'s `createAdminApp()`/`createAdminPage()`/etc. and
+ * `resolver.js`/`runtime.js`'s optional `kinds` override for how
+ * `ContentResolver`/`AppRuntime` reuse their EXACT existing id-derivation
+ * code paths for this, unchanged, just handed this constant instead of a
+ * real app-admin's pubkey.
+ */
+export const ADMIN_REALM_ANCHOR = new Uint8Array(32);
+ADMIN_REALM_ANCHOR.set(new TextEncoder().encode('qu-admin-realm'));
+
+/** Admin-realm counterpart to `appManifestKind` - see this file's own "THE ADMIN REALM" doc comment. */
+export const adminAppManifestKind = defineKind('qu-admin-app', {
+  fields: {
+    name: { shape: 'atomic' },
+    version: { shape: 'atomic' },
+    rootTemplate: { shape: 'atomic' },
+    defaultRoute: { shape: 'atomic' },
+    theme: { shape: 'atomic' },
+    metadata: { shape: 'atomic' },
+  },
+  acl: { write: 'members' },
+});
+
+/** Admin-realm counterpart to `pageKind`. Node id = `deriveContentNodeId(ADMIN_REALM_ANCHOR, 'qu-admin-page', route)`. */
+export const adminPageKind = defineKind('qu-admin-page', {
+  fields: {
+    route: { shape: 'atomic' },
+    title: { shape: 'atomic' },
+    template: { shape: 'atomic' },
+    content: { shape: 'text' },
+  },
+  acl: { write: 'members' },
+});
+
+/** Admin-realm counterpart to `templateKind`. Node id = `deriveContentNodeId(ADMIN_REALM_ANCHOR, 'qu-admin-template', name)`. */
+export const adminTemplateKind = defineKind('qu-admin-template', {
+  fields: {
+    html: { shape: 'text' },
+  },
+  acl: { write: 'members' },
+});
+
+/** Admin-realm counterpart to `styleKind`. Node id = `deriveContentNodeId(ADMIN_REALM_ANCHOR, 'qu-admin-style', name)`. */
+export const adminStyleKind = defineKind('qu-admin-style', {
+  fields: {
+    css: { shape: 'text' },
+  },
+  acl: { write: 'members' },
+});

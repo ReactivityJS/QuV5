@@ -6,4 +6,4 @@
  * `./shell.js` from this package) in a browser entry point.
  */
 export { startApp, startPlatform } from './boot.js';
-export { loadOrCreateIdentity, joinSpace, IDENTITY_STORAGE_KEY } from './identity.js';
+export { loadOrCreateIdentity, joinSpace, fetchMembers, IDENTITY_STORAGE_KEY } from './identity.js';

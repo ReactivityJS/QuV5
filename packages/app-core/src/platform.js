@@ -10,14 +10,35 @@
  * `routeRegistryKind` already uses one level down.
  *
  * `#/forum/topic/123` example: prefix `"forum"` resolves (via
- * `resolveForPath()`) to `{appAdminPub: <forum's own app-admin>, subPath:
- * "/topic/123"}` - `boot.js` then constructs an ordinary `AppRuntime` for
- * THAT `appAdminPub` and calls `.resolveRoute("/topic/123")` on it, no
- * different from a single-app deployment. The forum app's own content
- * (Manifest/Pages/Templates/Styles) never has to know it's mounted under a
- * prefix at all - `AppRuntime`/`HashRouter` stay completely unaware
- * `PlatformRuntime` exists, same layering `ContentResolver` already keeps
- * from `AppRuntime` (docs §22/§23).
+ * `resolveForPath()`) to `{realm: 'main', appAdminPub: <forum's own
+ * app-admin>, subPath: "/topic/123"}` - `boot.js` then constructs an
+ * ordinary `AppRuntime` for THAT `appAdminPub` and calls
+ * `.resolveRoute("/topic/123")` on it, no different from a single-app
+ * deployment. The forum app's own content (Manifest/Pages/Templates/
+ * Styles) never has to know it's mounted under a prefix at all -
+ * `AppRuntime`/`HashRouter` stay completely unaware `PlatformRuntime`
+ * exists, same layering `ContentResolver` already keeps from `AppRuntime`
+ * (docs §22/§23).
+ *
+ * TWO KINDS OF MATCH, both handled by the SAME `resolveForPath()`, neither
+ * hardcoded to any particular prefix STRING (architecture.md §7 - "kein
+ * Sonderfall zu normalen Spaces"):
+ *
+ *   1. A REGISTERED alias (`qu-platform-apps`, prettier, opt-in, relay-
+ *      admin-curated) - `{realm: 'main', appAdminPub, ...}` as above, or
+ *      `{realm: 'admin', ...}` (no `appAdminPub` - the confidential admin
+ *      realm has no single owner, see kinds.js's own "THE ADMIN REALM" doc
+ *      comment) when the relay-admin registered that prefix with
+ *      `registerApp(..., {realm: 'admin'})` - conventionally `"admin"`,
+ *      but that is a NAMING convention the bootstrap installer picks, not
+ *      something this class special-cases.
+ *   2. UNREGISTERED, the DEFAULT: every app is self-certifyingly reachable
+ *      at its OWN owner id with zero relay-admin involvement - the prefix
+ *      is tried as a literal base64url-encoded owner pubkey
+ *      (`QuCrypto.toBase64Url`/`fromBase64Url`, the same encoding
+ *      `content-id.js`'s own Node ids already use). An app-admin never
+ *      needs anyone's cooperation just to be reachable; `registerApp()`
+ *      only ever adds a prettier alias on top.
  */
 import { QuCrypto } from '@qu/core';
 import { deriveOwnerNodeId } from '@qu/space-core';
@@ -49,24 +70,36 @@ export class PlatformRuntime {
     this._relayAdminPub = typeof relayAdminPub === 'string' ? QuCrypto.fromBase64(relayAdminPub) : relayAdminPub;
   }
 
-  /** @returns {Promise<Array<{prefix: string, appAdminPub: Uint8Array, name: string}>>} Every app the relay-admin has registered - empty if none (yet). */
+  /** @returns {Promise<Array<{prefix: string, appAdminPub: Uint8Array|null, name: string, realm: 'main'|'admin'}>>} Every app/alias the relay-admin has registered - empty if none (yet). */
   async resolveApps({ timeout } = {}) {
     const id = await deriveOwnerNodeId(this._relayAdminPub, platformAppsKind.kind);
     const { node, release } = await this._space.useNode(id, platformAppsKind);
     await waitFor(() => (node.field('apps').length > 0 ? true : null), { timeout: timeout ?? 500 });
     const apps = await node.field('apps').toArray();
     release();
-    return apps.filter(Boolean).map((a) => ({ ...a, appAdminPub: QuCrypto.fromBase64(a.appAdminPub) }));
+    return apps
+      .filter(Boolean)
+      .map((a) => ({ ...a, appAdminPub: a.appAdminPub ? QuCrypto.fromBase64(a.appAdminPub) : null, realm: a.realm ?? 'main' }));
   }
 
   /**
    * @param {string} fullPath - the CURRENT route, e.g. `"/forum/topic/123"`.
-   * @returns {Promise<{prefix: string, appAdminPub: Uint8Array, name: string, subPath: string}|null>} `null` if no registered app owns this prefix.
+   * @returns {Promise<{prefix: string, subPath: string, realm: 'main'|'admin', appAdminPub?: Uint8Array, name: string|null}|null>}
+   *   `null` only if `prefix` matches NEITHER a registered alias NOR a
+   *   valid owner id (see this file's own top doc comment's "TWO KINDS OF
+   *   MATCH") - `boot.js`'s cue to render the landing page.
    */
   async resolveForPath(fullPath, options) {
     const { prefix, subPath } = splitPath(fullPath);
     const apps = await this.resolveApps(options);
     const match = apps.find((a) => a.prefix === prefix);
-    return match ? { ...match, subPath } : null;
+    if (match) return { ...match, subPath };
+    try {
+      const appAdminPub = QuCrypto.fromBase64Url(prefix);
+      if (appAdminPub.length !== 32) return null;
+      return { prefix, subPath, realm: 'main', appAdminPub, name: null };
+    } catch {
+      return null; // not a registered alias and not a well-formed owner id either.
+    }
   }
 }

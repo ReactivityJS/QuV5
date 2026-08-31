@@ -70,13 +70,16 @@ export function renderIndexHtml({ appAdminPub = null, relayAdminPub = null } = {
       <li>Für EINE einzelne App: setze deren öffentlichen Signing-Schlüssel (base64) als
         <code>QU_APP_ADMIN_PUB</code>. Für eine PLATTFORM aus mehreren Apps unter
         Pfad-Präfixen: setze stattdessen <code>QU_RELAY_ADMIN_PUB</code> (und ggf.
-        <code>QU_APP_ADMIN_PUBS</code> als JSON-Array bereits bekannter App-Admins) -
+        <code>QU_APP_ADMIN_PUBS</code>/<code>QU_RELAY_ADMIN_MEMBERS_JSON</code>) -
         siehe <code>architecture.md</code> §7. Danach den Relay neu starten.</li>
-      <li>Installiere eine erste Anwendung aus einem separaten Prozess, der den
+      <li>EINZELNE App: installiere sie aus einem separaten Prozess, der den
         privaten Schlüssel hält:
         <pre>node demo/install-app-shell-demo.mjs --relay wss://&lt;dieser-host&gt; --dir &lt;pfad-zu-deiner-app-admin-identity&gt;</pre>
-        In der Plattform-Variante danach unter <code>#/admin/relay</code> als
-        Relay-Admin unter dem gewünschten Pfad-Präfix registrieren.
+        PLATTFORM: jede App ist ohne Registrierung bereits unter ihrer eigenen
+        Owner-Id erreichbar; die eingebaute <code>#/admin</code>-Konsole selbst
+        wird einmalig über
+        <pre>node packages/app-shell/bin/install-admin-console.mjs --relay wss://&lt;dieser-host&gt;</pre>
+        installiert (siehe dessen eigener Kommentar).
       </li>
     </ol>
     <p>Siehe <code>docs/app-shell-arbeitsauftrag.md</code> und <code>architecture.md</code> §7.</p>

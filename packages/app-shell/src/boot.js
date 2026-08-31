@@ -12,11 +12,36 @@
  * them and hand it here - this function knows nothing about HOW it was
  * built, only that it behaves like one.
  */
-import { AppRuntime, HashRouter, PlatformRuntime } from '@qu/app-core';
+import { AppRuntime, HashRouter, PlatformRuntime, adminAppManifestKind, adminPageKind, adminTemplateKind, adminStyleKind, ADMIN_REALM_ANCHOR } from '@qu/app-core';
 import { renderPage } from '@qu/app-renderer';
-import { renderAdminPage, renderLandingPage } from './platform-ui.js';
+import { wireAdminConsole } from './admin-actions.js';
 
-const ADMIN_ROUTE_PREFIX = '/admin/relay';
+/** Passed as `AppRuntime`'s `kinds` override for `realm: 'admin'` routes - see `resolver.js`'s own doc comment on what this parametrizes. No `routeRegistryKind` entry: `AppRuntime.resolveRoute()` (the only method `startPlatform()` calls) never touches it - see `runtime.js`. */
+const ADMIN_KINDS = { appManifestKind: adminAppManifestKind, pageKind: adminPageKind, templateKind: adminTemplateKind, styleKind: adminStyleKind };
+
+/** @param {{mountEl: Element, doc: Document, platform: PlatformRuntime}} params - shown when no registered app's prefix (nor a well-formed owner id) matches the current route. The one piece of `startPlatform()` UI that ISN'T Qu content: by definition nothing here resolved, so there is no content to fetch it from - same "Framework Default" posture `@qu/app-renderer` already takes for a single app's own unresolved routes. */
+async function renderLandingPage({ mountEl, doc, platform }) {
+  const apps = await platform.resolveApps({ timeout: 1500 });
+  const container = doc.createElement('div');
+  container.style.cssText = 'font-family: sans-serif; max-width: 40rem; margin: 2rem auto; line-height: 1.5; padding: 0 1rem;';
+  const h1 = doc.createElement('h1');
+  h1.textContent = 'Qu App Shell';
+  container.appendChild(h1);
+  const p = doc.createElement('p');
+  p.textContent = apps.length > 0 ? 'Verfügbare Anwendungen:' : 'Noch keine Anwendung auf dieser Plattform installiert.';
+  container.appendChild(p);
+  const list = doc.createElement('ul');
+  for (const app of apps) {
+    const li = doc.createElement('li');
+    const a = doc.createElement('a');
+    a.href = `#/${app.prefix}/`;
+    a.textContent = app.name ?? app.prefix;
+    li.appendChild(a);
+    list.appendChild(li);
+  }
+  container.appendChild(list);
+  mountEl.replaceChildren(container);
+}
 
 /**
  * @param {{space: import('@qu/space-core').Space, appAdminPub: Uint8Array, mountEl: Element, window: {location: object, document: Document, addEventListener: Function, removeEventListener: Function}, styleId?: string, resolveTimeout?: number}} params
@@ -37,41 +62,56 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
 }
 
 /**
- * THE MULTI-APP / PLATFORM VARIANT (docs §19-21): instead of one fixed
- * `appAdminPub`, resolves the CURRENT route against the relay-admin's
- * `qu-platform-apps` registry (`@qu/app-core`'s `PlatformRuntime`) to
- * decide WHICH installed app owns it, then delegates to an ordinary
- * `AppRuntime` for that app's own `appAdminPub` - each app stays exactly
- * as unaware it's mounted under a prefix as it would be as the only app on
- * the relay. Two routes are intercepted BEFORE that delegation, never
- * forwarded to any app:
- *   - `#/admin/relay` (`ADMIN_ROUTE_PREFIX`) - the built-in relay-admin
- *     console (`platform-ui.js`'s `renderAdminPage()`) - not Space
- *     content, framework UI.
- *   - anything matching NO registered prefix - a plain landing page
- *     listing installed apps (`renderLandingPage()`), instead of an
- *     app-shaped 404 for a route that was never an app's to 404 on.
- * @param {{space: import('@qu/space-core').Space, relayAdminPub: Uint8Array, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
+ * THE MULTI-APP / PLATFORM VARIANT (architecture.md §7, revised): resolves
+ * the CURRENT route against `PlatformRuntime.resolveForPath()` - a
+ * registered alias (`qu-platform-apps`), or failing that, the path's first
+ * segment tried as a literal owner id - and delegates to an ordinary
+ * `AppRuntime`, no differently for the built-in admin realm than for any
+ * other app: NEITHER is special-cased on the route STRING (architecture.md
+ * §7 - "kein Sonderfall zu normalen Spaces"), only on the resolved match's
+ * `realm` - `'admin'` needs a DIFFERENT `Space` (`adminSpace`, connected
+ * lazily via `connectAdminSpace` - a genuinely separate, confidentially-
+ * membered Space, not just a differently-owned Node in the main one, see
+ * `kinds.js`'s own "THE ADMIN REALM" doc comment) and the `qu-admin-*` Kind
+ * set (`ADMIN_KINDS`) instead of the main `appAdminPub`. Only ONE thing
+ * here is genuinely framework UI, never Qu content: a route matching NO
+ * alias/owner id at all renders `renderLandingPage()` (see this file's own
+ * doc comment on it, right above) - the admin console's own markup, by
+ * contrast, is ordinary installed content (`bin/install-admin-console.mjs`),
+ * rendered through the EXACT SAME `renderPage()` call as any other app;
+ * `wireAdminConsole()` (`admin-actions.js`) is the one bit of framework
+ * interactivity that content-declared markup attaches to afterward (its
+ * own doc comment explains why that's not a `<script>`-execution loophole).
+ * @param {{space: import('@qu/space-core').Space, relayAdminPub: Uint8Array, connectAdminSpace?: () => Promise<import('@qu/space-core').Space>, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
+ *   `connectAdminSpace` - lazily builds (and this function memoizes) the
+ *   Space connected to the admin realm's own relay-forwarder; only called
+ *   the first time a route actually resolves into `realm: 'admin'` - most
+ *   visitors never trigger it. Omit if this deployment has no admin realm
+ *   wired up (e.g. some tests) - an admin-realm route then falls through
+ *   to the landing page instead of throwing.
  * @returns {{platform: PlatformRuntime, router: HashRouter}}
  */
-export function startPlatform({ space, relayAdminPub, mountEl, window, styleId, resolveTimeout }) {
+export function startPlatform({ space, relayAdminPub, connectAdminSpace, mountEl, window, styleId, resolveTimeout }) {
   const platform = new PlatformRuntime(space, { relayAdminPub });
   const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
+  let adminSpacePromise = null;
+  const getAdminSpace = () => (adminSpacePromise ??= connectAdminSpace());
+
   const router = new HashRouter({
     window,
     onChange: async (route) => {
-      if (route === ADMIN_ROUTE_PREFIX || route.startsWith(`${ADMIN_ROUTE_PREFIX}/`)) {
-        await renderAdminPage({ mountEl, doc: window.document, space, relayAdminPub, platform });
-        return;
-      }
       const match = await platform.resolveForPath(route, timeoutOpt);
-      if (!match) {
+      if (!match || (match.realm === 'admin' && !connectAdminSpace)) {
         await renderLandingPage({ mountEl, doc: window.document, platform });
         return;
       }
-      const runtime = new AppRuntime(space, { appAdminPub: match.appAdminPub });
+      const runtime =
+        match.realm === 'admin'
+          ? new AppRuntime(await getAdminSpace(), { appAdminPub: ADMIN_REALM_ANCHOR, kinds: ADMIN_KINDS })
+          : new AppRuntime(space, { appAdminPub: match.appAdminPub });
       const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+      if (match.realm === 'admin') wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
     },
   });
   router.start();

@@ -23,6 +23,8 @@ import { deriveOwnerNodeId } from '@qu/space-core';
 import { deriveContentNodeId } from './content-id.js';
 import { appManifestKind, routeRegistryKind, pageKind, templateKind, styleKind } from './kinds.js';
 
+const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, pageKind, templateKind, styleKind };
+
 /** Polls `checkFn` until it returns a non-null/non-undefined value, or `timeout` elapses (then returns `null`). Local-first: usually resolves on the very first check when content is already in local storage. */
 async function waitFor(checkFn, { timeout = 4000, interval = 20 } = {}) {
   const deadline = Date.now() + timeout;
@@ -37,15 +39,27 @@ async function waitFor(checkFn, { timeout = 4000, interval = 20 } = {}) {
 export class ContentResolver {
   /**
    * @param {import('@qu/space-core').Space} space
-   * @param {{appAdminPub: Uint8Array|string}} params - `appAdminPub` = the app owner's Ed25519 signing pubkey (raw bytes or base64), whose Nodes this resolver looks up. See this file's own doc comment for why only one owner is supported yet.
+   * @param {{appAdminPub: Uint8Array|string, kinds?: {appManifestKind, routeRegistryKind, pageKind, templateKind, styleKind}}} params
+   *   `appAdminPub` = the app owner's Ed25519 signing pubkey (raw bytes or
+   *   base64), whose Nodes this resolver looks up. See this file's own doc
+   *   comment for why only one owner is supported yet. `kinds` overrides
+   *   which Kind-Schemas each method resolves against - defaults to the
+   *   ordinary public `qu-app`/`qu-page`/`qu-template`/`qu-style` set;
+   *   `platform.js`'s admin-realm resolution passes the `qu-admin-*`
+   *   variants (`kinds.js`'s own "THE ADMIN REALM" doc comment) instead,
+   *   together with the fixed `ADMIN_REALM_ANCHOR` as `appAdminPub` - every
+   *   id-derivation call below is unchanged either way, only WHICH Kind
+   *   (and therefore which envelope visibility/ACL) it resolves against.
    */
-  constructor(space, { appAdminPub }) {
+  constructor(space, { appAdminPub, kinds = DEFAULT_KINDS }) {
     this._space = space;
     this._appAdminPub = typeof appAdminPub === 'string' ? QuCrypto.fromBase64(appAdminPub) : appAdminPub;
+    this._kinds = kinds;
   }
 
   /** @returns {Promise<{name, version, rootTemplate, defaultRoute, theme, metadata}|null>} `null` if no manifest is published (or it hasn't synced within `timeout`). */
   async resolveManifest({ timeout } = {}) {
+    const appManifestKind = this._kinds.appManifestKind;
     const id = await deriveOwnerNodeId(this._appAdminPub, appManifestKind.kind);
     const { node, release } = await this._space.useNode(id, appManifestKind);
     const manifest = await waitFor(async () => {
@@ -66,6 +80,7 @@ export class ContentResolver {
 
   /** @returns {Promise<Array<{route: string, title: string}>>} Every route this app has published (docs §12) - for enumeration (nav/sitemap), never for resolving one already-known route (see router.js). Empty array if no registry exists yet. */
   async resolveRoutes({ timeout } = {}) {
+    const routeRegistryKind = this._kinds.routeRegistryKind;
     const id = await deriveOwnerNodeId(this._appAdminPub, routeRegistryKind.kind);
     const { node, release } = await this._space.useNode(id, routeRegistryKind);
     await waitFor(() => (node.field('routes').length > 0 ? true : null), { timeout: timeout ?? 500 });
@@ -76,6 +91,7 @@ export class ContentResolver {
 
   /** @param {string} route @returns {Promise<{route, title, template, content}|null>} `null` if this route has no published page (or it hasn't synced within `timeout`) - the Router's signal to render a 404. */
   async resolvePage(route, { timeout } = {}) {
+    const pageKind = this._kinds.pageKind;
     const id = await deriveContentNodeId(this._appAdminPub, pageKind.kind, route);
     const { node, release } = await this._space.useNode(id, pageKind);
     const page = await waitFor(async () => {
@@ -96,6 +112,7 @@ export class ContentResolver {
 
   /** @param {string} name @returns {Promise<string|null>} A template's HTML, or `null` if unpublished/unsynced within `timeout`. */
   async resolveTemplate(name, { timeout } = {}) {
+    const templateKind = this._kinds.templateKind;
     const id = await deriveContentNodeId(this._appAdminPub, templateKind.kind, name);
     const { node, release } = await this._space.useNode(id, templateKind);
     const html = await waitFor(() => {
@@ -109,6 +126,7 @@ export class ContentResolver {
   /** @param {string} name @returns {Promise<string|null>} A stylesheet's CSS, or `null` if unpublished/unsynced within `timeout`. */
   async resolveStyle(name, { timeout } = {}) {
     if (!name) return null;
+    const styleKind = this._kinds.styleKind;
     const id = await deriveContentNodeId(this._appAdminPub, styleKind.kind, name);
     const { node, release } = await this._space.useNode(id, styleKind);
     const css = await waitFor(() => {

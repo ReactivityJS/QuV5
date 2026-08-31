@@ -1,8 +1,33 @@
-export { appManifestKind, routeRegistryKind, pageKind, templateKind, styleKind, platformAppsKind } from './kinds.js';
+export {
+  appManifestKind,
+  routeRegistryKind,
+  pageKind,
+  templateKind,
+  styleKind,
+  platformAppsKind,
+  adminAppManifestKind,
+  adminPageKind,
+  adminTemplateKind,
+  adminStyleKind,
+  ADMIN_REALM_ANCHOR,
+} from './kinds.js';
 export { deriveContentNodeId } from './content-id.js';
 export { ContentResolver } from './resolver.js';
 export { HashRouter } from './router.js';
 export { AppRuntime } from './runtime.js';
 export { PlatformRuntime } from './platform.js';
-export { createApp, createTemplate, createStyle, createPage, publishRoute, installAppBundle, registerApp } from './dev.js';
-export { createAppResolveKindSchema } from './relay-resolver.js';
+export {
+  createApp,
+  createTemplate,
+  createStyle,
+  createPage,
+  publishRoute,
+  installAppBundle,
+  registerApp,
+  createAdminApp,
+  createAdminTemplate,
+  createAdminStyle,
+  createAdminPage,
+  installAdminAppBundle,
+} from './dev.js';
+export { createAppResolveKindSchema, createAdminResolveKindSchema } from './relay-resolver.js';

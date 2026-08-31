@@ -576,31 +576,48 @@ deployment:
 node demo/install-app-shell-demo.mjs --relay wss://your-host --dir /path/to/your/app-admin-identity
 ```
 
-**PLATFORM mode (several apps, one relay-admin)** — instead of one fixed
-`QU_APP_ADMIN_PUB`, set `QU_RELAY_ADMIN_PUB` (takes priority when both are
-set) to serve the built-in `#/admin/relay` console instead of a single app —
-see architecture.md §7's "The Platform layer" for the full model
-(`qu-platform-apps` registry, `PlatformRuntime`, `registerApp()`). Every
-app-admin the relay should accept writes from still needs a STATIC,
-boot-time `QU_APP_ADMIN_PUBS` entry (a JSON array) — registering an app
-through the console only maps a path prefix to a pubkey the relay is
-already willing to trust, it does not itself grant that pubkey write access:
+**PLATFORM mode (several apps, one relay, a confidential admin realm)** —
+instead of one fixed `QU_APP_ADMIN_PUB`, set `QU_RELAY_ADMIN_PUB` (takes
+priority when both are set) — see architecture.md §7's "The Platform
+layer" for the full model. An app-admin the relay should accept ORDINARY
+content writes from still needs a STATIC, boot-time `QU_APP_ADMIN_PUBS`
+entry (a JSON array); an identity trusted to manage the built-in admin
+console needs a `QU_RELAY_ADMIN_MEMBERS_JSON` entry instead (a SEPARATE,
+genuinely confidential Space — its own `{pub, xPub}` list, never just a
+write-ACL grant):
 
 ```sh
 docker run -d -p 8082:8081 \
   -e QU_RELAY_ADMIN_PUB='<base64 relay-admin pubkey>' \
   -e QU_APP_ADMIN_PUBS='["<base64 app-admin pubkey 1>","<base64 app-admin pubkey 2>"]' \
+  -e QU_RELAY_ADMIN_MEMBERS_JSON='[{"pub":"<base64>","xPub":"<base64>"}]' \
   -v qu-app-shell-relay-data:/data \
   qu-app-shell-relay
 ```
 
-From a browser signed in as the relay-admin identity, open
-`https://your-host/#/admin/relay`: it lists already-registered apps and
-offers a form to register a new one (prefix + that app's app-admin pubkey +
-display name) — the app's own content still needs to be installed
-separately by whoever holds that app-admin's private key, e.g. via
-`installAppBundle()` (`@qu/app-core`'s Dev API) from your own script, the
-same way `demo/install-app-shell-demo.mjs` seeds a single app today.
+Bootstrap the built-in admin console ONCE (a real, separate process, run by
+whoever holds the identity listed in `QU_RELAY_ADMIN_MEMBERS_JSON` above —
+its private key never touches the relay):
+
+```sh
+node packages/app-shell/bin/install-admin-console.mjs \
+  --relay wss://your-host --prefix admin --dir ./admin-identity
+```
+
+This installs the console's own content (a `qu-admin-app` manifest, a
+template, one page with a "register an app" form) into the admin realm,
+then registers the `"admin"` alias in the MAIN space — a completely
+ordinary registry entry, not a special path the router hardcodes. From a
+browser signed in as that SAME identity, open `https://your-host/#/admin`:
+the console renders from installed content (not framework-built DOM), lists
+already-registered apps, and lets that identity register a new one — the
+app's own content still needs to be installed separately by whoever holds
+that app-admin's private key, e.g. via `installAppBundle()` (`@qu/app-core`'s
+Dev API) from your own script, the same way `demo/install-app-shell-demo.mjs`
+seeds a single app today. A visitor who is NOT in
+`QU_RELAY_ADMIN_MEMBERS_JSON` sees only a plain "not found" at `#/admin` —
+the admin realm's content is genuinely `'encrypted'`-visibility, sealed for
+that member list alone, not merely hidden by the console's own UI.
 
 ## 11. Granular events: notifications, presence, push, and debugging
 
