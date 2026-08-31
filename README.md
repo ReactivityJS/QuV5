@@ -86,49 +86,69 @@ npm test        # every package's tests, via node --test
 npm run demo
 ```
 
-Runs a self-contained, zero-setup demo: two identities exchange chat
+Runs a self-contained, zero-setup demo of the CORE framework (`@qu/core`/
+`@qu/space-core`, no App layer involved yet): two identities exchange chat
 messages through an in-process relay with presence-gated push routing,
 then a third, unrelated identity discovers and reads a public,
 self-certifying `'owner'`-ACL Node knowing only its owner's pubkey - no
-Space membership needed. For the real thing - two separate terminals
-talking over an actual WebSocket relay, or a browser client
-(`npm run demo:relay` also serves one on that same port) - see
-[`demo/README.md`](./demo/README.md).
+Space membership needed.
 
-## Deploying the relay
+**For the App layer** - a real relay, an Admin-UI, and a CMS-managed
+shell-app, all genuinely installed Qu content rather than hardcoded pages -
+see "Deploying the App Shell" right below; that's now also the featured
+"real, multi-process, real-browser" demo (`demo/README.md`'s own opening
+section points there first). The old hardcoded CLI/browser chat demo (two
+separate terminals over a real WebSocket relay) still exists, unchanged,
+under `npm run demo:legacy-chat-relay` - see `demo/README.md`'s "Real
+thing" section.
+
+## Deploying the App Shell (the default)
 
 ```sh
 docker compose -f docker-compose.space-relay.yml up -d
 ```
 
+Serves `@qu/app-shell` in PLATFORM mode (a Relay-Admin-owned `#/admin`
+console + as many CMS-managed shell-apps as you register) - a SEPARATE
+image from the core `@qu/space-transport` relay, so the framework layer
+never depends on an application-layer package (see
+`packages/space-transport/src/relay-server.js`'s own doc comment). This is
+now the DEFAULT service - no `--profile` needed.
+
+Starts fine with zero configuration (a setup page instead of a platform).
+The fastest way to an actually-configured platform - the built-in admin
+console AND one CMS-managed demo shell-app, both real content, not
+placeholders - is ONE command from your own machine (never inside the
+container: this relay must never see anyone's private key):
+
+```sh
+npm run bootstrap:platform
+```
+
+Generates a `relay-admin` and a `demo-app-admin` identity locally, writes
+their public keys into `.env` (safe to re-run, never overwrites anything
+you've configured by hand), and - once the relay above has (re)started
+with that config - installs the admin console, creates a demo shell-app,
+installs its CMS editor, and registers both under `#/admin` and `#/demo`.
+Prints the exact URLs to open plus ready-to-paste browser devtools
+snippets so you can actually act as either identity. See
+`packages/app-shell/bin/bootstrap-platform.mjs`'s own doc comment for the
+full "why," and the guide's own "App Shell deployment" subsection for the
+env-var reference if you'd rather configure it by hand.
+
+For a single, fixed app instead of a platform, set `QU_APP_ADMIN_PUB`
+directly (ignored once `QU_RELAY_ADMIN_PUB` - platform mode - is also
+set) - see the guide's own walkthrough.
+
+## Deploying the legacy chat relay
+
+The OLD, hardcoded chat demo relay (`@qu/space-transport`'s own
+`relay-server.js`) - kept as an explicit opt-in, not the default anymore:
+
+```sh
+docker compose -f docker-compose.space-relay.yml --profile legacy-chat up -d
+```
+
 See the guide's "Docker deployment" section for `QU_MEMBERS_JSON` (optional -
 only needed for `'members'`-mode ACL Kinds) and how to generate it, and for
 `QU_FEDERATE_UPSTREAM_URL` to federate with another relay.
-
-## Deploying the App Shell
-
-A SEPARATE relay/image from the one above - serves `@qu/app-shell` (a
-generic app defined entirely by Qu content) instead of the hardcoded chat
-demo, so it never makes `@qu/space-transport` depend on an application-layer
-package (see `packages/space-transport/src/relay-server.js`'s own doc
-comment):
-
-```sh
-docker compose -f docker-compose.space-relay.yml --profile app-shell up -d
-```
-
-Starts fine with no configuration (a setup page instead of an app) until you
-set `QU_APP_ADMIN_PUB` (a base64 Ed25519 PUBLIC key - this relay never sees
-the matching private key) and `QU_MEMBERS_JSON` for that same identity - see
-the guide's "App Shell deployment" subsection for the full walkthrough,
-including how to seed content with `demo/install-app-shell-demo.mjs`
-pointed at a real deployment.
-
-For SEVERAL apps behind one relay instead of one fixed app, set
-`QU_RELAY_ADMIN_PUB` (+ `QU_APP_ADMIN_PUBS`, a JSON array) instead - every
-app is reachable at its own owner id with zero registration, and a
-`QU_RELAY_ADMIN_MEMBERS_JSON`-configured admin can additionally register
-prettier path-prefix aliases through a built-in `#/admin` console - itself
-genuinely installed Qu content in its own confidential Space, not hardcoded
-UI. See architecture.md §7's "The Platform layer" and the guide's own
-"PLATFORM mode" walkthrough right after the single-app one above.

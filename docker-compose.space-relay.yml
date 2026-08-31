@@ -1,45 +1,23 @@
 services:
-  qu-space-relay:
-    build:
-      context: .
-      dockerfile: packages/space-transport/Dockerfile
-    ports:
-      - "${QU_RELAY_PORT:-8081}:8081"
-    environment:
-      QU_RELAY_PORT: "8081"
-      QU_RELAY_DATA_DIR: /data
-      # OPTIONAL - no default needed. A JSON array of every 'members'-mode
-      # ACL peer's {"pub","xPub"} (base64) - see docs/v5-space-core-guide.md
-      # for how to generate these, and for why 'owner'/'named'-ACL Kinds
-      # need no members configured at all. Leave QU_MEMBERS_JSON unset in
-      # your .env / shell if you have none yet - the relay starts fine.
-      QU_MEMBERS_JSON: ${QU_MEMBERS_JSON:-}
-      # OPTIONAL - a ws://.../wss://... URL of another relay to federate
-      # with (see federation.js). This relay's OWN identity (auto-generated
-      # and persisted under /data on first boot - see relay-identity.js) is
-      # what authenticates it to the upstream relay.
-      QU_FEDERATE_UPSTREAM_URL: ${QU_FEDERATE_UPSTREAM_URL:-}
-      # Default true (unset here = true) - anyone reaching this port can
-      # join the demo app at / as a new 'members'-mode member, no auth
-      # beyond well-formed keys. Set to the exact string "false" to lock
-      # membership to QU_MEMBERS_JSON only - see relay-server.js's own doc
-      # comment.
-      QU_ALLOW_JOIN: ${QU_ALLOW_JOIN:-}
-    volumes:
-      - qu-space-relay-data:/data
-    restart: unless-stopped
-
-  # The generic-app counterpart (docs/app-shell-arbeitsauftrag.md, architecture.md §7) - a SEPARATE
-  # relay/Space/port serving @qu/app-shell instead of the hardcoded chat demo above. Opt-in via the
-  # "app-shell" Compose profile so `docker compose up` alone still starts ONLY qu-space-relay,
-  # unchanged: `docker compose --profile app-shell up -d` starts both.
+  # The DEFAULT service (architecture.md §7, docs/app-shell-arbeitsauftrag.md) - `docker compose up`
+  # alone now starts THIS: @qu/app-shell in PLATFORM mode (a Relay-Admin-owned #/admin console + as
+  # many CMS-managed shell-apps as you register, docs §19-21), not the old hardcoded chat demo below
+  # (which moved to the opt-in "legacy-chat" profile - see its own comment further down). Starts fine
+  # with zero configuration (a setup page instead of an app/platform) - the fastest path to an
+  # actually-configured platform, including the built-in admin console and one CMS-managed demo
+  # shell-app, is ONE command from the host (never inside this container - see its own doc comment
+  # on why: this relay must never see anyone's private key):
+  #
+  #   node packages/app-shell/bin/bootstrap-platform.mjs
+  #
+  # See the root README.md's "Deploying the App Shell" section and docs/v5-space-core-guide.md §10
+  # for the full walkthrough and every env var below.
   qu-app-shell-relay:
-    profiles: ["app-shell"]
     build:
       context: .
       dockerfile: packages/app-shell/Dockerfile
     ports:
-      - "${QU_APP_SHELL_RELAY_PORT:-8082}:8081"
+      - "${QU_RELAY_PORT:-8081}:8081"
     environment:
       QU_RELAY_PORT: "8081"
       QU_RELAY_DATA_DIR: /data
@@ -64,15 +42,55 @@ services:
       # bootstrapped - see packages/app-shell/bin/install-admin-console.mjs) but nobody can decrypt
       # anything written to it yet.
       QU_RELAY_ADMIN_MEMBERS_JSON: ${QU_RELAY_ADMIN_MEMBERS_JSON:-}
-      # REQUIRED (once you have QU_APP_ADMIN_PUB) for the app-admin to actually be able to write
-      # qu-page/qu-template/qu-style content - see @qu/app-core's kinds.js on why those are
-      # 'members'-ACL. At minimum: [{"pub":"<same as QU_APP_ADMIN_PUB>","xPub":"<its X25519 pubkey>"}].
-      QU_MEMBERS_JSON: ${QU_APP_SHELL_MEMBERS_JSON:-}
-      QU_ALLOW_JOIN: ${QU_APP_SHELL_ALLOW_JOIN:-}
+      # OPTIONAL - qu-page/qu-template/qu-style are 'content'-ACL (self-certifying per-owner grants,
+      # @qu/app-core's kinds.js), not 'members'-ACL, so an app-admin needs no entry here just to
+      # WRITE their own content. Only relevant for an app's OWN, separately-defined 'members'-ACL
+      # Kinds, if any - see docs/v5-space-core-guide.md for how to generate {"pub","xPub"} entries.
+      QU_MEMBERS_JSON: ${QU_MEMBERS_JSON:-}
+      # Default true (unset here = true) - lets a visiting browser self-register (POST /join), which
+      # a real deployment usually wants (visitors need SOME membership to even subscribe to
+      # 'members'-ACL content, if you add any - see relay-server.js's own doc comment). Set to the
+      # exact string "false" to lock it down.
+      QU_ALLOW_JOIN: ${QU_ALLOW_JOIN:-}
     volumes:
       - qu-app-shell-relay-data:/data
     restart: unless-stopped
 
+  # THE OLD, hardcoded chat demo relay (packages/space-transport's own relay-server.js) - kept as an
+  # explicit opt-in, not the default anymore: `docker compose --profile legacy-chat up -d` starts
+  # BOTH this and qu-app-shell-relay above, on separate ports. Nothing here changed except which
+  # service is the default - see demo/README.md's own "Real thing" section for how to use it.
+  qu-space-relay:
+    profiles: ["legacy-chat"]
+    build:
+      context: .
+      dockerfile: packages/space-transport/Dockerfile
+    ports:
+      - "${QU_LEGACY_CHAT_RELAY_PORT:-8083}:8081"
+    environment:
+      QU_RELAY_PORT: "8081"
+      QU_RELAY_DATA_DIR: /data
+      # OPTIONAL - no default needed. A JSON array of every 'members'-mode
+      # ACL peer's {"pub","xPub"} (base64) - see docs/v5-space-core-guide.md
+      # for how to generate these, and for why 'owner'/'named'-ACL Kinds
+      # need no members configured at all. Leave QU_LEGACY_CHAT_MEMBERS_JSON
+      # unset in your .env / shell if you have none yet - the relay starts fine.
+      QU_MEMBERS_JSON: ${QU_LEGACY_CHAT_MEMBERS_JSON:-}
+      # OPTIONAL - a ws://.../wss://... URL of another relay to federate
+      # with (see federation.js). This relay's OWN identity (auto-generated
+      # and persisted under /data on first boot - see relay-identity.js) is
+      # what authenticates it to the upstream relay.
+      QU_FEDERATE_UPSTREAM_URL: ${QU_FEDERATE_UPSTREAM_URL:-}
+      # Default true (unset here = true) - anyone reaching this port can
+      # join the demo app at / as a new 'members'-mode member, no auth
+      # beyond well-formed keys. Set to the exact string "false" to lock
+      # membership to QU_LEGACY_CHAT_MEMBERS_JSON only - see relay-server.js's
+      # own doc comment.
+      QU_ALLOW_JOIN: ${QU_LEGACY_CHAT_ALLOW_JOIN:-}
+    volumes:
+      - qu-space-relay-data:/data
+    restart: unless-stopped
+
 volumes:
-  qu-space-relay-data:
   qu-app-shell-relay-data:
+  qu-space-relay-data:

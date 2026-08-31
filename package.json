@@ -10,12 +10,14 @@
   "scripts": {
     "test": "node --test",
     "demo": "node demo/auto-demo.mjs",
+    "relay": "node packages/app-shell/relay-server.js",
+    "bootstrap:platform": "node packages/app-shell/bin/bootstrap-platform.mjs",
     "demo:app-shell": "node demo/app-shell-demo.mjs",
     "demo:app-shell-relay": "node demo/app-shell-relay.mjs",
     "demo:app-shell-install": "node demo/install-app-shell-demo.mjs",
-    "demo:relay": "node demo/relay.mjs",
-    "demo:alice": "node demo/chat.mjs alice",
-    "demo:bob": "node demo/chat.mjs bob",
+    "demo:legacy-chat-relay": "node demo/relay.mjs",
+    "demo:legacy-chat-alice": "node demo/chat.mjs alice",
+    "demo:legacy-chat-bob": "node demo/chat.mjs bob",
     "build:web": "node demo/web/build.mjs",
     "build:app-shell-web": "node demo/app-shell-web/build.mjs"
   },
