@@ -1,53 +1,60 @@
 #!/usr/bin/env node
 /**
- * PLATFORM BOOTSTRAP — `npm run bootstrap:platform`. The ONE command that
- * takes an already-running (or freshly restarted) `relay-server.js` - via
- * Docker (`docker-compose.space-relay.yml`, now the DEFAULT service, no
- * `--profile` needed - see that file's own doc comment) or bare
- * (`node packages/app-shell/relay-server.js`) - all the way to "Admin-UI
- * at #/admin and a real, CMS-managed shell-app at #/demo," replacing what
- * used to be several separate manual steps (generate an identity, edit env
- * vars, restart, run `bin/install-admin-console.mjs`, write a separate
- * app-install script, register it) with one, idempotent, safe-to-re-run
- * command.
+ * PLATFORM BOOTSTRAP — `npm run bootstrap:platform`. Two independent jobs,
+ * always run in this order but decoupled from HOW you deploy:
  *
- * TWO PASSES ARE SOMETIMES NEEDED, NOT A BUG: `QU_RELAY_ADMIN_PUB`/
- * `QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_MEMBERS_JSON` are read by the relay
- * at BOOT time only (same static-list posture `QU_MEMBERS_JSON` already
- * takes - see `relay-server.js`'s own doc comment on why: `resolveKindSchema`
- * is a plain synchronous function, never re-evaluated once the process is
- * up). The FIRST run here generates identities (if none exist yet, under
- * `--dir`) and writes/updates `--dotenv` (named to avoid colliding with
- * Node's OWN built-in `--env-file` flag) with their PUBLIC keys only -
- * this script runs on YOUR machine, the private keys it generates never
- * touch the relay, same posture every other bootstrap tool in this repo
- * already takes (`bin/install-admin-console.mjs`, `demo/install-app-shell-
- * demo.mjs`). If the relay hasn't picked that config up yet, the
- * installation phase below can't complete (its writes never get
- * write-acked - see `waitUntilAllWritesAcked()`) - this script detects
- * that and tells you to (re)start the relay, then re-run it. Every write
- * here is idempotent or dedup-checked (see inline comments), so re-running
- * after a successful pass is a harmless no-op, e.g. to re-install a newer
- * admin console.
+ *   1. Generate (or load) a `relay-admin` + `demo-app-admin` identity and
+ *      print the exact `environment:` block your deployment needs -
+ *      `docker-compose.space-relay.yml`, a `docker stack deploy` stack
+ *      file, a Kubernetes manifest, systemd env vars, whatever you
+ *      actually use. This script NEVER writes that config for you and
+ *      NEVER assumes anything about your deployment method (no `.env`
+ *      file, no container filesystem, no `docker exec`/`docker compose`
+ *      awareness at all) - `QU_RELAY_ADMIN_PUB`/`QU_APP_ADMIN_PUBS`/
+ *      `QU_RELAY_ADMIN_MEMBERS_JSON` are read by the relay at BOOT time
+ *      only (same static-list posture `QU_MEMBERS_JSON` already takes -
+ *      see `relay-server.js`'s own doc comment on why), so YOU decide how
+ *      that config reaches your relay and gets it (re)started with it -
+ *      this script only ever talks to the relay over its public URL
+ *      (`--relay`), exactly like `bin/install-admin-console.mjs`/
+ *      `demo/install-app-shell-demo.mjs` already do, so it works
+ *      identically regardless of whether that relay lives in a Compose
+ *      service, a Swarm/`docker stack` service, a Kubernetes Pod, or bare
+ *      metal.
+ *   2. Once the relay is actually reachable AND configured with those
+ *      exact keys (verified by attempting a real write and checking it
+ *      gets acked - a relay still running the OLD config accepts the
+ *      connection fine but silently drops the write), installs the admin
+ *      console, creates a demo shell-app with its own CMS editor
+ *      installed, and registers both `#/admin` and `#/demo` - replacing
+ *      what used to be several separate manual steps with one, idempotent,
+ *      safe-to-re-run command.
+ *
+ * TWO RUNS ARE NORMAL ON A FRESH SETUP, NOT A BUG: run it once to get the
+ * config block, paste it into your OWN deployment config, redeploy
+ * however you redeploy, then run it again (same command, same `--dir`) to
+ * actually install content - it reuses the SAME already-generated
+ * identities the second time, never regenerating them. Every write here
+ * is idempotent or dedup-checked (see inline comments), so a THIRD, later
+ * run (e.g. to re-install a newer admin console) is a harmless no-op too.
  *
  * MEMBERSHIP: the confidential admin realm never self-registers (no
  * `/admin-ws`-equivalent open-join exists, on purpose - kinds.js's own
  * "THE ADMIN REALM" doc comment) - `QU_RELAY_ADMIN_MEMBERS_JSON` is the
- * only way in, hence the env-file step above. The ordinary MAIN space's
+ * only way in, hence printing it below. The ordinary MAIN space's
  * `'members'`-ACL Kinds, by contrast, already support self-join
  * (`QU_ALLOW_JOIN`, default true) - this script uses exactly that (a plain
  * `POST /join`, the SAME mechanism a real browser visitor's `shell.js`
- * uses) for both identities below rather than also managing
- * `QU_MEMBERS_JSON`, so it never clobbers a `.env` you've customized for
- * your OWN apps' own `'members'`-ACL content.
+ * uses) for both identities, so it never needs `QU_MEMBERS_JSON` printed
+ * or configured at all.
  *
  * Usage:
  *   node packages/app-shell/bin/bootstrap-platform.mjs \
  *     [--relay ws://localhost:8081] [--dir packages/app-shell/.platform-identities] \
- *     [--dotenv .env] [--prefix demo]
+ *     [--prefix demo]
  */
-import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
-import { join, dirname, resolve } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { QuCrypto } from '@qu/core';
@@ -71,14 +78,12 @@ import { adminConsoleBundle } from '../admin-console-bundle.js';
 import { installCms } from '../cms-bundle.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(HERE, '..', '..', '..');
 
 function parseArgs(argv) {
-  const opts = { relay: 'ws://localhost:8081', dir: join(HERE, '..', '.platform-identities'), envFile: join(REPO_ROOT, '.env'), prefix: 'demo' };
+  const opts = { relay: 'ws://localhost:8081', dir: join(HERE, '..', '.platform-identities'), prefix: 'demo' };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--relay') opts.relay = argv[++i];
     else if (argv[i] === '--dir') opts.dir = argv[++i];
-    else if (argv[i] === '--dotenv') opts.envFile = argv[++i];
     else if (argv[i] === '--prefix') opts.prefix = argv[++i];
   }
   return opts;
@@ -118,88 +123,28 @@ async function ensureIdentity(name, dir) {
   return identity;
 }
 
-const MANAGED_ENV_KEYS = ['QU_RELAY_ADMIN_PUB', 'QU_APP_ADMIN_PUBS', 'QU_RELAY_ADMIN_MEMBERS_JSON'];
-
-function readEnvValue(content, key) {
-  const line = content.split('\n').find((l) => l.startsWith(`${key}=`));
-  return line ? line.slice(key.length + 1) : undefined;
-}
-
 /**
- * Merges `relayAdminPubB64`/`appAdminPubB64`/`relayAdminMember` into
- * `envFile`, replacing only the keys THIS script owns (`MANAGED_ENV_KEYS`) -
- * every other line (your own `QU_MEMBERS_JSON`, `QU_FEDERATE_UPSTREAM_URL`,
- * ...) survives untouched. `QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_MEMBERS_JSON`
- * are JSON ARRAYS a real deployment likely already curated by hand (other
- * app-admins, other trusted admin-realm members) - this APPENDS this
- * script's own entries if missing rather than overwriting the array
- * wholesale, so re-running never silently drops someone else's entry.
- * `QU_RELAY_ADMIN_PUB` is a single scalar (there is only ever ONE
- * relay-admin identity by design) - replaced outright if different.
- * Creates the file if it doesn't exist yet.
+ * Prints the exact three env vars a PLATFORM-mode relay needs, ready to
+ * paste into whatever `environment:`/env-var mechanism your deployment
+ * actually uses (Compose, a `docker stack deploy` stack file, Kubernetes,
+ * systemd, ...) - see this file's own top doc comment on why this script
+ * never tries to write that config for you.
  */
-async function mergeEnvFile(envFile, { relayAdminPubB64, appAdminPubB64, relayAdminMember }) {
-  let existing = '';
-  try {
-    existing = await readFile(envFile, 'utf8');
-  } catch (err) {
-    if (err.code !== 'ENOENT') throw err;
-  }
-
-  const existingAppAdminPubs = JSON.parse(readEnvValue(existing, 'QU_APP_ADMIN_PUBS') || '[]');
-  const appAdminPubs = existingAppAdminPubs.includes(appAdminPubB64) ? existingAppAdminPubs : [...existingAppAdminPubs, appAdminPubB64];
-
-  const existingAdminMembers = JSON.parse(readEnvValue(existing, 'QU_RELAY_ADMIN_MEMBERS_JSON') || '[]');
-  const adminMembers = existingAdminMembers.some((m) => m.pub === relayAdminMember.pub) ? existingAdminMembers : [...existingAdminMembers, relayAdminMember];
-
-  const values = {
-    QU_RELAY_ADMIN_PUB: relayAdminPubB64,
-    QU_APP_ADMIN_PUBS: JSON.stringify(appAdminPubs),
-    QU_RELAY_ADMIN_MEMBERS_JSON: JSON.stringify(adminMembers),
-  };
-
-  const kept = existing.split('\n').filter((line) => !MANAGED_ENV_KEYS.some((key) => line.startsWith(`${key}=`)) && !line.startsWith('# --- written by bootstrap-platform.mjs'));
-  while (kept.length && kept[kept.length - 1].trim() === '') kept.pop();
-  const block = ['# --- written by bootstrap-platform.mjs - safe to regenerate, do not hand-edit these lines ---', ...Object.entries(values).map(([key, value]) => `${key}=${value}`)];
-  const next = [...kept, '', ...block, ''].join('\n');
-  await writeFile(envFile, next, 'utf8');
-}
-
-/**
- * Detects `docker exec`-into-a-running-container execution - `/.dockerenv`
- * is created by the Docker runtime itself inside every container it starts
- * (an established, widely-relied-on convention, not something this repo
- * invents). MATTERS A LOT here specifically: `mergeEnvFile()` above writes
- * `--dotenv` (default `.env` at the repo root) on WHATEVER filesystem this
- * process is running on - if that's the CONTAINER's own (ephemeral, not
- * volume-mounted - only `/data` is), the result is a `.env` file `docker
- * compose` on the HOST never sees, since Compose's `${VAR}` substitution
- * reads the HOST's own `.env` at `docker compose up` time, not anything
- * inside an already-running container. Worse, "restart the relay" (this
- * script's own generic advice when writes never get acked) is not
- * ACTIONABLE from inside a `docker exec` shell at all - a process has no
- * way to restart its own container from within. See `printDockerRecoveryHint()`
- * for what to say instead.
- */
-async function isInContainer() {
-  try {
-    await access('/.dockerenv');
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function printDockerRecoveryHint(envFile) {
-  console.log('  You appear to be running INSIDE the container (docker exec) - a .env written here');
-  console.log(`  (${envFile}) lives on the CONTAINER's own filesystem, not your host's, so \`docker`);
-  console.log('  compose\' never sees it, and this container cannot restart itself from within. Run');
-  console.log('  these from your HOST shell instead (NOT inside this container):');
-  console.log('');
-  console.log('    docker compose -f docker-compose.space-relay.yml cp qu-app-shell-relay:/app/.env ./.env');
-  console.log('    docker compose -f docker-compose.space-relay.yml up -d   # recreates the container with it');
-  console.log('');
-  console.log('  Then run this exact `docker exec ... npm run bootstrap:platform` command again to finish.');
+function printConfigBlock({ relayAdmin, demoAppAdmin }) {
+  const relayAdminPub = QuCrypto.toBase64(relayAdmin.signingPub);
+  const appAdminPub = QuCrypto.toBase64(demoAppAdmin.signingPub);
+  const relayAdminMembers = JSON.stringify([{ pub: relayAdminPub, xPub: QuCrypto.toBase64(relayAdmin.xPublicKey) }]);
+  const appAdminPubs = JSON.stringify([appAdminPub]);
+  console.log('Paste these into your deployment\'s environment config (e.g. docker-compose.space-relay.yml\'s');
+  console.log('qu-app-shell-relay service, or your own stack/Kubernetes/systemd config) - PUBLIC keys only,');
+  console.log('nothing secret here:\n');
+  console.log(`  QU_RELAY_ADMIN_PUB=${relayAdminPub}`);
+  console.log(`  QU_APP_ADMIN_PUBS=${appAdminPubs}`);
+  console.log(`  QU_RELAY_ADMIN_MEMBERS_JSON=${relayAdminMembers}\n`);
+  console.log('  # docker-compose.space-relay.yml / a docker-compose-syntax stack file - environment: block:');
+  console.log(`      QU_RELAY_ADMIN_PUB: '${relayAdminPub}'`);
+  console.log(`      QU_APP_ADMIN_PUBS: '${appAdminPubs}'`);
+  console.log(`      QU_RELAY_ADMIN_MEMBERS_JSON: '${relayAdminMembers}'\n`);
 }
 
 /** Plain `POST /join`, the SAME self-registration mechanism a real browser's `shell.js`/`identity.js` uses - see this file's own top doc comment on why this is used instead of also managing `QU_MEMBERS_JSON`. */
@@ -225,7 +170,7 @@ async function waitForHealthy(httpBase, { attempts = 15, interval = 1000 } = {})
   return false;
 }
 
-/** Tracks every LOCAL write a Space issues and whether the relay write-acked it - see `demo/install-app-shell-demo.mjs`'s own identical helper for the full "why" (sealing is async, `await write()` alone doesn't guarantee the envelope left the socket). Used here for a SECOND purpose too: if the relay's config doesn't actually include this identity yet (stale `.env`, not yet restarted), the write is silently rejected and NEVER acked - `waitUntilAllWritesAcked()` timing out is this script's signal to say so, instead of falsely reporting success. */
+/** Tracks every LOCAL write a Space issues and whether the relay write-acked it - see `demo/install-app-shell-demo.mjs`'s own identical helper for the full "why" (sealing is async, `await write()` alone doesn't guarantee the envelope left the socket). Used here for a SECOND purpose too: if the relay is still running WITHOUT this identity in its config, the write is silently rejected and NEVER acked - `waitUntilAllWritesAcked()` timing out is this script's signal to say so, instead of falsely reporting success. */
 function trackWrites(bus) {
   const state = { expected: 0, acked: 0 };
   bus.on('debug.space.write.local', () => state.expected++);
@@ -244,7 +189,7 @@ async function waitUntilAllWritesAcked(state, { timeout = 5000, settle = 300, in
 }
 
 async function main() {
-  const { relay, dir, envFile, prefix } = parseArgs(process.argv.slice(2));
+  const { relay, dir, prefix } = parseArgs(process.argv.slice(2));
   const httpBase = relay.replace(/^ws/, 'http');
 
   console.log('Qu V5 — Platform bootstrap\n');
@@ -255,29 +200,13 @@ async function main() {
   console.log(`  demo-app-admin  pub: ${QuCrypto.toBase64(demoAppAdmin.signingPub)}`);
   console.log(`  (private keys stay local, under ${dir})\n`);
 
-  await mergeEnvFile(envFile, {
-    relayAdminPubB64: QuCrypto.toBase64(relayAdmin.signingPub),
-    appAdminPubB64: QuCrypto.toBase64(demoAppAdmin.signingPub),
-    relayAdminMember: { pub: QuCrypto.toBase64(relayAdmin.signingPub), xPub: QuCrypto.toBase64(relayAdmin.xPublicKey) },
-  });
-  console.log(`  wrote platform config -> ${envFile}\n`);
-
-  const inContainer = await isInContainer();
-  if (inContainer) {
-    console.log('⚠ Running inside a container (docker exec) - this .env write alone will NOT reach');
-    console.log('  `docker compose` on your host. Read on: this run may still finish (if the relay was');
-    console.log('  already configured by a PREVIOUS bootstrap run), but if it ends with the same warning');
-    console.log('  as below, that\'s why.\n');
-  }
-
   console.log(`Checking ${httpBase}/healthz ...`);
   const healthy = await waitForHealthy(httpBase, { attempts: 5, interval: 800 });
   if (!healthy) {
-    console.log(`\n❌ Relay not reachable at ${relay}.`);
-    console.log('   Start it, THEN re-run this script:');
-    console.log('     docker compose -f docker-compose.space-relay.yml up -d --build   # Docker, now the default service');
-    console.log('   or:');
-    console.log('     node packages/app-shell/relay-server.js                          # bare, same defaults');
+    console.log(`\n❌ Relay not reachable at ${relay}.\n`);
+    printConfigBlock({ relayAdmin, demoAppAdmin });
+    console.log('Deploy your relay with that config (however you deploy - docker compose, docker stack');
+    console.log('deploy, Kubernetes, bare metal, ...), then re-run this exact command to finish.');
     process.exitCode = 1;
     return;
   }
@@ -375,13 +304,14 @@ async function main() {
   demoTransport.close();
 
   if (!adminOk || !mainOk || !demoOk) {
-    console.log('\n⚠ Some writes were never write-acked by the relay - this usually means it is still running with an');
-    console.log('  OLDER config (the .env change above needs a restart to take effect).');
-    if (inContainer) {
-      printDockerRecoveryHint(envFile);
-    } else {
-      console.log('  (Re)start the relay, then re-run this exact command - every step here is safe to repeat.');
-    }
+    console.log('\n⚠ Some writes were never write-acked by the relay - it is reachable, but NOT (yet) running');
+    console.log('  with this identity\'s config (a relay ignores QU_RELAY_ADMIN_PUB/QU_APP_ADMIN_PUBS/');
+    console.log('  QU_RELAY_ADMIN_MEMBERS_JSON changes until it is actually (re)started with them - a plain');
+    console.log('  restart of an already-running process/container does NOT re-read them by itself either,');
+    console.log('  the process/container needs to be RECREATED with the new config).\n');
+    printConfigBlock({ relayAdmin, demoAppAdmin });
+    console.log('Update your deployment with that config and redeploy/recreate it (however you deploy),');
+    console.log('then re-run this exact command - it reuses the same identities and finishes from here.');
     process.exitCode = 1;
     return;
   }

@@ -573,49 +573,57 @@ comment, keeps the framework layer from ever depending on an
 application-layer package).
 
 **Fastest path to something actually running** — the built-in admin
-console AND one CMS-managed demo shell-app, both real content:
+console AND one CMS-managed demo shell-app, both real content, the same
+two steps regardless of how you deploy (Compose, `docker stack`,
+Kubernetes, bare metal):
 
 ```sh
 docker compose -f docker-compose.space-relay.yml up -d   # starts the (now default) app-shell relay
-npm run bootstrap:platform                                # run on your HOST - see below if you'd rather not need Node.js there
+npm run bootstrap:platform                                # run from ANYWHERE with network access to it
 ```
-
-**No Node.js on your host, Docker only** — run the SAME script via
-`docker exec` (the container already has Node + every dependency) TWICE,
-with one step in between. This is not optional ordering: the first run
-writes a `.env` with the newly generated public keys, but INSIDE the
-container's own filesystem — `docker compose` only ever reads `.env` from
-your host's project directory, at `up`/recreate time, so that write alone
-changes nothing no matter how many times you repeat it in place, and the
-container has no way to restart itself from within either. The script
-detects this and tells you so, with this exact recipe, if a run can't
-finish yet:
-
-```sh
-docker exec -ti $(docker ps -qf name=<your-compose-project>) npm run bootstrap:platform
-# -> generates identities, writes .env INSIDE the container, can't finish yet
-docker compose -f docker-compose.space-relay.yml cp qu-app-shell-relay:/app/.env ./.env
-docker compose -f docker-compose.space-relay.yml up -d   # recreates the container WITH that .env
-docker exec -ti $(docker ps -qf name=<your-compose-project>) npm run bootstrap:platform
-# -> same identities (already generated and persisted), now finishes
-```
-
-No private key is lost between the two runs - the identities are already
-persisted (under `packages/app-shell/.platform-identities/` inside the
-container) after the first one; the second just reuses and finishes with
-them.
 
 `bootstrap:platform` (`packages/app-shell/bin/bootstrap-platform.mjs`)
-generates a `relay-admin` and a `demo-app-admin` identity locally, writes
-their PUBLIC keys into `.env` (merging into whatever you've already
-configured there, never overwriting your own entries), and — once the
-relay has (re)started with that config, which the first run tells you to
-do — installs the admin console, creates a demo shell-app with its own CMS
-editor installed, and registers both `#/admin` and `#/demo`. It prints the
-exact URLs plus ready-to-paste browser devtools snippets so you can
-actually act as either identity locally. Safe to re-run any time (every
-step checks first, never re-creates content that already exists — see its
-own doc comment on why that matters for `Y.Text` fields specifically).
+never writes your deployment's config for you and makes no assumption
+about how you deploy — no `.env` file, no container filesystem, no
+`docker exec`/`docker compose` awareness at all, on purpose (env vars are
+read once at relay BOOT time — see `relay-server.js`'s own doc comment —
+so however that config reaches your relay and gets it recreated with it
+is entirely up to you). It generates a `relay-admin` and a
+`demo-app-admin` identity locally (once, reused on every later run), then:
+
+- relay not yet configured with them → **prints the exact
+  `QU_RELAY_ADMIN_PUB`/`QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_MEMBERS_JSON`
+  values** — paste them into `docker-compose.space-relay.yml` (or your own
+  `docker stack`/Kubernetes/systemd config) yourself, redeploy, then run
+  the exact same command again;
+- relay already configured with them (this second run, or any later one)
+  → installs the admin console, creates a demo shell-app with its own CMS
+  editor installed, registers both `#/admin` and `#/demo`, and prints the
+  exact URLs plus ready-to-paste browser devtools snippets so you can
+  actually act as either identity.
+
+Two runs on a first-ever setup is expected, not a bug — see the script's
+own top doc comment for the full "why" (in short: it can only tell your
+paste took effect by attempting a real write and seeing whether the relay
+acks it, since there's no other way to observe another process's env
+vars). Safe to re-run any time afterward too — every step checks first,
+never re-creates content that already exists (see its own doc comment on
+why that matters for `Y.Text` fields specifically).
+
+**Docker Swarm / `docker stack deploy`:** Swarm doesn't build images —
+build and tag the image yourself first, then deploy with the SAME compose
+file:
+
+```sh
+docker build -f packages/app-shell/Dockerfile -t qu-app-shell-relay:latest .
+docker stack deploy -c docker-compose.space-relay.yml <your-stack-name>
+```
+
+`profiles:` (gating the legacy chat relay behind `legacy-chat`) is a
+Compose-only concept Swarm ignores — that service deploys too under
+`docker stack deploy`, unconditionally (harmless, just an idle service on
+a different port — remove its block from your own copy of the file if you
+don't want it running at all).
 
 **Before running it, `/` and `#/admin` both show "Noch keine Anwendung
 auf dieser Plattform installiert"** — expected, not broken: `docker

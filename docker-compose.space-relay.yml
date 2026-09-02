@@ -5,14 +5,27 @@ services:
   # (which moved to the opt-in "legacy-chat" profile - see its own comment further down). Starts fine
   # with zero configuration (a setup page instead of an app/platform) - the fastest path to an
   # actually-configured platform, including the built-in admin console and one CMS-managed demo
-  # shell-app, is ONE command from the host (never inside this container - see its own doc comment
-  # on why: this relay must never see anyone's private key):
+  # shell-app, is ONE command run from anywhere with network access to this relay's URL (never
+  # inside the container, and not tied to any particular deployment method - see its own doc
+  # comment on why):
   #
-  #   node packages/app-shell/bin/bootstrap-platform.mjs
+  #   node packages/app-shell/bin/bootstrap-platform.mjs --relay ws://<this-host>:8081
   #
-  # See the root README.md's "Deploying the App Shell" section and docs/v5-space-core-guide.md §10
-  # for the full walkthrough and every env var below.
+  # It prints an environment: block (QU_RELAY_ADMIN_PUB/QU_APP_ADMIN_PUBS/QU_RELAY_ADMIN_MEMBERS_JSON)
+  # to paste below yourself and redeploy with - it never writes this file or any deployment config
+  # for you. See the root README.md's "Deploying the App Shell" section and
+  # docs/v5-space-core-guide.md §10 for the full walkthrough and every env var below.
+  #
+  # DOCKER STACK / SWARM (`docker stack deploy -c docker-compose.space-relay.yml <stack>`): Swarm
+  # does NOT build images - `build:` below is ignored under stack deploy, and `image:` (present on
+  # both services here) is what it actually pulls/runs, so build and tag it yourself FIRST (on every
+  # node that needs it, or push to a registry every node can pull from):
+  #   docker build -f packages/app-shell/Dockerfile -t qu-app-shell-relay:latest .
+  # `profiles:` (on qu-space-relay below) is also a Compose-only concept Swarm doesn't understand -
+  # under `docker stack deploy` that service deploys unconditionally too (harmless - it's just an
+  # idle chat relay on a different port - remove its block from your own copy if you don't want it).
   qu-app-shell-relay:
+    image: qu-app-shell-relay:latest
     build:
       context: .
       dockerfile: packages/app-shell/Dockerfile
@@ -62,6 +75,7 @@ services:
   # service is the default - see demo/README.md's own "Real thing" section for how to use it.
   qu-space-relay:
     profiles: ["legacy-chat"]
+    image: qu-space-relay:latest
     build:
       context: .
       dockerfile: packages/space-transport/Dockerfile

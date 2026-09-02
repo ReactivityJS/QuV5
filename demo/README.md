@@ -116,17 +116,18 @@ The fastest way to see the whole App layer story working together: a real
 relay, a real Admin-UI (installed Qu content, not framework-built DOM), and
 a real shell-app whose templates/styles/pages are stored AND edited through
 its own CMS editor. `bootstrap:platform` (`packages/app-shell/bin/
-bootstrap-platform.mjs`) generates two local identities, configures the
-relay for PLATFORM mode via `.env`, installs the built-in admin console,
-creates a demo shell-app with its CMS editor installed, and prints the
-exact URLs plus copy-pasteable browser devtools snippets so you can
-actually act as either identity. See that script's own doc comment, or
-the root `README.md`'s "Deploying the App Shell" section, for the full
-walkthrough - including what to do if it tells you to restart the relay
-and re-run it (a one-time thing on a fresh Docker setup, UNLESS you're
-running it via `docker exec` into the already-running container, which
-needs one extra `docker compose cp` + recreate step in between - the root
-`README.md` has the exact recipe, and the script itself prints it too).
+bootstrap-platform.mjs`) generates two local identities and, on a fresh
+setup, PRINTS the `QU_RELAY_ADMIN_PUB`/`QU_APP_ADMIN_PUBS`/
+`QU_RELAY_ADMIN_MEMBERS_JSON` values for you to paste into however you
+deploy (never writes your deployment config itself, on purpose - works
+identically for Compose, `docker stack`, Kubernetes, bare metal); once
+you've redeployed with those and re-run the same command, it installs the
+built-in admin console, creates a demo shell-app with its CMS editor
+installed, and prints the exact URLs plus copy-pasteable browser devtools
+snippets so you can actually act as either identity. See that script's
+own doc comment, or the root `README.md`'s "Deploying the App Shell"
+section, for the full walkthrough - two runs on a first-ever setup is
+expected, not a bug.
 
 ## Legacy: the old hardcoded chat demo (two clients, one relay, three terminals)
 
