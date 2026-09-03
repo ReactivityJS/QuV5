@@ -801,6 +801,74 @@ key generation is genuinely async, unlike the synchronous `storage.getItem()`
 check that precedes it), with the second write silently orphaning the
 first.
 
+**Structured page data and Collections** (the user's own framing: "eine
+komplexere Datenstruktur in einem passenden Schema," "Slots im Template
+... zu einem Datenpfad ... füllen," "nicht nur Titel und Inhalt, sondern
+auch Daten wie current User Alias oder Blog-Post") — Phase 1 of a larger,
+explicitly layered roadmap toward reactive-component templates and a
+real headless-CMS-style content model, not the whole vision at once:
+
+- **`pageKind`'s new `data` field** (`kinds.js`) — an arbitrary JSON
+  object alongside the existing `content` blob; each top-level key
+  resolves into the SAME-NAMED `<qu-slot>` in the page's template
+  (`@qu/app-renderer`'s `render.js`), so a template author defines
+  however many named slots a page actually needs (an author byline, a
+  view count, ...), not just one hardcoded `"content"` - `slots.js`'s own
+  `resolveSlots()` already supported arbitrary slot names from the start,
+  this only generalizes what DATA gets handed to it. Fully additive/
+  backward compatible: `data: null` (the default) contributes no extra
+  slots. `cms-actions.js`'s page form gained a matching JSON textarea.
+- **Collections** (`kinds.js`'s `defineCollectionKind()`) — many
+  STRUCTURED items of one caller-defined shape under one owner (a blog's
+  posts, a contact list, a forum's threads, a chat's messages), the exact
+  same `acl.write: 'content'`-item + `acl.write: 'named'`-registry
+  pattern `qu-page`/`qu-template`/`qu-style` already establish,
+  generalized into ONE reusable call instead of a bespoke Kind-Schema
+  pair per use case - `dev.js`'s `createCollectionItem()`/
+  `editCollectionItem()` and `resolver.js`'s `resolveCollectionItems()`/
+  `resolveCollectionItem()` are the generic counterparts to
+  `createTemplate()`/`editTemplate()`/`resolveTemplateNames()`/
+  `resolveTemplate()`. `relay-resolver.js`'s `createAppResolveKindSchema()`
+  gained a matching `collectionRegistryKinds` parameter - a Collection's
+  REGISTRY Kind needs telling apart from the `pageKind` fallback for the
+  exact same reason `qu-template-registry`/`qu-style-registry` already
+  do (misclassifying it silently breaks `createCollectionItem()`'s own
+  enumeration write - proven by a dedicated regression test, not just
+  asserted).
+
+**Deliberately NOT Phase 1** (named explicitly, not hidden as an
+afterthought):
+- **Phase 2, reactive/live component bindings**: the user's own stated
+  goal is "Daten aus dem Storage reactive genutzt... wenn irgendwie
+  möglich/sinnvoll/hilfreich" (Space data used reactively wherever
+  possible/sensible) and templates that "einfach auf ... reaktiven
+  Components bestehen." `pageKind.data` above is STATIC, author-entered
+  structured content (an `'atomic'` field, one opaque last-write-wins
+  value) - it is not live-bound to anything, including "the current
+  visitor's identity," which isn't even PAGE data at all (it's
+  per-VISITOR, resolved differently for every browser rendering the same
+  page). `@qu/space-ui`'s `bindField()`/`bindList()` already ARE the
+  reactive primitive this needs - what's missing is a declarative,
+  content-authorable convention (mirroring `cms-actions.js`'s/
+  `admin-actions.js`'s own `data-qu-*` attribute pattern) that wires a
+  rendered page's own live Space subscription - or a visiting identity's
+  own state - into arbitrary template elements, without a full page
+  reload on every remote change. Real, separate design work: what "the
+  current visitor" resolves to, how a template declares a live binding
+  vs. a static slot, and how that interacts with `sanitizeHtml()`'s Stufe
+  1 (a live binding is framework-wired, like `cms-actions.js`'s own forms
+  - never inline `<script>`).
+- **Phase 3, Collections wired into routing/CMS authoring**: a
+  Collection's items aren't hooked into `HashRouter`/`AppRuntime.
+  resolveRoute()` yet (a blog's individual posts don't get their own
+  `#/...` sub-routes the way `qu-page` does automatically), and the CMS
+  editor (`cms-actions.js`) has no UI yet for AUTHORING a brand-new
+  Collection type (defining its own field schema from the browser) or
+  managing its items - today a Collection is a Dev-API/test-proven
+  primitive a developer wires up in code (see `defineCollectionKind()`'s
+  own doc comment), not yet something an app-admin can create from
+  `#/<prefix>/cms` the way a template/style/page already can.
+
 Field-level/namespace ACL (docs §21), signed Executable Modules (§17 Stufe
 3), publish/draft states (§26), editing the ADMIN REALM's own console
 content through this same CMS UI (its `qu-admin-*` Kinds have no

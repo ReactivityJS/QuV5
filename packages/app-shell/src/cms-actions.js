@@ -226,7 +226,11 @@ async function wirePages({ mountEl, doc, space, resolver }) {
       btn.addEventListener('click', async () => {
         const page = await resolver.resolvePage(route, { timeout: 2000 });
         if (!page) return;
-        enterEditMode(form, { keyFieldName: 'route', keyValue: route, fields: { title: page.title, template: page.template ?? '', content: page.content } });
+        enterEditMode(form, {
+          keyFieldName: 'route',
+          keyValue: route,
+          fields: { title: page.title, template: page.template ?? '', content: page.content, data: page.data ? JSON.stringify(page.data, null, 2) : '' },
+        });
       });
       li.appendChild(btn);
       list.appendChild(li);
@@ -243,10 +247,19 @@ async function wirePages({ mountEl, doc, space, resolver }) {
         const title = form.querySelector('[name="title"]').value;
         const template = form.querySelector('[name="template"]').value || null;
         const content = form.querySelector('[name="content"]').value;
+        const dataRaw = form.querySelector('[name="data"]').value.trim();
+        let data = null;
+        if (dataRaw) {
+          try {
+            data = JSON.parse(dataRaw);
+          } catch (err) {
+            throw new Error(`"Strukturierte Daten" ist kein gültiges JSON: ${err.message}`);
+          }
+        }
         if (mode === 'edit') {
-          await editPage(space, { route, title, template, content, timeout: 2000 });
+          await editPage(space, { route, title, template, content, data, timeout: 2000 });
         } else {
-          await createPage(space, { route, title, template, content });
+          await createPage(space, { route, title, template, content, data });
           await publishRoute(space, { route, title });
         }
         setStatus(form, 'Gespeichert. Falls du berechtigt bist, ist die Änderung jetzt im Space.');

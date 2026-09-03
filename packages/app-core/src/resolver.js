@@ -89,7 +89,7 @@ export class ContentResolver {
     return routes.filter(Boolean);
   }
 
-  /** @param {string} route @returns {Promise<{route, title, template, content}|null>} `null` if this route has no published page (or it hasn't synced within `timeout`) - the Router's signal to render a 404. */
+  /** @param {string} route @returns {Promise<{route, title, template, content, data}|null>} `null` if this route has no published page (or it hasn't synced within `timeout`). `data` is kinds.js's `pageKind` own structured-data field (an arbitrary JSON object, or `null` if never set) - see its own doc comment; not part of the sync-readiness check below, a page missing it entirely is a perfectly normal, backward-compatible "title+content only" page, not an unsynced one. */
   async resolvePage(route, { timeout } = {}) {
     const pageKind = this._kinds.pageKind;
     const id = await deriveContentNodeId(this._appAdminPub, pageKind.kind, route);
@@ -104,7 +104,8 @@ export class ContentResolver {
       // field - a genuinely empty page body is a rare enough edge case not worth resolving here.
       if (!title || !content) return null;
       const template = await node.field('template').get();
-      return { route, title, template, content };
+      const data = await node.field('data').get();
+      return { route, title, template, content, data };
     }, { timeout });
     release();
     return page;
@@ -165,5 +166,58 @@ export class ContentResolver {
     }, { timeout: timeout ?? 2000 });
     release();
     return css ?? '';
+  }
+
+  /**
+   * Enumerates every item currently registered in a Collection (kinds.js's
+   * `defineCollectionKind()`) - the SAME "registry Node, not a query"
+   * pattern `resolveTemplateNames()`/`resolveStyleNames()` above already
+   * use, generalized to any caller-defined Collection instead of the two
+   * built-in ones. Only returns each item's own `path` (the registry's
+   * `{name: path}` entries, `dev.js`'s `createCollectionItem()`) - call
+   * `resolveCollectionItem()` for one item's actual field data.
+   * @param {{registryKind: object, registryField: string, ownerPub?: Uint8Array|string, timeout?: number}} params - `registryKind`/`registryField` come straight from `defineCollectionKind()`'s own return value. `ownerPub` defaults to this resolver's own configured `appAdminPub` (the common case, listing YOUR OWN collection) - pass a different one to read someone else's, if already known through some other channel.
+   * @returns {Promise<Array<{name: string}>>}
+   */
+  async resolveCollectionItems({ registryKind, registryField, ownerPub, timeout } = {}) {
+    const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
+    const id = await deriveOwnerNodeId(owner, registryKind.kind);
+    const { node, release } = await this._space.useNode(id, registryKind);
+    await waitFor(() => (node.field(registryField).length > 0 ? true : null), { timeout: timeout ?? 500 });
+    const items = await node.field(registryField).toArray();
+    release();
+    return items.filter(Boolean);
+  }
+
+  /**
+   * Resolves ONE Collection item's own field data by its `path` (the same
+   * key `resolveCollectionItems()` returns as each entry's `name`) - the
+   * generic counterpart to `resolveTemplate()`/`resolveStyle()`, for any
+   * caller-defined item shape (`defineCollectionKind()`'s `fields`). Waits
+   * for ANY ONE of the item's own fields to have a value as its "the Node
+   * itself has synced" signal - unlike `resolvePage()`'s fixed
+   * `title`+`content` check, a Collection's field set is entirely
+   * caller-defined, so there's no fixed field name to wait on specifically.
+   * @param {string} path
+   * @param {{itemKind: object, ownerPub?: Uint8Array|string, timeout?: number}} params
+   * @returns {Promise<object|null>} every field's current value, keyed by field name; `null` if unpublished/unsynced within `timeout`.
+   */
+  async resolveCollectionItem(path, { itemKind, ownerPub, timeout } = {}) {
+    const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
+    const id = await deriveContentNodeId(owner, itemKind.kind, path);
+    const { node, release } = await this._space.useNode(id, itemKind);
+    const fieldNames = Object.keys(itemKind.fields);
+    const item = await waitFor(async () => {
+      const values = {};
+      let anySet = false;
+      for (const name of fieldNames) {
+        const value = await node.field(name).get();
+        values[name] = value;
+        if (value !== null && value !== undefined && value !== '') anySet = true;
+      }
+      return anySet ? values : null;
+    }, { timeout });
+    release();
+    return item;
   }
 }

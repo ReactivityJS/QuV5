@@ -3,7 +3,7 @@
  * posture `admin-console-bundle.js` already documents for the platform
  * console, applied to an ORDINARY app's own content instead of the admin
  * realm: no hardcoded DOM-building JS, just a template + one page (the
- * SAME `{name, html}` / `{route, title, template, content}` shapes
+ * SAME `{name, html}` / `{route, title, template, content, data}` shapes
  * `@qu/app-core`'s `createTemplate()`/`createPage()` already take), written
  * into an app's own Space by `installCms()` below. From then on the editor
  * is itself ordinary, editable Qu content - not framework code - literally
@@ -81,6 +81,9 @@ export const cmsBundle = {
     <label>Titel: <input name="title" required></label><br>
     <label>Template: <select name="template"><option value="">(keins)</option></select></label><br>
     <label>Inhalt (HTML):<br><textarea name="content" rows="8" cols="60"></textarea></label><br>
+    <label>Strukturierte Daten (optional, JSON-Objekt - jeder Schlüssel füllt einen gleichnamigen
+      Slot im Template, z.B. <code>&lt;qu-slot name="author"&gt;</code>):<br>
+      <textarea name="data" rows="4" cols="60" placeholder='{"author": "Alice"}'></textarea></label><br>
     <button type="submit">Speichern</button>
     <button type="button" data-qu-cms-reset="page">Neue Seite</button>
     <p data-qu-status></p>
