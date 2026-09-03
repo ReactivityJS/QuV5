@@ -53,6 +53,7 @@ QuV5/
 │   ├── space-transport/ @qu/space-transport - Transports (in-process/WebSocket), the Relay, federation
 │   ├── space-plugins/   @qu/space-plugins   - OPTIONAL app helpers: delivery-status (write-ack + read receipts), upload outbox, auto-compact-on-join
 │   ├── space-ui/        @qu/space-ui        - OPTIONAL vanilla-JS/DOM bindings: field bind, inline-edit, list-bind, upload-status
+│   ├── space-components/@qu/space-components- OPTIONAL declarative Custom Elements over @qu/space-ui: <qu-view>/<qu-bind>/<qu-list> - a CMS-authored template writes these as plain markup, no JS glue
 │   ├── app-core/        @qu/app-core        - App Runtime: Kind-Schemas for app content, content-addressed Node ids, ContentResolver, HashRouter, AppRuntime, Dev API
 │   ├── app-renderer/    @qu/app-renderer    - sanitizer, <qu-slot> resolution, style injection, renderPage() - Template+Page -> DOM
 │   └── app-shell/       @qu/app-shell       - the minimal, application-agnostic bootstrap kernel a Relay serves; also its OWN production relay-server.js/Dockerfile (separate from @qu/space-transport's)
@@ -335,6 +336,26 @@ awareness either of these exist, same as `alias.js`.
 Vanilla JS/DOM, no framework dependency, no build step — `Space` has zero
 awareness this package exists either.
 
+### `packages/space-components/` — `@qu/space-components` (OPTIONAL)
+
+| File | Purpose |
+|---|---|
+| `src/context.js` | `findQuSpace()`/`findQuKind()` — ancestor-DOM resolution (a Component reaches its `Space`/Kind-Schema by walking up for a `.quSpace`/`.quKinds` property on some ancestor, never a global — the same pattern QuV3's own `packages/ui/src/components.js` established, `findQu()`). `resolveTarget()` — binds to a sole child element (e.g. a wrapped `<input>`) instead of the Component itself, when there is one. `assertSafeAttrMode()`/`getPath()` — shared guards/helpers. |
+| `src/resolve.js` | `resolveNodeRef()`/`resolveField()` — turns a Component's `kind`/`node-id`/`field` attributes (or `.kindSchema`/`.nodeId` JS properties, for a computed id/an app-owned Kind-Schema object) into a subscribed `{field, release}`, retrying once on the next microtask for the "ancestor context set after append" ordering hazard. |
+| `src/qu-view.js` | `<qu-view>` — read-only, live-updating binding of one field into a DOM element, built on `@qu/space-ui`'s `bindField()`. |
+| `src/qu-bind.js` | `<qu-bind>` (extends `<qu-view>`) — two-way: live per-keystroke by default, or `editable="inline"` for explicit save/cancel editing (`@qu/space-ui`'s `makeInlineEditable()`) with a pencil/save/cancel icon UI this Component owns. |
+| `src/qu-list.js` | `<qu-list>` — stamps a `<template>` child once per item of a list Field, built on `@qu/space-ui`'s `bindList()` — atomic per-item updates (only a changed item re-renders), CURATED lists only (the list Field's own array IS the data; QuV3's DERIVED case — many sibling Nodes — is a documented future extension, not built speculatively). |
+| `src/elements.js` | The ONLY entry that registers the three tags with `customElements` — browser/jsdom-only (a bare `class extends HTMLElement` throws under plain Node), so excluded from `src/index.js` exactly the way `@qu/app-shell`'s `shell.js` is excluded from ITS package's own index — see `src/index.js`'s own doc comment. |
+| `src/index.js` | Plain-Node-importable surface: `context.js`/`resolve.js`'s helpers only, no `HTMLElement` anywhere. |
+
+This is the declarative Component layer §7's corrected "Phase 2" section
+describes — `@qu/app-shell`'s `boot.js` sets `mountEl.quSpace` on every
+navigation (the ADMIN realm's own separate `Space` included), and
+`shell.js` imports `@qu/space-components/elements` once at boot to
+register the tags; a rendered page's own `<qu-view>`/`<qu-bind>`/
+`<qu-list>` markup (author-typed CMS content, or framework/app-authored
+template HTML) then just works, no per-page wiring code.
+
 ### `demo/`
 
 | File | Purpose |
@@ -442,6 +463,16 @@ notice.
 | `makeInlineEditable(el, field, {onSave?, onCancel?})` | `[contenteditable]` with Enter/blur = save, Escape = cancel. |
 | `bindList(container, field, {key, render, update?})` | Keyed diff rendering of a list Field into a DOM container. |
 | `bindFileInput(inputEl, outbox, {onEnqueue?})` / `bindUploadStatusIcon(iconEl, outbox, fileId, {classes?})` | Wires `<input type="file">` / a status icon to an `UploadOutbox`. |
+
+### Declarative Components (`@qu/space-components`, OPTIONAL)
+
+| Export/Element | Purpose |
+|---|---|
+| `<qu-view kind|.kindSchema node-id|.nodeId field attr?>` | Read-only, live-updating one-field binding. |
+| `<qu-bind ... editable? edit-icon? event?>` | Two-way: live (default) or `editable="inline"` (explicit save/cancel with pencil/save/cancel icons). |
+| `<qu-list kind|.kindSchema node-id|.nodeId field key? item-tag?>` (needs a `<template>` child) | Keyed, atomic-per-item list rendering. |
+| `findQuSpace(el)` / `findQuKind(el, name)` / `resolveTarget(el)` | The ancestor-DOM resolution helpers the three Elements above are built on - `index.js`, plain-Node-importable. |
+| import `"@qu/space-components/elements"` | Registers the three tags with `customElements` (browser/jsdom only - see §4's own doc comment on this package). |
 
 ## 6. Event topic reference
 
@@ -836,59 +867,67 @@ real headless-CMS-style content model, not the whole vision at once:
   enumeration write - proven by a dedicated regression test, not just
   asserted).
 
-**Deliberately NOT Phase 1** (named explicitly, not hidden as an
+**Phase 2, reactive/live component bindings — DELIVERED**
+(`packages/space-components/`, `@qu/space-components`): the user's own
+stated goal was "Daten aus dem Storage reactive genutzt... wenn irgendwie
+möglich/sinnvoll/hilfreich" (Space data used reactively wherever
+possible/sensible) and templates that "einfach auf ... reaktiven
+Components bestehen." `pageKind.data` (Phase 1, above) is STATIC,
+author-entered structured content - this phase is the actual live
+binding.
+
+A prior draft of this section treated "the current visitor's identity" as
+needing its own separate design (what it resolves to, how a template
+would declare it specially). That was wrong, and QuV5's own prior-art
+sibling project (`ReactivityJS/QuV3`, `packages/ui/src/components.js` +
+`packages/services/src/profile-service.js`) showed why: a visitor's own
+identity is not a distinct binding *kind* at all, just an ordinary Space
+reference computed from a pubkey the runtime already has - QuV3's
+`ProfileService.getOwnProfile()` builds it as
+`actorPath(QuCrypto.toBase64Url((await identityEngine.getMainKey())
+.publicKey), 'profile')`, a plain helper call, not a framework special
+case, then hands the resulting STRING straight to the same binding
+primitive every other path uses. QuV3's reactive Components (`<qu-view>`,
+`<qu-bind>`, `<qu-list>`, `<qu-if>`) have no "current user" concept
+anywhere: each takes a `path` attribute (a plain string, since Custom
+Element attributes are always strings), resolved by `resolvePath()`, and
+reach their target Qu instance by walking up the DOM for a `.qu` property
+(`findQu()`) rather than a global singleton.
+
+`@qu/space-components` (`packages/space-components/`, §4/§5) ports that
+design onto QuV5's own primitive (`@qu/space-ui`'s `bindField()`/
+`bindList()` - QuV5's equivalent of QuV3's `watch()`/`watchChildren()`,
+which already existed but was purely imperative): `<qu-view>` (read-only),
+`<qu-bind>` (two-way - live by default, or `editable="inline"` for
+explicit save/cancel editing with a pencil/save/cancel icon UI, built on
+`@qu/space-ui`'s `makeInlineEditable()`), and `<qu-list>` (keyed, ATOMIC
+per-item rendering off a list Field, via `bindList()` - only a changed
+item re-renders, never the whole list). A visitor's own profile alias is
+bound exactly the same way as any other field - `<qu-view kind="profile"
+node-id="..." field="alias">`, the id supplied as a computed JS property
+(`el.nodeId = ...`) rather than a typed attribute only because it's
+computed, never because it's special (resolve.js's own doc comment).
+`@qu/app-shell`'s `boot.js` sets `mountEl.quSpace` on every navigation
+(the ADMIN realm's separate `Space` included) so any Component rendered
+inside a page finds it via DOM ancestry, the same `findQu()`-style pattern
+QuV3 uses; an app's own Kind-Schemas (e.g. a Collection item Kind) become
+bindable by `kind="name"` attribute the same way, by that app setting its
+own `.quKinds = {name: kindSchema}` on `<qu-app-shell>` or any wrapping
+element - `@qu/space-components` itself ships no built-in registry (it
+has no idea what Kinds any given app defines).
+
+Two things deliberately scoped OUT of this delivery, left as documented
+extensions rather than built speculatively: QuV3's DERIVED lists (many
+sibling Nodes, e.g. this framework's own Collections - `<qu-list>` here
+only handles the CURATED case, one Node's own list Field IS the data) and
+`sanitizeHtml()` interaction beyond what already holds - a live-binding
+Custom Element tag is framework-wired markup like `cms-actions.js`'s own
+forms, never inline `<script>`, and `attr="innerHTML"` is refused outright
+(qu-view.js's own doc comment) rather than reopening the injection risk
+`sanitizeHtml()` exists to close.
+
+**Still deliberately NOT done** (named explicitly, not hidden as an
 afterthought):
-- **Phase 2, reactive/live component bindings**: the user's own stated
-  goal is "Daten aus dem Storage reactive genutzt... wenn irgendwie
-  möglich/sinnvoll/hilfreich" (Space data used reactively wherever
-  possible/sensible) and templates that "einfach auf ... reaktiven
-  Components bestehen." `pageKind.data` above is STATIC, author-entered
-  structured content (an `'atomic'` field, one opaque last-write-wins
-  value) - it is not live-bound to anything.
-  A prior draft of this section treated "the current visitor's identity"
-  as needing its own separate design (what it resolves to, how a
-  template would declare it specially). That was wrong, and QuV5's own
-  prior-art sibling project (`ReactivityJS/QuV3`, `packages/ui/src/
-  components.js` + `packages/services/src/profile-service.js`) shows why:
-  a visitor's own identity is not a distinct binding *kind* at all, just
-  an ordinary Space path computed from a pubkey the runtime already has.
-  QuV3's `ProfileService.getOwnProfile()` builds it as
-  `actorPath(QuCrypto.toBase64Url((await identityEngine.getMainKey())
-  .publicKey), 'profile')` - a plain helper call, not a framework special
-  case - and hands the
-  resulting STRING straight to the same binding primitive every other
-  path uses. QuV3's reactive Components (`<qu-view>`, `<qu-bind>`,
-  `<qu-list>`, `<qu-if>`) have no "current user" concept anywhere: each
-  takes a `path` attribute (a plain string, since Custom Element
-  attributes are always strings), resolved by `resolvePath()`, and reach
-  their target Qu instance by walking up the DOM for a `.qu` property
-  (`findQu()`) rather than a global singleton. The only case QuV3 needed
-  anything beyond a static `path` string is a `<qu-list>` item's `related`
-  paths - computed once per item, via a plain JS function set on the list
-  (not an attribute), because a per-item id genuinely isn't known until
-  the list stamps that item. A visitor's own identity is knowable before
-  any markup is even authored, so it needs no such mechanism - it is
-  exactly as "special" as any other fixed path, confirming the user's own
-  read of this.
-  What QuV5 is actually missing, then, isn't "current user" design - it's
-  the declarative layer itself. `@qu/space-ui`'s `bindField()`/
-  `bindList()` are QuV5's equivalent of QuV3's `@qu/reactive`'s `watch()`/
-  `watchChildren()`: the reactive primitive already exists, and it's
-  purely imperative (`bindField(el, field, opts)` - the caller must
-  already hold a real DOM element and a resolved `Field`). QuV3 layers
-  Custom Elements over that primitive so a CMS *template* can declare a
-  live binding by markup alone (`<qu-view path="...">`); QuV5 has no such
-  layer yet. Building one - a small set of Custom Elements resolving a
-  `path`/`field`/`attr` attribute against a Qu instance found via DOM
-  ancestry, wired to `bindField()`/`bindList()` under the hood - is the
-  real Phase 2 scope, and it benefits every live binding (a visitor's own
-  profile alias included) identically, not as a special case. Still real,
-  separate design work: how such an element resolves its own Qu instance
-  in QuV5's shell (an equivalent of `findQu()`/`.qu`), and how it
-  interacts with `sanitizeHtml()`'s Stufe 1 (a live-binding Custom
-  Element tag is framework-wired markup, like `cms-actions.js`'s own forms
-  - never inline `<script>`) - but no longer "what does 'current visitor'
-  even mean," which QuV3 already answers.
 - **Phase 3, Collections wired into routing/CMS authoring**: a
   Collection's items aren't hooked into `HashRouter`/`AppRuntime.
   resolveRoute()` yet (a blog's individual posts don't get their own

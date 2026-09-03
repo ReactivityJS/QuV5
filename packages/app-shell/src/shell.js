@@ -39,6 +39,7 @@ import { Space, deriveOwnerNodeId } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport/ws-client-transport';
 import { EventBus } from '@qu/events';
 import { autoCompactOnJoin } from '@qu/space-plugins';
+import '@qu/space-components/elements'; // registers <qu-view>/<qu-bind>/<qu-list> - see that module's own doc comment. Side-effect only import, deliberately unused otherwise.
 import { deriveContentNodeId, adminAppManifestKind, adminTemplateKind, adminPageKind, ADMIN_REALM_ANCHOR } from '@qu/app-core';
 import { loadOrCreateIdentity, joinSpace, fetchMembers, IDENTITY_STORAGE_KEY } from './identity.js';
 import { initDevConsole } from './dev-console.js';

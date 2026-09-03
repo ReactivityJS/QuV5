@@ -23,7 +23,7 @@
  *   differently while read-only vs. editable needs that control anyway).
  * @param {{get(): Promise<*>, set(value: *): Promise<void>, observe(cb: () => void): () => void}} field
  * @param {{onSave?: (value: string) => void, onCancel?: (value: string) => void}} [options]
- * @returns {() => void} Stops the binding.
+ * @returns {(() => void) & {save: () => Promise<void>, cancel: () => void}} Stops the binding when called; `.save`/`.cancel` also let a caller trigger the same save/cancel an external UI control (e.g. an icon button) can drive without itself listening for Enter/Escape/blur.
  */
 export function makeInlineEditable(el, field, { onSave, onCancel } = {}) {
   let lastKnownValue = '';
@@ -87,10 +87,17 @@ export function makeInlineEditable(el, field, { onSave, onCancel } = {}) {
   el.addEventListener('blur', onBlur);
   el.addEventListener('keydown', onKeydown);
 
-  return () => {
+  const stop = () => {
     unobserve();
     el.removeEventListener('focus', startEditing);
     el.removeEventListener('blur', onBlur);
     el.removeEventListener('keydown', onKeydown);
   };
+  // Additive, backward-compatible: still callable exactly as `stop()` (every existing caller does
+  // just that), but also exposes save()/cancel() directly - @qu/space-components' <qu-bind
+  // editable="inline"> needs to trigger them from its own Save/Cancel icon buttons, not just from
+  // Enter/Escape/blur on `el` itself.
+  stop.save = save;
+  stop.cancel = cancel;
+  return stop;
 }
