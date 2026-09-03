@@ -34,8 +34,53 @@
  * stretch - a visitor filling in the style form within roughly the first
  * 500ms of the page existing would submit into dead air, no listener yet
  * to catch it, and nothing would appear to happen at all.
+ *
+ * KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE BETWEEN "load into form" AND
+ * "save" - a real, observed bug this fixes: `Space.useNode()` is
+ * ref-counted, and `ContentResolver`'s own `resolveTemplate()`/
+ * `resolveStyle()`/`resolvePage()` (used by each section's click handler,
+ * just below, purely to populate the form) each call `useNode()` THEN
+ * `release()` internally, dropping the refcount straight back to zero -
+ * which `Space.unsubscribeNode()` treats as "nobody needs this Node
+ * locally any more" and DISCARDS the local Y.Doc entirely (`space.js`'s own
+ * `_nodes.delete(id)`), not merely stops live-pushing to it. Submitting the
+ * form moments later calls `editTemplate()`/`editStyle()`/`editPage()`
+ * (dev.js), which does its OWN fresh `useNode()` - since the previous one
+ * was fully torn down, this has to re-subscribe and wait for the relay to
+ * replay the Node's entire history again, a real network round-trip a
+ * fixed ~2s timeout can genuinely lose to over a real (non-localhost)
+ * connection, throwing "does not exist (or has not synced)" for content
+ * that plainly DOES exist - the user just viewed it. Each section below
+ * calls `space.useNode()` itself, ONE EXTRA TIME, the moment an item is
+ * loaded into the form (`holdEdit()`), and keeps that reference alive
+ * (`activeEdit`) until a DIFFERENT item is loaded or the form is reset -
+ * long enough to keep the refcount above zero (so nothing gets discarded)
+ * for the entire "loaded into the form, being edited" window, without
+ * changing `ContentResolver`'s own release-immediately posture (correct
+ * for ordinary rendering, where holding every resolved Node open would
+ * leak subscriptions across a visitor's whole session).
  */
-import { ContentResolver, createTemplate, createStyle, createPage, editTemplate, editStyle, editPage, publishRoute } from '@qu/app-core';
+import {
+  ContentResolver,
+  createTemplate,
+  createStyle,
+  createPage,
+  editTemplate,
+  editStyle,
+  editPage,
+  publishRoute,
+  deriveContentNodeId,
+  templateKind,
+  styleKind,
+  pageKind,
+} from '@qu/app-core';
+
+/** See this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...". Releases `previous` (if any) THEN opens+holds a fresh subscription for `(kind, name)`, owned by `space.identity` (the same default `ownerPub` `editTemplate()`/`editStyle()`/`editPage()` themselves use). @returns {Promise<{node: object, release: () => void}>} */
+async function holdEdit(space, kind, name, previous) {
+  previous?.release();
+  const id = await deriveContentNodeId(space.identity.signingPub, kind.kind, name);
+  return space.useNode(id, kind);
+}
 
 function setStatus(form, text) {
   const status = form.querySelector('[data-qu-status]') ?? form.appendChild(form.ownerDocument.createElement('p'));
@@ -102,6 +147,8 @@ async function wireTemplates({ mountEl, doc, space, resolver }) {
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="template"]');
   if (!list && !form) return;
 
+  let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".
+
   async function refreshList() {
     if (!list) return;
     const templates = await resolver.resolveTemplateNames({ timeout: 500 });
@@ -118,6 +165,7 @@ async function wireTemplates({ mountEl, doc, space, resolver }) {
       btn.type = 'button';
       btn.textContent = name;
       btn.addEventListener('click', async () => {
+        activeEdit = await holdEdit(space, templateKind, name, activeEdit);
         const html = (await resolver.resolveTemplate(name, { timeout: 2000 })) ?? '';
         enterEditMode(form, { keyFieldName: 'name', keyValue: name, fields: { html } });
       });
@@ -143,7 +191,13 @@ async function wireTemplates({ mountEl, doc, space, resolver }) {
       }
     });
   }
-  if (resetBtn && form) resetBtn.addEventListener('click', () => resetForm(form, 'name'));
+  if (resetBtn && form) {
+    resetBtn.addEventListener('click', () => {
+      activeEdit?.release();
+      activeEdit = null;
+      resetForm(form, 'name');
+    });
+  }
 
   await refreshList();
 }
@@ -153,6 +207,8 @@ async function wireStyles({ mountEl, doc, space, resolver }) {
   const form = mountEl.querySelector('form[data-qu-action="cms-style-form"]');
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="style"]');
   if (!list && !form) return;
+
+  let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".
 
   async function refreshList() {
     if (!list) return;
@@ -170,6 +226,7 @@ async function wireStyles({ mountEl, doc, space, resolver }) {
       btn.type = 'button';
       btn.textContent = name;
       btn.addEventListener('click', async () => {
+        activeEdit = await holdEdit(space, styleKind, name, activeEdit);
         const css = (await resolver.resolveStyle(name, { timeout: 2000 })) ?? '';
         enterEditMode(form, { keyFieldName: 'name', keyValue: name, fields: { css } });
       });
@@ -195,7 +252,13 @@ async function wireStyles({ mountEl, doc, space, resolver }) {
       }
     });
   }
-  if (resetBtn && form) resetBtn.addEventListener('click', () => resetForm(form, 'name'));
+  if (resetBtn && form) {
+    resetBtn.addEventListener('click', () => {
+      activeEdit?.release();
+      activeEdit = null;
+      resetForm(form, 'name');
+    });
+  }
 
   await refreshList();
 }
@@ -207,6 +270,8 @@ async function wirePages({ mountEl, doc, space, resolver }) {
   if (!list && !form) return;
 
   await refreshTemplateSelect({ mountEl, doc, resolver });
+
+  let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".
 
   async function refreshList() {
     if (!list) return;
@@ -224,6 +289,7 @@ async function wirePages({ mountEl, doc, space, resolver }) {
       btn.type = 'button';
       btn.textContent = route;
       btn.addEventListener('click', async () => {
+        activeEdit = await holdEdit(space, pageKind, route, activeEdit);
         const page = await resolver.resolvePage(route, { timeout: 2000 });
         if (!page) return;
         enterEditMode(form, {
@@ -269,7 +335,13 @@ async function wirePages({ mountEl, doc, space, resolver }) {
       }
     });
   }
-  if (resetBtn && form) resetBtn.addEventListener('click', () => resetForm(form, 'route'));
+  if (resetBtn && form) {
+    resetBtn.addEventListener('click', () => {
+      activeEdit?.release();
+      activeEdit = null;
+      resetForm(form, 'route');
+    });
+  }
 
   await refreshList();
 }
