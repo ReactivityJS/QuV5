@@ -63,10 +63,55 @@ export async function createApp(space, { name, version = '1.0', rootTemplate = n
   return space.createNode(appManifestKind, { name, version, rootTemplate, defaultRoute, theme, metadata });
 }
 
+/**
+ * Locates this identity's `'named'`-ACL registry Node (`routeRegistryKind`/
+ * `templateRegistryKind`/`styleRegistryKind`), subscribing and waiting for
+ * it to sync from the relay FIRST if it isn't already locally attached -
+ * NEVER blindly `Space.createNode()`s over an id that might already have
+ * entries elsewhere. A real, deployment-observed bug this fixes: the
+ * OLD `space.getNode(id) ?? space.createNode(...)` pattern treated
+ * "not currently attached in THIS Space instance" (true on every fresh
+ * page load/session, regardless of whether the registry already has
+ * entries from an EARLIER session) as "genuinely doesn't exist yet" -
+ * `createNode()` then forks a brand-new, causally-unrelated Y.Doc and
+ * `stampMeta()`s it as if this were the Node's first-ever creation,
+ * exactly the trap `space.js`'s own `stampMeta()` doc comment warns
+ * against (a competing doc for an already-created Node, not a graceful
+ * merge - the SAME class of bug `editTemplate()`/`editStyle()`/
+ * `editPage()` already guard against for content Nodes, just never
+ * applied to registries). The practical symptom: a route/template/style
+ * that had synced back in from an EARLIER call briefly (or, in the
+ * unlucky case, `stampMeta()`'s meta-key race, permanently) disappears
+ * from the registry a NEW call to `registerContentName()`/`publishRoute()`
+ * appends to, right after an operation that looked otherwise successful.
+ * Only falls through to `createNode()` once a bounded wait genuinely
+ * confirms the Node has never been stamped (`meta.get('kind')` still
+ * unset) - checked via `meta`, not the list field's own length, since an
+ * empty-but-real registry (the split second between its own creation and
+ * its first entry being pushed) must not be mistaken for "never existed."
+ * 500ms default, matching `resolver.js`'s own already-accepted "does this
+ * registry exist yet" tradeoff (`resolveTemplateNames()`/
+ * `resolveStyleNames()`/`resolveRoutes()`'s identical default) - the ONLY
+ * case that ever pays this cost is a brand-new app's FIRST template/style/
+ * published route (nothing to discover yet, so the wait always runs to
+ * completion); an app-admin's client that keeps this registry Node held
+ * open across an editing session (e.g. `@qu/app-shell`'s CMS, holding it
+ * for the session's whole lifetime rather than releasing it after every
+ * single read) never pays it again after the first call, since
+ * `space.getNode(id)` above then finds it immediately.
+ */
+async function getOrSyncRegistryNode(space, registryKind) {
+  const id = await deriveOwnerNodeId(space.identity.signingPub, registryKind.kind);
+  const existing = space.getNode(id);
+  if (existing) return existing;
+  const { node } = await space.useNode(id, registryKind);
+  const alreadyExists = await waitForSync(() => node.meta.get('kind') !== undefined, { timeout: 500 });
+  return alreadyExists ? node : space.createNode(registryKind, {}, { id });
+}
+
 /** One entry, deduplicated by `name` - shared by `createTemplate()`/`createStyle()` below so a caller never has to remember a separate "publish" call the way `qu-page`'s own `publishRoute()` historically needed (kept separate, unchanged, for backward compatibility). */
 async function registerContentName(space, registryKind, fieldName, name) {
-  const id = await deriveOwnerNodeId(space.identity.signingPub, registryKind.kind);
-  const node = space.getNode(id) ?? (await space.createNode(registryKind, {}, { id }));
+  const node = await getOrSyncRegistryNode(space, registryKind);
   const existing = await node.field(fieldName).toArray();
   if (!existing.some((entry) => entry?.name === name)) await node.field(fieldName).push({ name });
   return node;
@@ -254,15 +299,18 @@ export async function grantContentWriter(space, { kind, path, granteePub }) {
 
 /**
  * Adds one entry to this Space identity's Route Registry (creating it on
- * first call - see kinds.js's `routeRegistryKind`) - purely for
- * ENUMERATION (nav/sitemap, `ContentResolver.resolveRoutes()`); a route's
- * Page still resolves independently of this, by direct id derivation (see
- * router.js/resolver.js), so an app remains navigable even if a particular
- * route was never registered here.
+ * first call - see kinds.js's `routeRegistryKind` and this file's own
+ * `getOrSyncRegistryNode()` doc comment on why that's never a blind
+ * `createNode()`) - purely for ENUMERATION (nav/sitemap,
+ * `ContentResolver.resolveRoutes()`); a route's Page still resolves
+ * independently of this, by direct id derivation (see router.js/
+ * resolver.js), so an app remains navigable even if a particular route was
+ * never registered here. Unlike `registerContentName()`, never deduplicates
+ * by `route` - unchanged, pre-existing behavior (calling this twice for the
+ * same route adds two entries).
  */
 export async function publishRoute(space, { route, title }) {
-  const id = await deriveOwnerNodeId(space.identity.signingPub, routeRegistryKind.kind);
-  const node = space.getNode(id) ?? (await space.createNode(routeRegistryKind, {}, { id }));
+  const node = await getOrSyncRegistryNode(space, routeRegistryKind);
   await node.field('routes').push({ route, title });
   return node;
 }
