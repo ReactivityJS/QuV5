@@ -40,4 +40,4 @@ export {
   createCollectionItem,
   editCollectionItem,
 } from './dev.js';
-export { createAppResolveKindSchema, createAdminResolveKindSchema } from './relay-resolver.js';
+export { createAppResolveKindSchema } from './relay-resolver.js';

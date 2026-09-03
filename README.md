@@ -137,8 +137,8 @@ Kubernetes where a separate machine/toolchain is inconvenient): the
 identity it generates defaults to a path INSIDE the container's own
 filesystem, which does NOT survive a redeploy - the symptom is a
 brand-new `relay-admin`/`demo-app-admin` pubkey printed every time you
-run it, and the OLD relay-admin's already-installed admin-realm content
-becomes permanently unreadable once its identity is gone. If you must run
+run it, and the OLD relay-admin loses write access to everything it
+previously administered once its identity is gone. If you must run
 it this way, set `QU_BOOTSTRAP_DIR` (or pass `--dir`) to a path backed by
 a volume that actually survives redeploys - `docker-compose.space-relay.yml`'s
 own `qu-app-shell-relay-admin-identity` volume (mounted at `/admin-identity`,
@@ -148,19 +148,28 @@ itself warns loudly when `--dir`/`QU_BOOTSTRAP_DIR` isn't set, for exactly
 this reason.
 
 - the relay isn't configured yet → **prints the exact `QU_RELAY_ADMINS`
-  value** (public keys only, one JSON array - the ONE static list a
-  platform deployment needs; a brand-new app-admin like `demo-app-admin`
-  needs no separate config at all, `registerApp()` discovers it live) for
-  YOU to paste into however you manage your deployment's environment -
-  `docker-compose.space-relay.yml` directly, your own `docker stack` file,
-  a Kubernetes manifest, systemd, whatever - then redeploy however you
-  already do (`docker compose up -d`, `docker stack deploy`, ...) and run
-  the SAME command again; or
+  value** (a plain JSON array of base64 pubkeys, public keys only - the ONE
+  static list a platform deployment needs; a brand-new app-admin like
+  `demo-app-admin` needs no separate config at all, `registerApp()`
+  discovers it live) for YOU to paste into however you manage your
+  deployment's environment - `docker-compose.space-relay.yml` directly,
+  your own `docker stack` file, a Kubernetes manifest, systemd, whatever -
+  then redeploy however you already do (`docker compose up -d`, `docker
+  stack deploy`, ...) and run the SAME command again; or
 - the relay already has them (this second run, or any later one) →
   installs the admin console, creates a demo shell-app with its own CMS
   editor installed, registers both under `#/admin` and `#/demo`, and
   prints the exact URLs plus ready-to-paste browser devtools snippets so
   you can actually act as either identity.
+
+**You don't have to use the generated `relay-admin` identity at all** -
+`#/admin` is ordinary content in the SAME main Space, gated only by
+`acl.write: 'relay-admins'` (checked against `QU_RELAY_ADMINS`, nothing
+else). Any pubkey works there the instant it's listed, including an
+operator's own already-existing browser identity (visible on the relay's
+unconfigured setup page, or via `window.Qu.pub` in devtools on any already
+configured page) - just add IT to `QU_RELAY_ADMINS` too, no separate
+identity to generate or import into the browser.
 
 Two runs on a totally fresh setup is normal, not a bug - see
 `packages/app-shell/bin/bootstrap-platform.mjs`'s own doc comment for the

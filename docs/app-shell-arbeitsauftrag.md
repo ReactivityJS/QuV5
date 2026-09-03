@@ -369,46 +369,55 @@ Anfang an gilt.
 
 ## 19-21. Admin Identity, Rollen, ACL-Erweiterung (grundlegend angepasst)
 
-**Status: `relay-admin`-Rolle implementiert, inkl. eines echt vertraulichen
-Admin-Realms**, siehe architecture.md §7 ("The Platform layer"). Statt (wie
-unten ursprünglich skizziert) Owner globaler Content-Kinds zu sein, ist die
-`relay-admin`-Rolle in ZWEI Teilen umgesetzt:
+**Status: `relay-admin`-Rolle implementiert — EIN Relay-Space, nicht
+zwei**, siehe architecture.md §7 ("One relay Space, not two"). Eine
+frühere Revision dieses Designs sah hierfür einen ECHT separaten,
+vertraulichen `Space`/Relay-Forwarder ("Admin-Realm", eigener `/admin-ws`)
+vor — das ist wieder verworfen (siehe architecture.md §7 für das volle
+"Warum": ein Relay-Admin brauchte dafür eine ZWEITE, eigens generierte
+Identity, die erst ins Browser-`localStorage` importiert werden musste,
+statt einfach die eigene, ohnehin schon vorhandene Identity zu nutzen).
+Statt (wie unten ursprünglich skizziert) Owner globaler Content-Kinds zu
+sein, ist die `relay-admin`-Rolle in ZWEI Teilen umgesetzt, beide im
+SELBEN, gewöhnlichen Haupt-`Space`:
 
-1. Ein additiv-only Registry-Kind (`qu-platform-apps`, `'named'`-ACL auf
-   die Relay-Admin-Pubkey), das Pfad-Präfixe auf App-Admin-Pubkeys
-   abbildet — `@qu/app-core`'s `PlatformRuntime`/`installAppBundle()`/
-   `registerApp()`. Registrierung ist rein optional/kosmetisch: jede App
-   ist per Default bereits unter ihrer eigenen Owner-Id erreichbar, ganz
-   ohne Mitwirkung des relay-admin (`PlatformRuntime.resolveForPath()`s
-   eigener Fallback).
-2. Ein ECHTER, separater, vertraulicher `Space`/Relay-Forwarder (der
-   "Admin-Realm", eigene `members`-Liste via `QU_RELAY_ADMINS`,
-   erreicht über `/admin-ws`) für alles, was tatsächlich NUR für Admins
-   lesbar sein soll — inklusive der eingebauten `#/admin`-Konsole selbst,
-   die als GEWÖHNLICHER, installierter Qu-Content dort lebt
-   (`packages/app-shell/admin-console-bundle.js` +
-   `bin/install-admin-console.mjs`), nicht als Framework-Sonderfall.
+1. Ein additiv-only Registry-Kind (`qu-platform-apps`, `acl.write:
+   'relay-admins'`), das Pfad-Präfixe auf App-Admin-Pubkeys abbildet —
+   `@qu/app-core`'s `PlatformRuntime`/`installAppBundle()`/`registerApp()`.
+   Registrierung ist rein optional/kosmetisch: jede App ist per Default
+   bereits unter ihrer eigenen Owner-Id erreichbar, ganz ohne Mitwirkung
+   des relay-admin (`PlatformRuntime.resolveForPath()`s eigener Fallback).
+2. Die eingebaute `#/admin`-Konsole selbst — GEWÖHNLICHER, installierter
+   Qu-Content im GLEICHEN Haupt-`Space` (`packages/app-shell/
+   admin-console-bundle.js` + `bin/install-admin-console.mjs`), ebenfalls
+   `acl.write: 'relay-admins'` (`qu-admin-*` Kinds). Der Content selbst
+   ist `'public'`-visibility (nichts darin war je geheim — ein
+   "App registrieren"-Formular und eine Liste bereits `'public'`-sichtbarer
+   `qu-platform-apps`-Einträge); ausschließlich das SCHREIBEN ist auf
+   `QU_RELAY_ADMINS` beschränkt.
 
 Bewusst KEIN Superuser über gewöhnlichen App-Content: ein `app-admin`
 bleibt alleiniger Owner seines eigenen `qu-app`/`qu-page`/`qu-template`/
 `qu-style`, der relay-admin entscheidet nur, WELCHE bereits installierten
-Apps unter welchem Präfix eine Alias-Adresse bekommen (bzw. wer den
-Admin-Realm lesen/schreiben darf — dort gilt `acl.write: 'members'`, jeder
-konfigurierte Admin gleichberechtigt, kein Einzel-Owner). `qu-platform-apps`
-selbst ist inzwischen `acl.write: 'relay-admins'` (`@qu/space-core`s
-kind-schema.js eigener Kommentar zu diesem Modus) — dieselbe STATISCHE,
-beim Relay-Start konfigurierte Liste (`QU_RELAY_ADMINS`, ersetzt die
-früheren getrennten `QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_PUB`/
-`QU_RELAY_ADMIN_MEMBERS_JSON`) trägt jetzt sowohl die Admin-Realm-
-Mitgliedschaft als auch das Schreibrecht auf die Plattform-Registry, mit
-mehreren gleichberechtigten Relay-Admins statt einem Einzel-Owner. Ein
-NEUER App-Admin braucht dagegen KEINEN eigenen statischen Eintrag mehr:
-`registerApp()` allein genügt, der Relay beobachtet `qu-platform-apps`
-selbst live (`packages/app-shell/src/live-app-resolver.js`, eine interne,
-über `InProcessTransport` an den eigenen Hub angebundene `Space`) und
-reklassifiziert die neue Identität ohne Neustart — die früher hier als
-offen benannte Live-Discovery-Lücke (siehe architecture.md §7) ist damit
-geschlossen.
+Apps unter welchem Präfix eine Alias-Adresse bekommen (bzw. wer die
+`#/admin`-Konsole schreiben darf — dort gilt `acl.write: 'relay-admins'`,
+jeder konfigurierte Admin gleichberechtigt, kein Einzel-Owner). Dieselbe
+STATISCHE, beim Relay-Start konfigurierte Liste (`QU_RELAY_ADMINS`, ersetzt
+die früheren getrennten `QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_PUB`/
+`QU_RELAY_ADMIN_MEMBERS_JSON`, und ist inzwischen ein reines Array von
+Base64-Pubkeys, kein `{pub, xPub}`-Paar mehr — kein `xPub` nötig, da
+`'relay-admins'` nur Signing-Pubkeys prüft) trägt sowohl das Schreibrecht
+auf die `#/admin`-Konsole als auch auf die Plattform-Registry, mit
+mehreren gleichberechtigten Relay-Admins statt einem Einzel-Owner. JEDE
+bereits im Browser vorhandene Identity funktioniert hier, sobald ihr Pubkey
+gelistet ist — keine separate Admin-Identity zu generieren oder zu
+importieren. Ein NEUER App-Admin braucht dagegen KEINEN eigenen statischen
+Eintrag mehr: `registerApp()` allein genügt, der Relay beobachtet
+`qu-platform-apps` selbst live (`packages/app-shell/src/
+live-app-resolver.js`, eine interne, über eine ECHTE `WsClientTransport`-
+Verbindung an den eigenen Hub angebundene `Space`) und reklassifiziert die
+neue Identität ohne Neustart — die früher hier als offen benannte
+Live-Discovery-Lücke (siehe architecture.md §7) ist damit geschlossen.
 
 **Anpassung:** Das Original unterstellt eine bereits vorhandene, erweiterbare
 ACL-Hierarchie (Space → Namespace → Kind → Node → Field). Die gibt es nicht.

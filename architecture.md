@@ -117,8 +117,7 @@ A field declares two INDEPENDENT properties (`kind-schema.js`):
 `acl.write` names who may sign updates to a Node of this Kind:
 
 - **`'members'`** — flat Space membership (the default) — genuinely
-  SHARED write access, every member equally, no single owner (e.g. the
-  App Shell's built-in admin realm content, §7 below).
+  SHARED write access, every member equally, no single owner.
 - **`'owner'`** — self-certifying `nodeId` (`deriveOwnerNodeId(ownerPub,
   kind)`), zero relay state, ONE Node per owner per Kind.
 - **`'named'`** — the owner (same self-certifying id as `'owner'`) plus
@@ -660,21 +659,21 @@ on. Wired into both `demo/chat.mjs` and `demo/web/main.js`; see
 `packages/space-plugins/test/auto-compact.test.js` for the regression
 proof and `demo/README.md`'s Caveats section for the full mechanics.
 
-**The Platform layer (docs §19-21, revised): several apps, one Relay, a
-genuinely confidential relay-admin realm.** Everything above assumes a
-Relay serves exactly one app, owned by one app-admin. `@qu/app-core`'s
-`platformAppsKind`/admin-realm Kinds (`kinds.js`) + `PlatformRuntime`
-(`platform.js`) + the Dev API (`dev.js`), and `@qu/app-shell`'s
-`startPlatform()` (`boot.js`) add a second, separate way to boot the SAME
-`@qu/app-shell` that instead serves however many independently-owned apps
-are reachable on one Relay - each app self-certifyingly reachable at its
-OWN owner id with zero relay-admin involvement, PLUS an opt-in, prettier
-alias layer a **relay-admin** - a role distinct from any app's own
-app-admin, deliberately NOT a superuser over app content - curates. "Kein
-Sonderfall zu normalen Spaces" was the guiding constraint here (a real
-question this design started from): the built-in admin console is not
-special-cased framework UI at all, it is installed Qu content like any
-other app, just living in its own genuinely confidential Space.
+**The Platform layer (docs §19-21, revised): several apps, one Relay, ONE
+relay Space.** Everything above assumes a Relay serves exactly one app,
+owned by one app-admin. `@qu/app-core`'s `platformAppsKind`/admin-app
+Kinds (`kinds.js`) + `PlatformRuntime` (`platform.js`) + the Dev API
+(`dev.js`), and `@qu/app-shell`'s `startPlatform()` (`boot.js`) add a
+second, separate way to boot the SAME `@qu/app-shell` that instead serves
+however many independently-owned apps are reachable on one Relay - each
+app self-certifyingly reachable at its OWN owner id with zero relay-admin
+involvement, PLUS an opt-in, prettier alias layer a **relay-admin** - a
+role distinct from any app's own app-admin, deliberately NOT a superuser
+over app content - curates. "Kein Sonderfall zu normalen Spaces" was the
+guiding constraint here (a real question this design started from): the
+built-in admin console is not special-cased framework UI at all, it is
+installed Qu content like any other app, living in the exact SAME main
+Space every other app's content does.
 
 *Routing - two kinds of match, neither hardcoded to a path string:*
 
@@ -706,46 +705,50 @@ other app, just living in its own genuinely confidential Space.
   build step - `createApp()`/`createTemplate()`/`createPage()` under one
   call) sufficient on its own for an app to go live.
 
-*The admin realm - genuinely CONFIDENTIAL, not just UI-gated:* a
-`realm: 'admin'` alias (conventionally named `"admin"`, but that is a
-NAMING convention the bootstrap installer picks, not a router special
-case) resolves into a wholly SEPARATE `Space`/relay-forwarder instance -
-its own flat `members` list (every trusted admin identity, boot-time
-configured via `QU_RELAY_ADMINS` - the SAME list that also authorizes
-`qu-platform-apps` writes, see this document's own "A fourth ACL mode"
-subsection), reached at a distinct
-WebSocket path (`/admin-ws`, multiplexed onto the SAME HTTP server/port via
-manual `httpServer.on('upgrade', …)` routing - `@qu/space-transport`'s
-`createWsServerHub()` itself needs no change, see `relay-server.js`'s own
-"ADMIN REALM" doc comment). Its content Kinds (`qu-admin-app`/
-`qu-admin-page`/`qu-admin-template`/`qu-admin-style`, `kinds.js`'s own "THE
-ADMIN REALM" doc comment) keep `defineKind()`'s DEFAULT `visibility:
-'encrypted'` (unlike the public `qu-page`/etc. above) - sealed for exactly
-that small member list, so an ordinary visitor of the main Space can never
-decrypt anything here, not even with the relay's own cooperation (the relay
-never holds an X25519 private key). `acl.write: 'members'` there (not
-`'named'`) means ANY configured admin manages it - "wir berechtigen in dem
-Space alle Admins des Relays" - there is no single "admin realm owner."
-Node ids need no real owner pubkey (there is exactly one admin realm per
-relay): `ADMIN_REALM_ANCHOR`, a fixed 32-byte constant fed through the
-SAME `deriveOwnerNodeId()`/`deriveContentNodeId()` every other Kind here
-uses, purely as a stable hash input. `resolver.js`'s `ContentResolver`
-(and `runtime.js`'s `AppRuntime`) take an optional `kinds` override for
-exactly this - `boot.js`'s `startPlatform()` passes the `qu-admin-*` set
-and `ADMIN_REALM_ANCHOR` for a `realm: 'admin'` match, otherwise the
-ordinary public set and the matched app's own `appAdminPub` - the SAME
-`AppRuntime`/`ContentResolver` code path either way, only WHICH Kinds/
-which `Space` differ. A visitor who is NOT an admin realm member gets
-`@qu/app-renderer`'s ordinary "404 not found" fallback when navigating to
-the admin alias - the relay's own subscribe-gate rejects their subscribe
-outright (`'members'`-ACL Kinds require membership to even subscribe), so
-resolution just times out - never a leak, never a special "you're not an
-admin" page that would itself require knowing the admin list client-side.
-Because this content IS genuinely `'encrypted'`, a late-added admin hits
-the SAME Yjs gapless-ordering gap `@qu/space-plugins`' `autoCompactOnJoin()`
-already exists to close (docs §32's own regression-tested fix, applied
-here too - see `shell.js`'s own wiring, currently scoped to the built-in
-console's own well-known ids only).
+*One relay Space, not two (a real, deliberate simplification from an
+earlier revision of this design):* a `realm: 'admin'` alias
+(conventionally named `"admin"`, but that is a NAMING convention the
+bootstrap installer picks, not a router special case) resolves into the
+built-in admin app's own content, living in the exact SAME main `Space`
+every other app's content lives in - no second `Space`, no second
+relay-forwarder, no `/admin-ws`. An EARLIER revision of this design put
+that content in a wholly separate, genuinely confidential `Space`/
+relay-forwarder (its own flat `members` list, its own WebSocket path,
+`'encrypted'`-visibility content) - real, working, and regression-tested,
+but it had a real operational cost: administering the platform required
+generating a SECOND, dedicated identity and importing its private key
+into the browser's `localStorage`, distinct from whatever identity that
+same browser already uses for everything else (`loadOrCreateIdentity()`'s
+own "remember me" identity). A real deployment surfaced exactly this as a
+point of confusion - "why can't my browser's own identity, once listed as
+relay-admin, just administer the relay?" (the same "one identity,
+multiple owner-relationships" model QuV3 already used, and the same model
+this whole document's Kind/ACL system is built around everywhere else).
+The fix: fold the admin app's Kinds (`qu-admin-app`/`qu-admin-page`/
+`qu-admin-template`/`qu-admin-style`, `kinds.js`'s own "THE ADMIN APP" doc
+comment) into `acl.write: 'relay-admins'` - the EXACT SAME primitive
+`qu-platform-apps` already uses (this document's own "A fourth ACL mode"
+subsection) - anchored on the fixed `ADMIN_REALM_ANCHOR` (name kept for
+continuity with the earlier revision) instead of a separate confidential
+transport. `resolver.js`'s `ContentResolver` (and `runtime.js`'s
+`AppRuntime`) still take an optional `kinds` override for exactly this -
+`boot.js`'s `startPlatform()` passes the `qu-admin-*` set and
+`ADMIN_REALM_ANCHOR` for a `realm: 'admin'` match, otherwise the ordinary
+public set and the matched app's own `appAdminPub` - the SAME
+`AppRuntime`/`ContentResolver` code path, the SAME `Space`, either way,
+only WHICH Kinds differ.
+
+The tradeoff, made explicit: the admin console's own MARKUP (a "register
+an app" form, a list of already-`'public'`-visibility `qu-platform-apps`
+entries) is now world-readable, like any other app's content - `publicMeta()`-
+wrapped the same way `pageKind`/etc. are. There was never anything secret
+IN it. WRITE access is unchanged and just as strict: only identities
+listed in `QU_RELAY_ADMINS` can ever write it, checked independently by
+every client's own `Space` (never just trusting the relay's own say-so) -
+a non-admin's submit attempt through the exact same rendered form is
+silently rejected by the relay, exactly like any other unauthorized write
+in this framework, with no client-side way to tell the two cases apart (by
+design - see `admin-actions.js`'s own doc comment).
 
 **The built-in admin console is itself installed Qu content, not
 hardcoded framework DOM-building** - `packages/app-shell/admin-console-
@@ -753,9 +756,9 @@ bundle.js` (a `{manifest, templates, pages}` bundle, the exact shape
 `installAdminAppBundle()` consumes) ships as this package's own reference
 "Package," installed once via `packages/app-shell/bin/install-admin-
 console.mjs` (a real, separate process holding the bootstrapping
-identity's private key - connects to `/admin-ws` to install the content,
-then to the main Space to register the `"admin"` alias - see that script's
-own doc comment). From then on the console renders through the EXACT SAME
+identity's private key - connects ONCE to the main Space to both install
+the content and register the `"admin"` alias - see that script's own doc
+comment). From then on the console renders through the EXACT SAME
 `AppRuntime`/`renderPage()` pipeline as any other app - `@qu/app-renderer`'s
 `sanitizeHtml()` (Stufe 1 of the security model, docs §17-18) strips any
 `<script>` from it same as anywhere else, so its one interactive bit (a
@@ -777,18 +780,19 @@ relay-admin.
 comment) - one Shell, one JS bundle, either mode, decided per-deployment by
 which attribute `index.html` sets; `relay-admin-pub`'s own VALUE carries no
 meaning any more (see this document's own "A fourth ACL mode" subsection) -
-only its PRESENCE does. In platform mode, `shell.js` also lazily connects a
-second `Space` to the admin realm (`connectAdminSpace`, only actually
-invoked the first time a route resolves into `realm: 'admin'` - most
-visitors never trigger it), and eagerly fetches `GET /relay-admins.json` to
-construct its MAIN `Space` with a matching `relayAdmins` list (needed to
-independently verify `qu-platform-apps` writes at all - see "A fourth ACL
-mode" below). `packages/app-shell/relay-server.js` wires the server side
-via `QU_RELAY_ADMINS` (a JSON array of `{pub, xPub}` - see that subsection
-for the full reasoning) and `QU_APP_ADMIN_PUB` (the single-app fallback,
-ignored once `QU_RELAY_ADMINS` is set) - see that file's own doc comment
-for the full env-var reference, and `docker-compose.space-relay.yml`'s
-`qu-app-shell-relay` service for the same variables wired through Compose.
+only its PRESENCE does. In platform mode, `shell.js` constructs exactly
+ONE `Space` (no second connection, no second identity) and eagerly fetches
+`GET /relay-admins.json` to construct it with a matching `relayAdmins`
+list (needed to independently verify `qu-platform-apps`/admin-app writes
+at all - see "A fourth ACL mode" below). `packages/app-shell/relay-server.js`
+wires the server side via `QU_RELAY_ADMINS` (a JSON array of PLAIN base64
+signing pubkeys, e.g. `["<pub1>","<pub2>"]` - no `xPub`/encryption
+recipient any more, since nothing here needs to decrypt anything - see
+that subsection for the full reasoning) and `QU_APP_ADMIN_PUB` (the
+single-app fallback, ignored once `QU_RELAY_ADMINS` is set) - see that
+file's own doc comment for the full env-var reference, and
+`docker-compose.space-relay.yml`'s `qu-app-shell-relay` service for the
+same variables wired through Compose.
 
 **The built-in CMS editor** (`packages/app-shell/cms-bundle.js` +
 `src/cms-actions.js`) closes the "in-browser page/template editor" gap the
@@ -803,8 +807,9 @@ deliberately left OUT of `publishRoute()`'s registry so it never appears
 on a visitor-facing sitemap, the same way `#/admin` never appears in
 ordinary app navigation. `boot.js` calls `cms-actions.js`'s `wireCms()`
 unconditionally after every `renderPage()` in both `startApp()` and
-`startPlatform()` (main-realm apps only, not yet the admin realm itself -
-see `cms-bundle.js`'s own doc comment on why) - a cheap, correct no-op
+`startPlatform()` (ordinary `realm: 'main'` apps only, not yet the
+built-in admin app itself - see `cms-bundle.js`'s own doc comment on why) -
+a cheap, correct no-op
 unless the rendered page happens to be the CMS editor, exactly
 `wireAdminConsole()`'s own posture, never a `<script>`-execution loophole
 (Stufe 1 still strips those regardless). Three sections (templates,
@@ -959,7 +964,7 @@ afterthought):
 
 Field-level/namespace ACL (docs §21), signed Executable Modules (§17 Stufe
 3), and publish/draft states (§26) remain explicitly future work. Editing
-the ADMIN REALM's own console content through this same CMS UI also
+the built-in admin app's own console content through this same CMS UI also
 remains future work (its `qu-admin-*` Kinds have no registries/`edit*()`
 counterparts yet - `bin/install-admin-console.mjs` remains the only way to
 update it) - see docs/app-shell-arbeitsauftrag.md's own "Nicht-Ziele".
@@ -998,15 +1003,17 @@ own doc comment). Two changes close this:
   one registry, symmetrically.
 - **`QU_RELAY_ADMINS`** (`packages/app-shell/relay-server.js`) replaces the
   THREE previously separate `QU_RELAY_ADMIN_PUB`/`QU_APP_ADMIN_PUBS`/
-  `QU_RELAY_ADMIN_MEMBERS_JSON` env vars with ONE JSON array of `{pub,
-  xPub}` - the ONE static list a platform deployment needs at all. It
-  serves double duty: the admin realm's own `members` (encryption
-  recipients + `'members'`-ACL there, unchanged) AND the main Space's
-  `relayAdmins` write-ACL list (signing pubkeys only) for
-  `qu-platform-apps`. `GET /relay-admins.json` (unauthenticated, same
-  posture as `/members.json`) publishes the signing-pubkey half so any
-  visitor's own `Space` (`@qu/app-shell`'s `shell.js`, in platform mode
-  only) can independently verify `qu-platform-apps` writes itself, never
+  `QU_RELAY_ADMIN_MEMBERS_JSON` env vars with ONE JSON array of PLAIN
+  base64 signing pubkeys, e.g. `["<pub1>","<pub2>"]` - the ONE static list
+  a platform deployment needs at all. No `xPub`/encryption-recipient half
+  - `'relay-admins'`-ACL never needs one (nothing it gates is encrypted any
+  more, see "One relay Space, not two" above), unlike the ill-fitting
+  `{pub, xPub}` shape an earlier revision carried over from `'members'`-ACL
+  purely because it also doubled as a confidential Space's own member list
+  back then. `GET /relay-admins.json` (unauthenticated, same posture as
+  `/members.json`) publishes exactly this list so any visitor's own
+  `Space` (`@qu/app-shell`'s `shell.js`, in platform mode only) can
+  independently verify `qu-platform-apps`/admin-app writes itself, never
   just trusting the relay.
 - **Live app-admin discovery** (`packages/app-shell/src/
   live-app-resolver.js`'s `createLiveAppResolveKindSchema()`) is the actual
@@ -1047,7 +1054,7 @@ own doc comment). Two changes close this:
   live-resolver to catch up) BEFORE connecting as `demo-app-admin` and
   writing any of its content, not after.
 - **`GET /relay-admins.json` returns bare base64 STRINGS, not `{pub,
-  xPub}` pairs** (unlike `/members.json`/`/admin-members.json`) - a real
+  xPub}` pairs** (unlike `/members.json`) - a real
   bug this design caught: `shell.js` originally reused `fetchMembers()`
   (built for the `{pub, xPub}` shape) against this endpoint, silently
   misparsing every entry (`m.pub` on a bare string is `undefined`), which
@@ -1069,12 +1076,11 @@ own doc comment). Two changes close this:
   keypair on every redeploy - nothing mounts that path as a volume, so a
   fresh container has a fresh filesystem. The observed symptom: a
   different `QU_RELAY_ADMINS` value printed every time, and the OLD
-  relay-admin's already-installed admin-realm content (sealed for the OLD
-  identity's `xPub` - `'members'`-mode encryption has no retroactive
-  re-keying, see `docs/v5-space-core-guide.md`'s own "known gaps" section)
-  becomes permanently unreadable once that identity is gone - this is a
-  deployment-invocation bug, not a flaw in the `'relay-admins'` ACL
-  mechanism itself. Fixed three ways: (1) `QU_BOOTSTRAP_DIR` env var lets
+  relay-admin loses write access to everything it previously administered
+  (the admin app's own content included) the instant that identity is gone
+  from the list - this is a deployment-invocation bug, not a flaw in the
+  `'relay-admins'` ACL mechanism itself. Fixed three ways: (1)
+  `QU_BOOTSTRAP_DIR` env var lets
   an operator point the identity directory at durable storage without an
   explicit `--dir` every time; (2) the script now warns LOUDLY whenever
   neither is set, rather than silently doing the ephemeral thing; (3)
@@ -1102,7 +1108,7 @@ simply absent, with no stale state to reconcile. This does NOT affect
 already-installed apps/pages/templates at all (those are separate,
 self-certifying `'content'`-ACL Nodes an app-admin owns independently -
 revoking a RELAY-admin never touches them) - only future `qu-platform-apps`
-writes and admin-realm access by the removed identity stop working.
+writes and admin-app writes by the removed identity stop working.
 
 What a plain restart canNOT do is update an ALREADY-CONNECTED client
 mid-session (its own `Space` object keeps whatever `members`/`relayAdmins`
@@ -1146,13 +1152,12 @@ framing carried all the way through for an ORDINARY app: templates and
 styles are now genuinely stored and edited THROUGH the UI, and page data
 filling those templates is saved through the same editor, no CLI/Dev-API
 script required for day-to-day content work. Nothing here is
-admin-realm-specific in principle: `installAppBundle()`/
+admin-app-specific in principle: `installAppBundle()`/
 `installAdminAppBundle()` are already the SAME shape, `ContentResolver`'s
-`kinds` override already makes "which Kind-Schema set (and therefore which
-confidentiality tier) a piece of content resolves against" a parameter,
-not a hardcoded choice. What is genuinely NOT built yet, for this to be a
-fully general CMS: editing the admin realm's own content through this same
-UI (see above), and a generalized "any sufficiently-trusted identity can
-install a NEW kind of app" story beyond the two built-in shapes (an
-ordinary `qu-app` and the admin realm) - both real, separate work, not
-attempted in this pass.
+`kinds` override already makes "which Kind-Schema set a piece of content
+resolves against" a parameter, not a hardcoded choice. What is genuinely
+NOT built yet, for this to be a fully general CMS: editing the built-in
+admin app's own content through this same UI (see above), and a
+generalized "any sufficiently-trusted identity can install a NEW kind of
+app" story beyond the two built-in shapes (an ordinary `qu-app` and the
+admin app) - both real, separate work, not attempted in this pass.

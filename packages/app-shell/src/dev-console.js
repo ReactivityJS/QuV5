@@ -29,8 +29,8 @@
  * anywhere on the page gets its `textContent` set to the current
  * identity's base64 signing/X25519 pubkey once ready - `build.mjs`'s own
  * unconfigured-page markup uses this so the exact values `QU_APP_ADMIN_PUB`/
- * `QU_MEMBERS_JSON`/`QU_RELAY_ADMINS` expect are copy-pasteable straight off
- * the page, no devtools required -
+ * `QU_RELAY_ADMINS` (the signing pubkey) and `QU_MEMBERS_JSON` (both) expect
+ * are copy-pasteable straight off the page, no devtools required -
  * `window.Qu` itself (`Qu.pub`/`Qu.xPub`/`Qu.identity`) stays available
  * for anyone who prefers the console, or wants the raw keys for a script.
  */

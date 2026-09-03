@@ -39,13 +39,10 @@
  * any app/platform is even configured. See that file's own doc comment.
  */
 import { QuCrypto } from '@qu/core';
-import { Space, deriveOwnerNodeId } from '@qu/space-core';
+import { Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport/ws-client-transport';
-import { EventBus } from '@qu/events';
-import { autoCompactOnJoin } from '@qu/space-plugins';
 import '@qu/space-components/elements'; // registers <qu-view>/<qu-bind>/<qu-list> - see that module's own doc comment. Side-effect only import, deliberately unused otherwise.
-import { deriveContentNodeId, adminAppManifestKind, adminTemplateKind, adminPageKind, ADMIN_REALM_ANCHOR } from '@qu/app-core';
-import { loadOrCreateIdentity, joinSpace, fetchMembers, fetchRelayAdmins, IDENTITY_STORAGE_KEY } from './identity.js';
+import { loadOrCreateIdentity, joinSpace, fetchRelayAdmins, IDENTITY_STORAGE_KEY } from './identity.js';
 import { initDevConsole } from './dev-console.js';
 import { startApp, startPlatform } from './boot.js';
 
@@ -66,8 +63,8 @@ export class QuAppShell extends HTMLElement {
       const members = await joinSpace({ name, identity });
       // Only fetched in PLATFORM mode - a single-app deployment never touches `qu-platform-apps`
       // at all, so there is nothing here for it to independently verify (see `Space`'s own
-      // `relayAdmins` constructor doc comment, and `relay-server.js`'s own "ADMIN REALM"-adjacent
-      // `GET /relay-admins.json` doc comment for the server side of this public, unauthenticated read).
+      // `relayAdmins` constructor doc comment, and `relay-server.js`'s own `GET /relay-admins.json`
+      // doc comment for the server side of this public, unauthenticated read).
       const relayAdmins = isPlatformMode ? await fetchRelayAdmins().catch(() => []) : [];
 
       const transport = new WsClientTransport(relayUrl);
@@ -75,33 +72,10 @@ export class QuAppShell extends HTMLElement {
       const space = new Space({ identity, members, relayAdmins, transport });
 
       if (isPlatformMode) {
-        // The admin realm's own transport/Space - see relay-server.js's own "ADMIN REALM" doc
-        // comment for the server side of this `/admin-ws` convention. Built lazily (boot.js only
-        // calls this the first time a route actually resolves into `realm: 'admin'`) - the SAME
-        // identity as the main Space (no separate admin identity to manage), it just may or may not
-        // turn out to be one of the admin realm's own configured members.
-        const connectAdminSpace = async () => {
-          const adminUrl = relayUrl.replace(/\/?$/, '') + '/admin-ws';
-          const httpBase = relayUrl.startsWith('wss:') ? relayUrl.replace(/^wss:/, 'https:') : relayUrl.replace(/^ws:/, 'http:');
-          const adminMembers = await fetchMembers({ baseUrl: httpBase, path: '/admin-members.json' }).catch(() => []);
-          const adminTransport = new WsClientTransport(adminUrl);
-          await adminTransport.connect();
-          const adminBus = new EventBus();
-          const adminSpace = new Space({ identity, members: adminMembers, transport: adminTransport, bus: adminBus });
-          // The admin realm's content is genuinely 'encrypted' (kinds.js's "THE ADMIN REALM" doc
-          // comment) - unlike the main Space's own public app content, it DOES have the late-joiner
-          // gap `@qu/space-plugins`' autoCompactOnJoin() exists to close (see that file's own doc
-          // comment). Only the BUILT-IN console's own well-known ids are covered here - any OTHER
-          // admin-realm content a deployment installs later would need its own `.watch(nodeId)` call
-          // to stay reachable for a newly added admin, a currently undocumented gap for anything
-          // beyond this one console.
-          const manifestId = await deriveOwnerNodeId(ADMIN_REALM_ANCHOR, adminAppManifestKind.kind);
-          const templateId = await deriveContentNodeId(ADMIN_REALM_ANCHOR, adminTemplateKind.kind, 'main');
-          const pageId = await deriveContentNodeId(ADMIN_REALM_ANCHOR, adminPageKind.kind, '/');
-          autoCompactOnJoin(adminSpace, adminBus, [manifestId, templateId, pageId]);
-          return adminSpace;
-        };
-        startPlatform({ space, connectAdminSpace, mountEl: this, window });
+        // The admin app lives in this SAME main Space now (kinds.js's own "THE ADMIN APP" doc
+        // comment) - no separate transport/Space/identity to build. Any visitor's own regular
+        // identity works the moment its pubkey is listed in QU_RELAY_ADMINS.
+        startPlatform({ space, mountEl: this, window });
       } else {
         startApp({ space, appAdminPub: QuCrypto.fromBase64(appAdminPubB64), mountEl: this, window });
       }

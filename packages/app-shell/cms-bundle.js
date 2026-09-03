@@ -26,9 +26,9 @@
  * 'content' ACL mode" doc comment) - there is no client-side way to tell
  * the two cases apart, by design.
  *
- * NOT YET COVERED: editing the ADMIN REALM's own console content through
- * this same UI - that realm's Kinds (`qu-admin-*`) have no registries/
- * `edit*()` counterparts yet (see `dev.js`'s own admin-realm section doc
+ * NOT YET COVERED: editing the built-in admin app's own console content
+ * through this same UI - its Kinds (`qu-admin-*`) have no registries/
+ * `edit*()` counterparts yet (see `dev.js`'s own "ADMIN APP DEV API" doc
  * comment), so `bin/install-admin-console.mjs` remains the only way to
  * update it, unchanged. A reasonable future extension, not attempted here.
  */

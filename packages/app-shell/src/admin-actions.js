@@ -11,16 +11,16 @@
  * ATTRIBUTE, the content itself stays inert markup.
  *
  * Two conventions, both scoped to whatever `mountEl` currently holds after
- * `@qu/app-renderer`'s `renderPage()` ran for an admin-realm route
+ * `@qu/app-renderer`'s `renderPage()` ran for a `realm: 'admin'` route
  * (`boot.js`'s `startPlatform()` calls `wireAdminConsole()` right after):
  *
  *   - `<form data-qu-action="register-app">` with `name="prefix"`/
  *     `name="appAdminPub"`/`name="name"` inputs - submitting it calls
- *     `registerApp()` (`@qu/app-core`'s Dev API) against the MAIN Space
- *     (the alias registry lives there, never in the admin realm itself -
- *     see `kinds.js`'s own `platformAppsKind` doc comment on why an
- *     alias's mere EXISTENCE isn't confidential, only a realm's own
- *     content is).
+ *     `registerApp()` (`@qu/app-core`'s Dev API) against the (one and only)
+ *     main Space, which is also where this console's own content lives now
+ *     (see `kinds.js`'s own `platformAppsKind`/"THE ADMIN APP" doc
+ *     comments - neither an alias's mere EXISTENCE nor this console's own
+ *     markup was ever confidential, only WRITE-access is restricted).
  *   - `[data-qu-bind="platform-apps-list"]` - populated with one `<li>`
  *     per currently registered app/alias (via `PlatformRuntime.resolveApps()`),
  *     refreshed once, at wiring time - not live-reactive yet (a real nav
@@ -29,10 +29,11 @@
  *     not attempted here to keep this file's one job small).
  *
  * WRITE-ACL, not this file, is what actually gates the registration
- * write: `registerApp()` writes `qu-platform-apps`, a `'named'`-ACL Kind
- * only the configured relay-admin identity can sign for - a non-admin's
- * submit attempt is silently rejected by the relay exactly like any other
- * unauthorized write in this framework (see kinds.js's own doc comment).
+ * write: `registerApp()` writes `qu-platform-apps`, a `'relay-admins'`-ACL
+ * Kind only an identity listed in the relay's own `QU_RELAY_ADMINS` can
+ * sign for - a non-admin's submit attempt is silently rejected by the
+ * relay exactly like any other unauthorized write in this framework (see
+ * kinds.js's own doc comment).
  */
 import { QuCrypto } from '@qu/core';
 import { registerApp } from '@qu/app-core';
@@ -71,7 +72,7 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
       }
       for (const app of apps) {
         const li = doc.createElement('li');
-        const owner = app.realm === 'admin' ? 'Admin-Realm' : `${QuCrypto.toBase64(app.appAdminPub).slice(0, 20)}…`;
+        const owner = app.realm === 'admin' ? 'Admin' : `${QuCrypto.toBase64(app.appAdminPub).slice(0, 20)}…`;
         li.textContent = `#/${app.prefix} — ${app.name ?? '(unbenannt)'} (${owner})`;
         list.appendChild(li);
       }

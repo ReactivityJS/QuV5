@@ -22,8 +22,8 @@ services:
   # `qu-app-shell-relay-admin-identity` below is mounted at `QU_BOOTSTRAP_DIR` - without a
   # persistent volume there, the relay-admin identity this generates lives on the CONTAINER's own
   # ephemeral filesystem and is silently LOST on every redeploy, printing a brand-new
-  # QU_RELAY_ADMINS every time and orphaning whatever the OLD identity had already installed in the
-  # admin realm (bootstrap-platform.mjs's own top doc comment, "PERSISTING THE IDENTITY DIRECTORY" -
+  # QU_RELAY_ADMINS every time and leaving the OLD identity unable to write anything it previously
+  # administered (bootstrap-platform.mjs's own top doc comment, "PERSISTING THE IDENTITY DIRECTORY" -
   # a real, observed failure mode, not a hypothetical one). Back up that volume like you would any
   # other private key.
   #
@@ -51,18 +51,20 @@ services:
       # @qu/core) and set its base64 signing pubkey here.
       QU_APP_ADMIN_PUB: ${QU_APP_ADMIN_PUB:-}
       # PLATFORM mode instead of the single app above (architecture.md §7) - takes priority over
-      # QU_APP_ADMIN_PUB when both are set. JSON array of {"pub","xPub"} (base64) - every relay-admin
-      # identity, all equally and symmetrically (no single "owner"), authorized to (a) write
-      # qu-platform-apps (register/manage already-installed apps under path prefixes - a BRAND NEW
-      # app-admin needs no separate config here at all, `registerApp()` alone is enough, discovered
-      # live by this relay itself - see @qu/app-shell's own live-app-resolver.js) and (b) read/write
-      # the CONFIDENTIAL admin realm's own content (architecture.md §7's "ADMIN REALM" - a wholly
-      # separate Space/relay-forwarder from the main one above, reached at /admin-ws, never
-      # open-join). This is the ONE static list this whole deployment needs - see @qu/space-core's
-      # kinds.js/kind-schema.js own doc comment on the 'relay-admins' ACL mode, and
-      # relay-server.js's own doc comment. Empty/unset still starts the admin realm (so it CAN be
-      # bootstrapped - see packages/app-shell/bin/install-admin-console.mjs) but nobody can decrypt
-      # anything written to it yet, and nobody can write qu-platform-apps either.
+      # QU_APP_ADMIN_PUB when both are set. JSON array of PLAIN base64 signing pubkeys, e.g.
+      # ["<pub1>","<pub2>"] - every relay-admin identity, all equally and symmetrically (no single
+      # "owner"), authorized to (a) write qu-platform-apps (register/manage already-installed apps
+      # under path prefixes - a BRAND NEW app-admin needs no separate config here at all,
+      # `registerApp()` alone is enough, discovered live by this relay itself - see @qu/app-shell's
+      # own live-app-resolver.js) and (b) write the built-in admin console's own content, which lives
+      # in this SAME main Space now (architecture.md §7's "One relay Space, not two" - no separate
+      # Space/relay-forwarder, no /admin-ws). This is the ONE static list this whole deployment
+      # needs - see @qu/space-core's kinds.js/kind-schema.js own doc comment on the 'relay-admins'
+      # ACL mode, and relay-server.js's own doc comment. ANY pubkey works the moment it's listed
+      # here, including an operator's own already-existing browser identity - no separate admin
+      # identity to generate or import. Empty/unset still starts the relay (so it CAN be
+      # bootstrapped - see packages/app-shell/bin/install-admin-console.mjs) but nobody can write
+      # qu-platform-apps or the admin console yet.
       QU_RELAY_ADMINS: ${QU_RELAY_ADMINS:-}
       # OPTIONAL - qu-page/qu-template/qu-style are 'content'-ACL (self-certifying per-owner grants,
       # @qu/app-core's kinds.js), not 'members'-ACL, so an app-admin needs no entry here just to

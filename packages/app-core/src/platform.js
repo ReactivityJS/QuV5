@@ -28,8 +28,8 @@
  *      admin-curated - any of the configured relay-admins, see kinds.js's
  *      own doc comment on `platformAppsKind`'s `'relay-admins'` ACL) -
  *      `{realm: 'main', appAdminPub, ...}` as above, or `{realm: 'admin',
- *      ...}` (no `appAdminPub` - the confidential admin realm has no single
- *      owner, see kinds.js's own "THE ADMIN REALM" doc comment) when a
+ *      ...}` (no `appAdminPub` - the built-in admin app has no single
+ *      owner, see kinds.js's own "THE ADMIN APP" doc comment) when a
  *      relay-admin registered that prefix with `registerApp(..., {realm:
  *      'admin'})` - conventionally `"admin"`, but that is a NAMING
  *      convention the bootstrap installer picks, not something this class

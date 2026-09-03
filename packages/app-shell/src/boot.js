@@ -83,15 +83,16 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  * the CURRENT route against `PlatformRuntime.resolveForPath()` - a
  * registered alias (`qu-platform-apps`), or failing that, the path's first
  * segment tried as a literal owner id - and delegates to an ordinary
- * `AppRuntime`, no differently for the built-in admin realm than for any
+ * `AppRuntime`, no differently for the built-in admin app than for any
  * other app: NEITHER is special-cased on the route STRING (architecture.md
  * §7 - "kein Sonderfall zu normalen Spaces"), only on the resolved match's
- * `realm` - `'admin'` needs a DIFFERENT `Space` (`adminSpace`, connected
- * lazily via `connectAdminSpace` - a genuinely separate, confidentially-
- * membered Space, not just a differently-owned Node in the main one, see
- * `kinds.js`'s own "THE ADMIN REALM" doc comment) and the `qu-admin-*` Kind
- * set (`ADMIN_KINDS`) instead of the main `appAdminPub`. Only ONE thing
- * here is genuinely framework UI, never Qu content: a route matching NO
+ * `realm`, which decides only WHICH Kind SET (`ADMIN_KINDS` vs. the
+ * default) and WHICH fixed owner (`ADMIN_REALM_ANCHOR` vs. `match.appAdminPub`)
+ * to resolve against - both realms live in the exact SAME `space` (see
+ * "One relay Space, not two" in this document's own history / kinds.js's
+ * own "THE ADMIN APP" doc comment: there is no second, separately-
+ * membered `Space`/relay-forwarder any more). Only ONE thing here is
+ * genuinely framework UI, never Qu content: a route matching NO
  * alias/owner id at all renders `renderLandingPage()` (see this file's own
  * doc comment on it, right above) - the admin console's own markup, by
  * contrast, is ordinary installed content (`bin/install-admin-console.mjs`),
@@ -104,43 +105,34 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  * - a correct no-op unless the resolved page happens to be the built-in
  * CMS editor (`cms-bundle.js`'s `installCms()`), which any app-admin can
  * install into their OWN app's Space, same as `startApp()` does below.
- * @param {{space: import('@qu/space-core').Space, connectAdminSpace?: () => Promise<import('@qu/space-core').Space>, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
+ * @param {{space: import('@qu/space-core').Space, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
  *   `space` - MUST have been constructed with a `relayAdmins` list (see
  *   `Space`'s own constructor doc comment) matching the relay's own
- *   `QU_RELAY_ADMINS` config, or `qu-platform-apps` reads/writes fail this
- *   Space's own independent ACL check regardless of what the relay allows
- *   (`kinds.js`'s own `platformAppsKind` doc comment on the `'relay-admins'`
- *   mode) - `shell.js`'s own boot sequence fetches that list and passes it
- *   through, same as it already does for `members`.
- *   `connectAdminSpace` - lazily builds (and this function memoizes) the
- *   Space connected to the admin realm's own relay-forwarder; only called
- *   the first time a route actually resolves into `realm: 'admin'` - most
- *   visitors never trigger it. Omit if this deployment has no admin realm
- *   wired up (e.g. some tests) - an admin-realm route then falls through
- *   to the landing page instead of throwing.
+ *   `QU_RELAY_ADMINS` config, or BOTH `qu-platform-apps` AND the admin
+ *   app's own `qu-admin-*` Kinds fail this Space's own independent ACL
+ *   check regardless of what the relay allows (`kinds.js`'s own
+ *   `'relay-admins'` doc comments) - `shell.js`'s own boot sequence fetches
+ *   that list and passes it through, same as it already does for
+ *   `members`. Any visitor's own regular, already-existing identity works
+ *   here the moment its pubkey is listed - no separate admin identity to
+ *   generate or import.
  * @returns {{platform: PlatformRuntime, router: HashRouter}}
  */
-export function startPlatform({ space, connectAdminSpace, mountEl, window, styleId, resolveTimeout }) {
+export function startPlatform({ space, mountEl, window, styleId, resolveTimeout }) {
   const platform = new PlatformRuntime(space);
   const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
-  let adminSpacePromise = null;
-  const getAdminSpace = () => (adminSpacePromise ??= connectAdminSpace());
 
   const router = new HashRouter({
     window,
     onChange: async (route) => {
       const match = await platform.resolveForPath(route, timeoutOpt);
-      if (!match || (match.realm === 'admin' && !connectAdminSpace)) {
+      if (!match) {
         await renderLandingPage({ mountEl, doc: window.document, platform });
         return;
       }
-      const routeSpace = match.realm === 'admin' ? await getAdminSpace() : space;
-      const runtime = match.realm === 'admin' ? new AppRuntime(routeSpace, { appAdminPub: ADMIN_REALM_ANCHOR, kinds: ADMIN_KINDS }) : new AppRuntime(routeSpace, { appAdminPub: match.appAdminPub });
+      const runtime = match.realm === 'admin' ? new AppRuntime(space, { appAdminPub: ADMIN_REALM_ANCHOR, kinds: ADMIN_KINDS }) : new AppRuntime(space, { appAdminPub: match.appAdminPub });
       const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
-      // See startApp()'s own comment on `.quSpace` - the ADMIN realm genuinely is a different
-      // Space (kinds.js's own "THE ADMIN REALM" doc comment), so this has to be re-set on every
-      // navigation, not just once like startApp()'s single-Space case.
-      mountEl.quSpace = routeSpace;
+      mountEl.quSpace = space;
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
       if (match.realm === 'admin') wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
       else await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
