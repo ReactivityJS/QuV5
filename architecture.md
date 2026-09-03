@@ -844,20 +844,51 @@ afterthought):
   possible/sensible) and templates that "einfach auf ... reaktiven
   Components bestehen." `pageKind.data` above is STATIC, author-entered
   structured content (an `'atomic'` field, one opaque last-write-wins
-  value) - it is not live-bound to anything, including "the current
-  visitor's identity," which isn't even PAGE data at all (it's
-  per-VISITOR, resolved differently for every browser rendering the same
-  page). `@qu/space-ui`'s `bindField()`/`bindList()` already ARE the
-  reactive primitive this needs - what's missing is a declarative,
-  content-authorable convention (mirroring `cms-actions.js`'s/
-  `admin-actions.js`'s own `data-qu-*` attribute pattern) that wires a
-  rendered page's own live Space subscription - or a visiting identity's
-  own state - into arbitrary template elements, without a full page
-  reload on every remote change. Real, separate design work: what "the
-  current visitor" resolves to, how a template declares a live binding
-  vs. a static slot, and how that interacts with `sanitizeHtml()`'s Stufe
-  1 (a live binding is framework-wired, like `cms-actions.js`'s own forms
-  - never inline `<script>`).
+  value) - it is not live-bound to anything.
+  A prior draft of this section treated "the current visitor's identity"
+  as needing its own separate design (what it resolves to, how a
+  template would declare it specially). That was wrong, and QuV5's own
+  prior-art sibling project (`ReactivityJS/QuV3`, `packages/ui/src/
+  components.js` + `packages/services/src/profile-service.js`) shows why:
+  a visitor's own identity is not a distinct binding *kind* at all, just
+  an ordinary Space path computed from a pubkey the runtime already has.
+  QuV3's `ProfileService.getOwnProfile()` builds it as
+  `actorPath(QuCrypto.toBase64Url((await identityEngine.getMainKey())
+  .publicKey), 'profile')` - a plain helper call, not a framework special
+  case - and hands the
+  resulting STRING straight to the same binding primitive every other
+  path uses. QuV3's reactive Components (`<qu-view>`, `<qu-bind>`,
+  `<qu-list>`, `<qu-if>`) have no "current user" concept anywhere: each
+  takes a `path` attribute (a plain string, since Custom Element
+  attributes are always strings), resolved by `resolvePath()`, and reach
+  their target Qu instance by walking up the DOM for a `.qu` property
+  (`findQu()`) rather than a global singleton. The only case QuV3 needed
+  anything beyond a static `path` string is a `<qu-list>` item's `related`
+  paths - computed once per item, via a plain JS function set on the list
+  (not an attribute), because a per-item id genuinely isn't known until
+  the list stamps that item. A visitor's own identity is knowable before
+  any markup is even authored, so it needs no such mechanism - it is
+  exactly as "special" as any other fixed path, confirming the user's own
+  read of this.
+  What QuV5 is actually missing, then, isn't "current user" design - it's
+  the declarative layer itself. `@qu/space-ui`'s `bindField()`/
+  `bindList()` are QuV5's equivalent of QuV3's `@qu/reactive`'s `watch()`/
+  `watchChildren()`: the reactive primitive already exists, and it's
+  purely imperative (`bindField(el, field, opts)` - the caller must
+  already hold a real DOM element and a resolved `Field`). QuV3 layers
+  Custom Elements over that primitive so a CMS *template* can declare a
+  live binding by markup alone (`<qu-view path="...">`); QuV5 has no such
+  layer yet. Building one - a small set of Custom Elements resolving a
+  `path`/`field`/`attr` attribute against a Qu instance found via DOM
+  ancestry, wired to `bindField()`/`bindList()` under the hood - is the
+  real Phase 2 scope, and it benefits every live binding (a visitor's own
+  profile alias included) identically, not as a special case. Still real,
+  separate design work: how such an element resolves its own Qu instance
+  in QuV5's shell (an equivalent of `findQu()`/`.qu`), and how it
+  interacts with `sanitizeHtml()`'s Stufe 1 (a live-binding Custom
+  Element tag is framework-wired markup, like `cms-actions.js`'s own forms
+  - never inline `<script>`) - but no longer "what does 'current visitor'
+  even mean," which QuV3 already answers.
 - **Phase 3, Collections wired into routing/CMS authoring**: a
   Collection's items aren't hooked into `HashRouter`/`AppRuntime.
   resolveRoute()` yet (a blog's individual posts don't get their own
