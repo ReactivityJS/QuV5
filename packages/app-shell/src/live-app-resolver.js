@@ -4,34 +4,46 @@
  * used to document as a deliberate, accepted limitation. Wraps
  * `createAppResolveKindSchema()` (a small, pure, synchronous-result
  * builder) in a reactive shell: this relay connects an INTERNAL, read-only
- * `Space` to its OWN main hub (an ordinary `InProcessTransport`, the same
- * primitive `@qu/space-transport`'s own tests use to talk to a relay
- * without a real socket) and watches `qu-platform-apps` - now a
- * `'relay-admins'`-ACL registry any configured relay-admin may write, see
- * `@qu/app-core`'s kinds.js own doc comment - rebuilding the resolver's
- * `appAdminPubs` set every time that registry changes. A relay-admin
- * registering a brand-new app-admin (`registerApp()`) is therefore enough
- * on its own - no separate STATIC `QU_APP_ADMIN_PUBS` list, no restart.
+ * `Space` to ITSELF, over a REAL WebSocket loopback connection (exactly
+ * the same `WsClientTransport` any ordinary peer/browser uses - no
+ * fabricated in-process shortcut, see "WHY A REAL SOCKET" below), and
+ * watches `qu-platform-apps` - now a `'relay-admins'`-ACL registry any
+ * configured relay-admin may write, see `@qu/app-core`'s kinds.js own doc
+ * comment - rebuilding the resolver's `appAdminPubs` set every time that
+ * registry changes. A relay-admin registering a brand-new app-admin
+ * (`registerApp()`) is therefore enough on its own - no separate STATIC
+ * `QU_APP_ADMIN_PUBS` list, no restart.
+ *
+ * WHY A REAL SOCKET, NOT `InProcessTransport`: that primitive (`@qu/space-
+ * transport`'s own tests use it) only works against a hub built by
+ * `createInProcessHub()`, which ALSO plays the peer-registration role
+ * (`registerPeerInbox`/`sendToRelay`) - a real relay's hub
+ * (`createWsServerHub()`) deliberately has NO such API (see that file's
+ * own doc comment: "there is no `registerPeerInbox`/`sendToRelay` here -
+ * those are PEER-side concerns"), only real socket connections. Rather
+ * than inventing a THIRD, relay-only "local peer" hub API, this reader
+ * connects the exact same way any other peer would - simpler, and proves
+ * the live registry is reachable through the SAME path a real app-admin's
+ * own `registerApp()`/`createApp()` calls use, not a parallel one.
  *
  * WHY THIS LIVES HERE, NOT IN `@qu/app-core`: `@qu/app-core`'s own `src/`
  * deliberately has no real dependency on `@qu/space-transport` (only a
  * devDependency, used by its tests) - it stays transport-agnostic, DOM-
  * free, "Zero DOM dependency" (see runtime.js's own doc comment). This
- * file needs `InProcessTransport` to talk to the relay's own hub directly,
- * which only makes sense at the layer that ALREADY composes
- * `@qu/space-transport` with the App layer - `@qu/app-shell`, exactly
- * where `relay-server.js` itself lives.
+ * file needs `WsClientTransport`, which only makes sense at the layer that
+ * ALREADY composes `@qu/space-transport` with the App layer -
+ * `@qu/app-shell`, exactly where `relay-server.js` itself lives.
  *
  * ORDERING: `resolveKindSchema` (the function this returns) MUST be handed
  * to `createRelayForwarder({hub, resolveKindSchema, ...})` BEFORE
- * `start()` is called - `start()` connects an internal `Space` to that
- * SAME hub, which only works once the hub is actually listening (`hub.
- * registerRelay()`, called inside `createRelayForwarder()`). The returned
- * `resolveKindSchema` is a STABLE function reference from the start - it
- * delegates to a swappable inner closure (`current`), which is what lets
- * its behavior update over time without ever handing the relay a new
- * function object (relay.js only ever reads the one passed at
- * construction).
+ * `start()` is called, AND the relay's HTTP/WebSocket server must already
+ * be LISTENING (`start()` connects to `url` as an ordinary client - see
+ * `relay-server.js`'s own `main()` for the exact "listen, then start()"
+ * order). The returned `resolveKindSchema` is a STABLE function reference
+ * from the start - it delegates to a swappable inner closure (`current`),
+ * which is what lets its behavior update over time without ever handing
+ * the relay a new function object (relay.js only ever reads the one
+ * passed at construction).
  *
  * BOOTSTRAP WINDOW: before `start()`'s own first `await` resolves,
  * `current` briefly classifies nothing but `qu-platform-apps` itself
@@ -46,24 +58,25 @@
  */
 import { QuCrypto } from '@qu/core';
 import { Space, deriveOwnerNodeId } from '@qu/space-core';
-import { InProcessTransport } from '@qu/space-transport';
+import { WsClientTransport } from '@qu/space-transport';
+import WebSocket from 'ws';
 import { createAppResolveKindSchema, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
 
 /**
  * @param {{collectionRegistryKinds?: object[]}} [params] - forwarded to every `createAppResolveKindSchema()` rebuild, see that function's own doc comment.
- * @returns {{resolveKindSchema: (nodeId: string) => object, start: (params: {hub: object, relayAdmins?: Array<Uint8Array>}) => Promise<void>}}
+ * @returns {{resolveKindSchema: (nodeId: string) => object, start: (params: {url: string, relayAdmins?: Array<Uint8Array>}) => Promise<void>}}
  */
 export function createLiveAppResolveKindSchema({ collectionRegistryKinds = [] } = {}) {
   let current = () => null; // replaced synchronously at the top of start(), before its first await - see this file's own "BOOTSTRAP WINDOW" doc comment.
   const resolveKindSchema = (nodeId) => current(nodeId);
 
-  /** @param {{hub: object, relayAdmins?: Array<Uint8Array>}} params */
-  async function start({ hub, relayAdmins = [] }) {
+  /** @param {{url: string, relayAdmins?: Array<Uint8Array>}} params - `url` is this SAME relay's own address (e.g. `ws://127.0.0.1:<port>`), reached ONLY after it is actually listening - see this file's own "ORDERING" doc comment. */
+  async function start({ url, relayAdmins = [] }) {
     current = await createAppResolveKindSchema({ appAdminPubs: [], collectionRegistryKinds });
 
     const kp = await QuCrypto.generateKeypair(); // throwaway - this Space only ever reads (useNode()), never writes, so no real identity is needed.
     const identity = { signingKey: kp.privateKey, signingPub: kp.publicKey, xPrivateKey: kp.xPrivateKey, xPublicKey: kp.xPublicKey };
-    const transport = new InProcessTransport(hub, `live-app-resolver:${QuCrypto.toBase64Url(kp.publicKey)}`);
+    const transport = new WsClientTransport(url, { WebSocketImpl: WebSocket });
     await transport.connect();
     // members: [] - 'relay-admins'-ACL subscribe/read never needs Space membership (relay.js's own
     // handleSubscribe() bypass, see kind-schema.js's doc comment on the mode) - and this reader

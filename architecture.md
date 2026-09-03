@@ -103,7 +103,7 @@ private key to attempt decryption with (`verifyEnvelope()` needs only a
 public key; `openUpdate()` needs the private key and the relay never gets
 one).
 
-### 3.2 Kind-Schema: shape × visibility, and FOUR ACL modes
+### 3.2 Kind-Schema: shape × visibility, and FIVE ACL modes
 
 A field declares two INDEPENDENT properties (`kind-schema.js`):
 
@@ -134,6 +134,17 @@ A field declares two INDEPENDENT properties (`kind-schema.js`):
   not just flat `'members'`-mode sharing, and a GLOBAL Qu-level primitive
   any many-per-owner content Kind wants (a calendar event, a forum post, a
   chat room), not an app-core invention.
+- **`'relay-admins'`** — a flat, symmetric list like `'members'`, but
+  checked against a `Space`/relay's own `relayAdmins` constructor param
+  INDEPENDENTLY of ordinary Space membership/`QU_ALLOW_JOIN` self-join —
+  for content that must live in an OPEN-JOIN Space (world-readable with
+  zero membership) yet be writable only by a small, boot-time-configured
+  set with no single owner (`@qu/app-core`'s `qu-platform-apps`, the
+  reference use — see §7's own "A fourth ACL mode" for the full "why" and
+  `packages/space-transport/src/relay.js`'s `addRelayAdmin()`/
+  `removeRelayAdmin()` for how that list is grown/shrunk without a relay
+  restart, the same reactive shape `addMember()`/`removeMember()` already
+  give `'members'`).
 
 See `docs/v5-space-core-guide.md` §3 for the full behavioral contract, and
 `packages/space-core/src/grant.js`'s doc comment for the real Yjs property
@@ -1000,9 +1011,15 @@ own doc comment). Two changes close this:
 - **Live app-admin discovery** (`packages/app-shell/src/
   live-app-resolver.js`'s `createLiveAppResolveKindSchema()`) is the actual
   fix for "new app-admin needs a restart": the relay connects an INTERNAL,
-  read-only `Space` to its OWN main hub (an ordinary `InProcessTransport`,
-  the same primitive `@qu/space-transport`'s own tests already use) and
-  watches `qu-platform-apps` - now writable by any configured relay-admin -
+  read-only `Space` to ITSELF, over a REAL WebSocket loopback connection
+  (`WsClientTransport`, exactly what any ordinary peer/browser uses - NOT
+  `InProcessTransport`: that primitive only works against a hub built by
+  `createInProcessHub()`, which also plays the peer-registration role;
+  `createWsServerHub()` - what a real relay actually uses - deliberately
+  has no such API, only real socket connections, so `relay-server.js`'s
+  `main()` calls `start({url: ws://127.0.0.1:<port>, ...})` only AFTER
+  `httpServer.listen()` has actually resolved) and watches
+  `qu-platform-apps` - now writable by any configured relay-admin -
   rebuilding its `resolveKindSchema`'s app-admin classification every time
   that registry changes. A relay-admin calling `registerApp()` (e.g.
   through the built-in admin console) is therefore enough on its own -
@@ -1014,6 +1031,31 @@ own doc comment). Two changes close this:
   not `@qu/app-core` - `@qu/app-core`'s own `src/` has no real dependency
   on `@qu/space-transport` (only a devDependency, used by its tests), so it
   stays transport-agnostic; `@qu/app-shell` already composes both.
+- **ORDERING MATTERS NOW for provisioning a brand-new app** - a real,
+  end-to-end-tested consequence of the above: a relay-admin's
+  `registerApp({prefix, appAdminPub, name})` write must actually reach the
+  relay (and its internal live-resolver Space must have rebuilt from it)
+  BEFORE that app-admin's own FIRST write (their `qu-app` manifest, a
+  `'named'`-ACL, self-certifying Kind) - otherwise the relay still
+  misclassifies their manifest Node against the ordinary `'content'`-ACL
+  fallback (kinds.js's own doc comment), which needs a grant nothing ever
+  sends, so the write is silently rejected. Under the OLD static
+  `QU_APP_ADMIN_PUBS` model this never mattered (every app-admin was known
+  from boot); `packages/app-shell/bin/bootstrap-platform.mjs` had to be
+  reordered for this reason - it now registers the demo app's prefix and
+  waits for that write to be acked (plus a short settle for the relay's own
+  live-resolver to catch up) BEFORE connecting as `demo-app-admin` and
+  writing any of its content, not after.
+- **`GET /relay-admins.json` returns bare base64 STRINGS, not `{pub,
+  xPub}` pairs** (unlike `/members.json`/`/admin-members.json`) - a real
+  bug this design caught: `shell.js` originally reused `fetchMembers()`
+  (built for the `{pub, xPub}` shape) against this endpoint, silently
+  misparsing every entry (`m.pub` on a bare string is `undefined`), which
+  left every visitor's own `Space` unable to verify ANY `qu-platform-apps`
+  write it received - the platform silently looked empty to every browser
+  even though the CLI-driven bootstrap had installed everything correctly.
+  Fixed with a dedicated `fetchRelayAdmins()` (`identity.js`) that decodes
+  the plain pubkey array directly.
 - **Revocation remains open** for `qu-platform-apps`'s CONTENT: its `apps`
   field is a `ListField` with no removal primitive, so there is still no
   `unregisterApp()` - real, separate work if "revoke a registered app's

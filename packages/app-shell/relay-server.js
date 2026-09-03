@@ -244,7 +244,6 @@ async function main() {
       : () => true;
 
   const relay = createRelayForwarder({ hub: mainHub, members, relayAdmins: relayAdminPubs, resolveKindSchema, storage, bus });
-  if (liveResolver) await liveResolver.start({ hub: mainHub, relayAdmins: relayAdminPubs }); // AFTER createRelayForwarder() - see live-app-resolver.js's own "ORDERING" doc comment.
   const handleAppRequest = createAppRequestHandler({ webDir: WEB_DIR, members, relay, allowJoin: ALLOW_JOIN, log: console.log });
 
   // ADMIN hub - a wholly separate Space/relay-forwarder, its OWN flat `relayAdmins` list (the SAME
@@ -287,17 +286,23 @@ async function main() {
     res.end('not found');
   }
 
-  httpServer.listen(PORT, () => {
-    const mirrorNote = storage ? `mirroring to ${DATA_DIR}` : 'NO mirroring (live-only, QU_RELAY_DATA_DIR is empty)';
-    const appNote = platformMode
-      ? `PLATFORM mode, ${relayAdmins.length} relay-admin(s)`
-      : appAdminPub
-        ? `serving app-admin ${APP_ADMIN_PUB_B64}`
-        : 'NO app configured (QU_APP_ADMIN_PUB / QU_RELAY_ADMINS unset - see /)';
-    console.log(`[qu-app-shell-relay] listening on :${PORT} - ${appNote}, ${mirrorNote}`);
-    console.log(`[qu-app-shell-relay] open http://localhost:${PORT}/ in a browser - join is ${ALLOW_JOIN ? 'OPEN to anyone (QU_ALLOW_JOIN=false to lock it down)' : 'DISABLED (QU_ALLOW_JOIN=false)'}`);
-    console.log(`[qu-app-shell-relay] admin realm WS at ${ADMIN_WS_PATH} - membership is static (QU_RELAY_ADMINS), no self-join.`);
-  });
+  await new Promise((resolve) => httpServer.listen(PORT, resolve));
+  const mirrorNote = storage ? `mirroring to ${DATA_DIR}` : 'NO mirroring (live-only, QU_RELAY_DATA_DIR is empty)';
+  const appNote = platformMode
+    ? `PLATFORM mode, ${relayAdmins.length} relay-admin(s)`
+    : appAdminPub
+      ? `serving app-admin ${APP_ADMIN_PUB_B64}`
+      : 'NO app configured (QU_APP_ADMIN_PUB / QU_RELAY_ADMINS unset - see /)';
+  console.log(`[qu-app-shell-relay] listening on :${PORT} - ${appNote}, ${mirrorNote}`);
+  console.log(`[qu-app-shell-relay] open http://localhost:${PORT}/ in a browser - join is ${ALLOW_JOIN ? 'OPEN to anyone (QU_ALLOW_JOIN=false to lock it down)' : 'DISABLED (QU_ALLOW_JOIN=false)'}`);
+  console.log(`[qu-app-shell-relay] admin realm WS at ${ADMIN_WS_PATH} - membership is static (QU_RELAY_ADMINS), no self-join.`);
+
+  // MUST run AFTER the server is actually listening (this connects to itself, over a real
+  // WebSocket, exactly like any other peer - see live-app-resolver.js's own "ORDERING" doc comment
+  // on why an ordinary client connection, not a fabricated in-process peer, is what this needs:
+  // createWsServerHub() - unlike the in-process test hub - has no local-peer registration API at
+  // all, only real socket connections).
+  if (liveResolver) await liveResolver.start({ url: `ws://127.0.0.1:${PORT}`, relayAdmins: relayAdminPubs });
 }
 
 main().catch((err) => {
