@@ -827,6 +827,35 @@ extends this to "let a SPECIFIC other identity maintain exactly this
 page" (the `ownerPub` parameter on every `edit*()` call is what makes a
 grantee's write actually target the OWNER's Node id, not their own).
 
+**A real, deployment-observed bug: `editPage()`/`editTemplate()`/
+`editStyle()` throwing "does not exist (or has not synced)" for content
+that plainly DOES exist.** `Space.useNode()` is ref-counted, and
+`ContentResolver`'s own `resolveTemplate()`/`resolveStyle()`/`resolvePage()`
+(what each CMS section's click-to-load handler calls, purely to populate
+the form) each `useNode()` THEN `release()` internally - dropping the
+refcount straight back to zero, which `Space.unsubscribeNode()` treats as
+"nobody needs this Node locally any more" and DISCARDS the local Y.Doc
+entirely (`space.js`'s own `_nodes.delete(id)`), not merely stops
+live-pushing to it. Submitting the form moments later called `edit*()`
+(`dev.js`), which does its OWN fresh `useNode()` - since the previous one
+had been fully torn down, this had to re-subscribe and wait for the relay
+to replay the Node's entire history again, a real network round-trip a
+fixed ~2-3s timeout can genuinely lose to over an actual (non-localhost)
+connection - the false "does not exist" error was really "did not
+RE-sync in time," for content the user had just viewed successfully.
+Never reproduced by this project's own tests (an in-process/localhost hub
+has no meaningful round-trip time to lose the race against), only by an
+operator actually using a real deployment. Fixed in `cms-actions.js`: each
+section's click-to-load handler now calls `space.useNode()` itself, ONE
+EXTRA TIME (`holdEdit()`), and keeps that reference alive until a
+DIFFERENT item is loaded or the form is reset - long enough to keep the
+refcount above zero for the entire "loaded into the form, being edited"
+window, so the eventual `edit*()` call's own `useNode()` finds the Node
+already fully synced and skips the network round-trip (and its timeout
+race) entirely. `ContentResolver`'s own release-immediately posture is
+otherwise unchanged (correct for ordinary rendering, where holding every
+resolved Node open for a whole visit would leak subscriptions).
+
 **The relay's own unconfigured setup page is itself a working Qu identity
 tool, not just static instructions** (`build.mjs`'s `renderIndexHtml()`,
 the "neither QU_APP_ADMIN_PUB nor QU_RELAY_ADMINS is set" branch): it
@@ -840,8 +869,8 @@ an ordinary visitor's boot already uses, not a second one invented for
 this) - and renders its base64 signing/X25519 pubkeys into any
 `[data-qu-pub]`/`[data-qu-xpub]` element the page declares, which the
 setup page's own markup does: an operator sees their bootstrapping
-identity's exact `QU_APP_ADMIN_PUB` value (or the `{pub, xPub}` shape
-`QU_RELAY_ADMINS` entries need) on the page
+identity's exact `QU_APP_ADMIN_PUB`/`QU_RELAY_ADMINS` value (a single
+base64 signing pubkey either way) on the page
 itself, no devtools or separate script required just to GENERATE and
 copy it (a `Qu.regenerate()` console call is still there for anyone who
 wants a fresh one). Two identity-bootstrapping code paths on ONE page
