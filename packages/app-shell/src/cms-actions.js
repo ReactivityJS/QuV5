@@ -59,6 +59,27 @@
  * changing `ContentResolver`'s own release-immediately posture (correct
  * for ordinary rendering, where holding every resolved Node open would
  * leak subscriptions across a visitor's whole session).
+ *
+ * KEEPING EACH SECTION'S OWN REGISTRY SUBSCRIPTION ALIVE FOR THE WHOLE CMS
+ * SESSION - the SAME class of bug as above, just for `routeRegistryKind`/
+ * `templateRegistryKind`/`styleRegistryKind` instead of one content Node:
+ * `refreshList()`'s own `resolver.resolveTemplateNames()`/
+ * `resolveStyleNames()`/`resolveRoutes()` calls ALSO release-to-zero after
+ * every read, so the registry gets discarded and re-fetched from scratch
+ * on every single list refresh (i.e. after every save) - and worse,
+ * `dev.js`'s `registerContentName()`/`publishRoute()` used to treat
+ * "not currently attached" as "doesn't exist yet" and fork a brand-new,
+ * competing Y.Doc for an id that already had entries (fixed in `dev.js`
+ * itself, see its own `getOrSyncRegistryNode()` doc comment - the framework
+ * -level fix any caller benefits from). Holding the registry open here on
+ * TOP of that fix (`holdRegistry()`, opened once per section at wiring
+ * time, never released during normal operation) is what actually makes
+ * repeated saves in one CMS visit fast, not just eventually-correct: every
+ * `refreshList()`/`registerContentName()`/`publishRoute()` call after the
+ * first one finds the registry already attached and skips the network
+ * round-trip entirely, instead of a route/template/style transiently (or,
+ * pre-`dev.js`-fix, non-transiently) vanishing from the list right after
+ * the NEXT unrelated save.
  */
 import {
   ContentResolver,
@@ -73,13 +94,23 @@ import {
   templateKind,
   styleKind,
   pageKind,
+  routeRegistryKind,
+  templateRegistryKind,
+  styleRegistryKind,
 } from '@qu/app-core';
+import { deriveOwnerNodeId } from '@qu/space-core';
 
 /** See this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...". Releases `previous` (if any) THEN opens+holds a fresh subscription for `(kind, name)`, owned by `space.identity` (the same default `ownerPub` `editTemplate()`/`editStyle()`/`editPage()` themselves use). @returns {Promise<{node: object, release: () => void}>} */
 async function holdEdit(space, kind, name, previous) {
   previous?.release();
   const id = await deriveContentNodeId(space.identity.signingPub, kind.kind, name);
   return space.useNode(id, kind);
+}
+
+/** See this file's own top doc comment, "KEEPING EACH SECTION'S OWN REGISTRY SUBSCRIPTION ALIVE...". Opens (and never releases - see that comment on why) a subscription to this identity's OWN `registryKind` Node, so every later `refreshList()`/`registerContentName()`/`publishRoute()` call in the same CMS session finds it already attached. */
+async function holdRegistry(space, registryKind) {
+  const id = await deriveOwnerNodeId(space.identity.signingPub, registryKind.kind);
+  return space.useNode(id, registryKind);
 }
 
 function setStatus(form, text) {
@@ -147,6 +178,10 @@ async function wireTemplates({ mountEl, doc, space, resolver }) {
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="template"]');
   if (!list && !form) return;
 
+  // Fire-and-forget, started BEFORE the submit listener below attaches (same synchronous-first-tick
+  // reasoning as _sendSubscribeRequest()'s own posture elsewhere) - see this file's own top doc
+  // comment, "KEEPING EACH SECTION'S OWN REGISTRY SUBSCRIPTION ALIVE...".
+  holdRegistry(space, templateRegistryKind).catch(() => {});
   let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".
 
   async function refreshList() {
@@ -208,6 +243,7 @@ async function wireStyles({ mountEl, doc, space, resolver }) {
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="style"]');
   if (!list && !form) return;
 
+  holdRegistry(space, styleRegistryKind).catch(() => {}); // see wireTemplates()'s own identical comment.
   let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".
 
   async function refreshList() {
@@ -269,6 +305,7 @@ async function wirePages({ mountEl, doc, space, resolver }) {
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="page"]');
   if (!list && !form) return;
 
+  holdRegistry(space, routeRegistryKind).catch(() => {}); // see wireTemplates()'s own identical comment.
   await refreshTemplateSelect({ mountEl, doc, resolver });
 
   let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".

@@ -856,6 +856,58 @@ race) entirely. `ContentResolver`'s own release-immediately posture is
 otherwise unchanged (correct for ordinary rendering, where holding every
 resolved Node open for a whole visit would leak subscriptions).
 
+**A second, deeper real bug in the SAME family, also deployment-observed:
+a route/template/style that had just been created or edited would appear
+to VANISH from the CMS list right after a LATER, unrelated save - "/"
+disappearing from the page list the moment a NEW page was created, for
+example.** Two compounding causes, both fixed together:
+
+1. `refreshList()`'s own `resolver.resolveTemplateNames()`/
+   `resolveStyleNames()`/`resolveRoutes()` calls suffer the EXACT SAME
+   release-to-zero problem as the bug above, just for the REGISTRY Node
+   (`routeRegistryKind`/`templateRegistryKind`/`styleRegistryKind`)
+   instead of one content Node - discarded and re-fetched from scratch on
+   EVERY list refresh (i.e. after every single save), each refetch racing
+   its own tight timeout.
+2. Worse, `dev.js`'s `registerContentName()`/`publishRoute()` (what
+   `createTemplate()`/`createStyle()`/a page's `publishRoute()` call use to
+   add ONE entry to that SAME registry) used `space.getNode(id) ??
+   space.createNode(...)` - treating "not currently attached in THIS Space
+   instance" (true after every release above, regardless of whether the
+   registry already has entries from an EARLIER call) as "doesn't exist
+   yet," and `createNode()` would then fork a brand-new, causally-unrelated
+   Y.Doc and `stampMeta()` it as if this were a first-ever creation -
+   exactly the trap this document's own "`stampMeta()`... a competing doc
+   for the same Node id" reasoning already warns against elsewhere, just
+   never applied to registries before now.
+   Fixed at the framework level, in `dev.js` itself: a new
+   `getOrSyncRegistryNode()` helper `registerContentName()`/`publishRoute()`
+   now share - `useNode()`+bounded-wait (500ms, matching
+   `resolver.js`'s own already-accepted "does this registry exist yet"
+   timeout) to discover an EXISTING registry before ever considering
+   `createNode()`, checked via the Node's own `meta.get('kind')` (whether
+   it has EVER been stamped) rather than the list field's length (an
+   empty-but-real registry, the instant between its own creation and its
+   first entry, must not be mistaken for "never existed"). Only a registry
+   that genuinely has never been created pays the full 500ms before
+   `createNode()` runs; any caller (like the CMS fix below) that keeps the
+   registry Node held open across a session never pays it again.
+   Also fixed in `cms-actions.js`, on top of the `dev.js` fix: each
+   section now holds its OWN registry Node open (`holdRegistry()`, opened
+   once per section at wiring time, same "never release during normal
+   operation" posture as `holdEdit()` above) for the CMS session's whole
+   lifetime, so `refreshList()`/`registerContentName()`/`publishRoute()`
+   all find it already attached after the first call - not just
+   eventually-correct (the `dev.js` fix alone already guarantees that) but
+   actually FAST, with zero further network round-trips for the rest of
+   the visit.
+   Verified end-to-end against a real relay + real headless-browser
+   session: editing the root page, then creating THREE further pages in
+   sequence (`/blog/post1`, `/blog/post2`, `/blog/post3`, `/about`), each
+   one immediately visible in the CMS list alongside every earlier one -
+   and every single page (the edited root page included) renders correctly
+   for a completely independent, anonymous visitor session afterward.
+
 **The relay's own unconfigured setup page is itself a working Qu identity
 tool, not just static instructions** (`build.mjs`'s `renderIndexHtml()`,
 the "neither QU_APP_ADMIN_PUB nor QU_RELAY_ADMINS is set" branch): it
