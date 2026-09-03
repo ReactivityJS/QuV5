@@ -253,6 +253,29 @@ async function main() {
     console.log('  "admin" alias already registered.');
   }
 
+  // REGISTER FIRST, THEN SEED CONTENT - order matters now, unlike under the old static
+  // QU_APP_ADMIN_PUBS model: a relay in PLATFORM mode discovers a brand-new app-admin's pubkey
+  // LIVE, purely from THIS registerApp() write to qu-platform-apps (@qu/app-shell's own
+  // live-app-resolver.js - no restart, no separate static list). Until that write has actually
+  // reached the relay and its live resolver has rebuilt its classification, demo-app-admin's OWN
+  // Nodes (qu-app, qu-route-registry, ...) are still 'named'-ACL client-side but get misclassified
+  // relay-side as the ordinary 'content'-ACL fallback (kinds.js's own doc comment) - which needs a
+  // grant nothing here ever sends, so the write would be silently rejected. Doing this BEFORE
+  // connecting demo-app-admin at all (not just before its first write) removes the race entirely.
+  const demoRegistered = existingApps.some((a) => a.prefix === prefix);
+  if (!demoRegistered) {
+    console.log(`  registering "#/${prefix}" (before seeding its content, so the relay's live resolver already knows this app-admin)...`);
+    await registerApp(mainSpace, { prefix, appAdminPub: demoAppAdmin.signingPub, name: 'Demo Shell-App' });
+    // mainWrites tracks EVERY write this Space makes (both aliases above); wait for all of them to
+    // be relay-acked, THEN a short settle for the relay's own internal live-resolver Space (a
+    // SEPARATE connection, watching the same registry) to receive the forwarded update and finish
+    // rebuilding - see live-app-resolver.js's own doc comment on why this is a real, if brief, race.
+    await waitUntilAllWritesAcked(mainWrites);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  } else {
+    console.log(`  "#/${prefix}" already registered.`);
+  }
+
   console.log(`Connecting to the main space as demo-app-admin (to seed the "${prefix}" shell-app)...`);
   await joinMainSpace(httpBase, demoAppAdmin, 'demo-app-admin');
   const demoTransport = new WsClientTransport(relay, { WebSocketImpl: WebSocket });
@@ -290,13 +313,6 @@ async function main() {
     // refreshList() enumerates via resolveRoutes(), not by guessing at Nodes that might exist).
     await publishRoute(demoSpace, { route: '/', title: 'Demo Shell-App' });
     await installCms(demoSpace);
-  }
-
-  if (!existingApps.some((a) => a.prefix === prefix)) {
-    console.log(`  registering "#/${prefix}"...`);
-    await registerApp(mainSpace, { prefix, appAdminPub: demoAppAdmin.signingPub, name: 'Demo Shell-App' });
-  } else {
-    console.log(`  "#/${prefix}" already registered.`);
   }
 
   const mainOk = await waitUntilAllWritesAcked(mainWrites);

@@ -148,3 +148,23 @@ export async function fetchMembers({ fetchImpl = fetch, baseUrl = '', path = '/m
   const rawMembers = await membersRes.json();
   return rawMembers.map((m) => ({ pub: QuCrypto.fromBase64(m.pub), xPub: QuCrypto.fromBase64(m.xPub) }));
 }
+
+/**
+ * Reads `GET /relay-admins.json` (`relay-server.js`'s own doc comment) -
+ * a DIFFERENT shape from `fetchMembers()` above on purpose: a plain array
+ * of base64 SIGNING pubkeys only, never `{pub, xPub}` pairs, because the
+ * main Space's own `acl.write: 'relay-admins'` check (`@qu/space-core`'s
+ * kind-schema.js) never needs an encryption recipient - `qu-platform-apps`
+ * is `'public'`-visibility (see this file's own top doc comment on why a
+ * DIFFERENT helper exists at all rather than reusing `fetchMembers()` here:
+ * calling that one against this endpoint would silently misparse every
+ * entry - `m.pub` on a bare string is `undefined` - leaving the resulting
+ * `Space` unable to verify ANY `qu-platform-apps` write it receives).
+ * @param {{fetchImpl?: typeof fetch, baseUrl?: string}} [params]
+ * @returns {Promise<Array<Uint8Array>>}
+ */
+export async function fetchRelayAdmins({ fetchImpl = fetch, baseUrl = '' } = {}) {
+  const res = await fetchImpl(`${baseUrl}/relay-admins.json`);
+  const rawPubs = await res.json();
+  return rawPubs.map((pubB64) => QuCrypto.fromBase64(pubB64));
+}

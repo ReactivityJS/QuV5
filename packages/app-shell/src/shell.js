@@ -45,7 +45,7 @@ import { EventBus } from '@qu/events';
 import { autoCompactOnJoin } from '@qu/space-plugins';
 import '@qu/space-components/elements'; // registers <qu-view>/<qu-bind>/<qu-list> - see that module's own doc comment. Side-effect only import, deliberately unused otherwise.
 import { deriveContentNodeId, adminAppManifestKind, adminTemplateKind, adminPageKind, ADMIN_REALM_ANCHOR } from '@qu/app-core';
-import { loadOrCreateIdentity, joinSpace, fetchMembers, IDENTITY_STORAGE_KEY } from './identity.js';
+import { loadOrCreateIdentity, joinSpace, fetchMembers, fetchRelayAdmins, IDENTITY_STORAGE_KEY } from './identity.js';
 import { initDevConsole } from './dev-console.js';
 import { startApp, startPlatform } from './boot.js';
 
@@ -68,7 +68,7 @@ export class QuAppShell extends HTMLElement {
       // at all, so there is nothing here for it to independently verify (see `Space`'s own
       // `relayAdmins` constructor doc comment, and `relay-server.js`'s own "ADMIN REALM"-adjacent
       // `GET /relay-admins.json` doc comment for the server side of this public, unauthenticated read).
-      const relayAdmins = isPlatformMode ? (await fetchMembers({ path: '/relay-admins.json' }).catch(() => [])).map((m) => m.pub) : [];
+      const relayAdmins = isPlatformMode ? await fetchRelayAdmins().catch(() => []) : [];
 
       const transport = new WsClientTransport(relayUrl);
       await transport.connect();
