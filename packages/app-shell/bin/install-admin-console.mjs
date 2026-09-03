@@ -4,20 +4,20 @@
  * "Bedeutet dann, dass initial das Relay oder der Admin einen Weg ... zur
  * Installation braucht" describes: a real, separate process, run by
  * whoever holds the bootstrapping identity's PRIVATE key (never the
- * relay), that connects TWICE to an already-running
- * `packages/app-shell/relay-server.js` in PLATFORM mode -
+ * relay), that connects ONCE to an already-running
+ * `packages/app-shell/relay-server.js` in PLATFORM mode and writes, into
+ * that SAME main Space (see relay-server.js's own "ONE RELAY SPACE, NOT
+ * TWO" doc comment - there is no more separate admin realm/`/admin-ws`) -
  *
- *   1. to the ADMIN realm's own WS endpoint (`/admin-ws`) and writes the
- *      built-in console's content there (`installAdminAppBundle()`,
- *      `admin-console-bundle.js`) - succeeds only if this identity is
- *      already listed in that relay's `QU_RELAY_ADMINS` (see
- *      `relay-server.js`'s own "ADMIN REALM" doc comment - admin
- *      membership is never self-registered);
- *   2. to the MAIN Space and writes ONE `qu-platform-apps` alias
- *      (`registerApp()`) mapping the chosen prefix (`"admin"` by default)
- *      to `realm: 'admin'` - succeeds only if this identity is ALSO in
- *      that SAME `QU_RELAY_ADMINS` list (`qu-platform-apps` is now
- *      `acl.write: 'relay-admins'`, checked against that exact list - see
+ *   1. the built-in admin console's own content (`installAdminAppBundle()`,
+ *      `admin-console-bundle.js`, `acl.write: 'relay-admins'` - see
+ *      `@qu/app-core`'s kinds.js own "THE ADMIN APP" doc comment) -
+ *      succeeds only if this identity is already listed in that relay's
+ *      `QU_RELAY_ADMINS`;
+ *   2. ONE `qu-platform-apps` alias (`registerApp()`) mapping the chosen
+ *      prefix (`"admin"` by default) to `realm: 'admin'` - succeeds under
+ *      the exact SAME condition (`qu-platform-apps` is also `acl.write:
+ *      'relay-admins'`, checked against that exact list - see
  *      `@qu/space-core`'s kind-schema.js own doc comment on the mode).
  *
  * Run once per deployment (re-running is harmless - every write here is
@@ -84,24 +84,18 @@ async function main() {
   const { relay, prefix, dir, name } = parseArgs(process.argv.slice(2));
   const identity = await ensureIdentity(dir);
   console.log(`Qu V5 — admin console installer: identity [${await QuCrypto.fingerprint(identity.signingPub)}]`);
-  console.log(`Add this identity to QU_RELAY_ADMINS as {"pub":"${QuCrypto.toBase64(identity.signingPub)}","xPub":"${QuCrypto.toBase64(identity.xPublicKey)}"}`);
+  console.log(`Add this identity to QU_RELAY_ADMINS as "${QuCrypto.toBase64(identity.signingPub)}"`);
 
-  console.log(`\nConnecting to the admin realm at ${relay}/admin-ws …`);
-  const adminTransport = new WsClientTransport(`${relay.replace(/\/?$/, '')}/admin-ws`, { WebSocketImpl: WebSocket });
-  await adminTransport.connect();
-  const adminSpace = new Space({ identity, members: [{ pub: identity.signingPub, xPub: identity.xPublicKey }], transport: adminTransport });
+  console.log(`\nConnecting to the main Space at ${relay} …`);
+  const transport = new WsClientTransport(relay, { WebSocketImpl: WebSocket });
+  await transport.connect();
+  const space = new Space({ identity, members: [{ pub: identity.signingPub, xPub: identity.xPublicKey }], relayAdmins: [identity.signingPub], transport });
   console.log('Installing the built-in admin console content…');
-  await installAdminAppBundle(adminSpace, adminConsoleBundle);
+  await installAdminAppBundle(space, adminConsoleBundle);
+  console.log(`Registering the "${prefix}" alias…`);
+  await registerApp(space, { prefix, name, realm: 'admin' });
   await new Promise((resolve) => setTimeout(resolve, 300)); // let the writes actually leave before closing.
-  adminTransport.close();
-
-  console.log(`\nConnecting to the main Space at ${relay} to register the "${prefix}" alias…`);
-  const mainTransport = new WsClientTransport(relay, { WebSocketImpl: WebSocket });
-  await mainTransport.connect();
-  const mainSpace = new Space({ identity, members: [{ pub: identity.signingPub, xPub: identity.xPublicKey }], transport: mainTransport });
-  await registerApp(mainSpace, { prefix, name, realm: 'admin' });
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  mainTransport.close();
+  transport.close();
 
   console.log(`\n✅ Installiert. Öffne #/${prefix} als diese Identity, um die Konsole zu sehen.`);
   process.exit(0);

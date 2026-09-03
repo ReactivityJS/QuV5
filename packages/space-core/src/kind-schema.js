@@ -46,10 +46,9 @@
  *
  * `acl.write` names who may sign updates to a Node of this kind:
  *   - `'members'` - every space member may write (the original, still-
- *     simplest mode - genuinely flat/shared write access, e.g. the built-in
- *     admin realm's own console content, architecture.md §7 - "wir
- *     berechtigen alle Admins des Relays gleichberechtigt," no single
- *     owner).
+ *     simplest mode - genuinely flat/shared write access, no single owner;
+ *     see `'relay-admins'` further below for the RELAY-WIDE counterpart of
+ *     this same idea, used by the built-in admin app's own content).
  *   - `'owner'` - only the pubkey the Node's own `nodeId` cryptographically
  *     commits to may write (see `deriveOwnerNodeId()` below) - a
  *     self-certifying "~pub" identity/user-space, verifiable with ZERO

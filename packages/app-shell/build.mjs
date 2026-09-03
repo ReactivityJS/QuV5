@@ -77,9 +77,10 @@ export function renderIndexHtml({ appAdminPub = null, platformMode = false } = {
       späterer Besuch als Visitor sowieso schon nutzt. Der private Schlüssel bleibt
       ausschließlich in <code>localStorage</code> dieses Browsers - dieser Relay
       bekommt ihn nie zu sehen.</p>
-    <p>Signing-Pubkey (für <code>QU_APP_ADMIN_PUB</code>): <code data-qu-pub>lädt…</code></p>
-    <p>X25519-Pubkey (für <code>QU_MEMBERS_JSON</code>/<code>QU_RELAY_ADMINS</code>,
-      jeweils als <code>{"pub":"…","xPub":"…"}</code>): <code data-qu-xpub>lädt…</code></p>
+    <p>Signing-Pubkey (für <code>QU_APP_ADMIN_PUB</code> oder als Eintrag in
+      <code>QU_RELAY_ADMINS</code>): <code data-qu-pub>lädt…</code></p>
+    <p>X25519-Pubkey (für <code>QU_MEMBERS_JSON</code>, als
+      <code>{"pub":"…","xPub":"…"}</code>): <code data-qu-xpub>lädt…</code></p>
     <p>Für Skripte/die Konsole steht <code>window.Qu</code> bereit -
       <code>Qu.pub</code>/<code>Qu.xPub</code> (bereits oben angezeigt),
       <code>Qu.identity</code> (die vollen Schlüssel), oder
@@ -100,11 +101,14 @@ export function renderIndexHtml({ appAdminPub = null, platformMode = false } = {
       <li>Von Hand, mit DEINER Browser-Identity von oben: für EINE einzelne App setze
         deren Pubkey als <code>QU_APP_ADMIN_PUB</code>. Für eine PLATTFORM aus mehreren
         Apps unter Pfad-Präfixen: setze stattdessen <code>QU_RELAY_ADMINS</code> (ein
-        JSON-Array von <code>{"pub":"…","xPub":"…"}</code>, ein Eintrag pro Relay-Admin) -
-        siehe <code>architecture.md</code> §7. Jeder gelistete Relay-Admin kann anschließend
-        (z.B. über die eingebaute <code>#/admin</code>-Konsole) weitere Apps registrieren,
-        ganz ohne weiteren Relay-Neustart. Danach den Relay neu starten (nur für diesen
-        allerersten <code>QU_RELAY_ADMINS</code>-Wert nötig).</li>
+        JSON-Array reiner base64-Pubkeys, z.B. <code>["&lt;pub1&gt;","&lt;pub2&gt;"]</code>,
+        ein Eintrag pro Relay-Admin) - siehe <code>architecture.md</code> §7. Jeder gelistete
+        Relay-Admin administriert damit sowohl die App-Registrierung als auch die
+        eingebaute <code>#/admin</code>-Konsole mit GENAU DIESER Browser-Identity - keine
+        separate Admin-Identity nötig. Jeder Relay-Admin kann anschließend (z.B. über
+        <code>#/admin</code>) weitere Apps registrieren, ganz ohne weiteren Relay-Neustart.
+        Danach den Relay neu starten (nur für diesen allerersten
+        <code>QU_RELAY_ADMINS</code>-Wert nötig).</li>
       <li>EINZELNE App: installiere sie aus einem separaten Prozess, der den
         privaten Schlüssel hält:
         <pre>node demo/install-app-shell-demo.mjs --relay wss://&lt;dieser-host&gt; --dir &lt;pfad-zu-deiner-app-admin-identity&gt;</pre>

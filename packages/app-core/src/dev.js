@@ -312,14 +312,14 @@ export async function installAppBundle(space, bundle) {
  * unregistered app is still reachable at its own owner id (see
  * `platform.js`'s own doc comment on the default, registration-free
  * routing fallback).
- * @param {import('@qu/space-core').Space} space - a relay-admin's own Space (see this function's own doc comment above - NOT necessarily an admin-realm member; see this file's own admin-realm functions below for that separate, confidential realm).
+ * @param {import('@qu/space-core').Space} space - a relay-admin's own Space (see this function's own doc comment above).
  * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'admin'}} params
  *   `prefix` is matched against a route's FIRST path segment (no
  *   leading/trailing slash, e.g. `"forum"` for `#/forum/...`).
  *   `realm: 'admin'` (default `'main'`) routes this prefix into the
- *   confidential admin realm instead (`appAdminPub` is ignored/omitted for
- *   those entries - the admin realm has no single owner, see kinds.js's
- *   own "THE ADMIN REALM" doc comment).
+ *   built-in admin app instead (`appAdminPub` is ignored/omitted for those
+ *   entries - the admin app has no single owner, see kinds.js's own "THE
+ *   ADMIN APP" doc comment).
  */
 export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main' }) {
   const id = await platformRegistryId();
@@ -329,43 +329,46 @@ export async function registerApp(space, { prefix, appAdminPub, name, realm = 'm
 }
 
 /**
- * ADMIN-REALM DEV API — the exact same shape as `createApp()`/
+ * ADMIN APP DEV API — the exact same shape as `createApp()`/
  * `createTemplate()`/`createStyle()`/`createPage()`/`installAppBundle()`
  * above, writing the `qu-admin-*` Kinds (kinds.js) at ids anchored on the
  * fixed `ADMIN_REALM_ANCHOR` instead of a real app-admin's pubkey - there
- * is only ONE admin realm per relay, so no per-owner disambiguation is
- * needed (see kinds.js's own "THE ADMIN REALM" doc comment). `acl.write:
- * 'members'` on every `qu-admin-*` Kind means these calls succeed for ANY
- * identity that is a member of the admin-only Space `space` is connected
- * to - there is no separate "admin-realm-admin" role to bootstrap first.
- * Confidentiality comes entirely from WHICH Space `space` is connected to
- * (its `members` list), never from anything in this file - see
- * `packages/app-shell/relay-server.js`'s own "ADMIN REALM" doc comment.
+ * is only ONE admin app per relay, so no per-owner disambiguation is
+ * needed (see kinds.js's own "THE ADMIN APP" doc comment). `acl.write:
+ * 'relay-admins'` on every `qu-admin-*` Kind means these calls succeed for
+ * ANY identity listed in the relay's own `QU_RELAY_ADMINS` (checked
+ * independently by both `space` itself and the relay - never just this
+ * file's say-so) - `space` is the SAME ordinary main Space any visitor
+ * connects to, no separate confidential realm/transport to bootstrap
+ * first, and no separate identity to generate/import either: whichever
+ * identity `space` already uses (an operator's own already-existing
+ * browser/CLI identity, the moment its pubkey is a configured relay-admin)
+ * can call these directly.
  */
 export async function createAdminApp(space, { name, version = '1.0', rootTemplate = null, defaultRoute = '/', theme = null, metadata = '' }) {
   const id = await deriveOwnerNodeId(ADMIN_REALM_ANCHOR, adminAppManifestKind.kind);
   return space.createNode(adminAppManifestKind, { name, version, rootTemplate, defaultRoute, theme, metadata }, { id });
 }
 
-/** Admin-realm counterpart to `createTemplate()`. */
+/** Admin app counterpart to `createTemplate()`. */
 export async function createAdminTemplate(space, { name, html }) {
   const id = await deriveContentNodeId(ADMIN_REALM_ANCHOR, adminTemplateKind.kind, name);
   return space.createNode(adminTemplateKind, { html }, { id });
 }
 
-/** Admin-realm counterpart to `createStyle()`. */
+/** Admin app counterpart to `createStyle()`. */
 export async function createAdminStyle(space, { name, css }) {
   const id = await deriveContentNodeId(ADMIN_REALM_ANCHOR, adminStyleKind.kind, name);
   return space.createNode(adminStyleKind, { css }, { id });
 }
 
-/** Admin-realm counterpart to `createPage()`. */
+/** Admin app counterpart to `createPage()`. */
 export async function createAdminPage(space, { route, title, template = null, content = '' }) {
   const id = await deriveContentNodeId(ADMIN_REALM_ANCHOR, adminPageKind.kind, route);
   return space.createNode(adminPageKind, { route, title, template, content }, { id });
 }
 
-/** Admin-realm counterpart to `installAppBundle()` - see that function's own doc comment; identical shape, writes the `qu-admin-*` Kinds via the four functions just above. No `routes`/route-registry counterpart yet - not needed for the one built-in admin console page (see this package's own README on the reference bundle). */
+/** Admin app counterpart to `installAppBundle()` - see that function's own doc comment; identical shape, writes the `qu-admin-*` Kinds via the four functions just above. No `routes`/route-registry counterpart yet - not needed for the one built-in admin console page (see this package's own README on the reference bundle). */
 export async function installAdminAppBundle(space, bundle) {
   await createAdminApp(space, bundle.manifest);
   for (const template of bundle.templates ?? []) await createAdminTemplate(space, template);

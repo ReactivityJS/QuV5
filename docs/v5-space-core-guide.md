@@ -637,17 +637,17 @@ unmatched route. `bootstrap:platform` above is exactly that "something."
 
 **The Admin-UI (`#/admin`) and a CMS editor (`#/<prefix>/cms`) are
 different things at different levels, and there is no single global one
-covering everything** — `#/admin` (one per platform, the relay-admin's
-own realm) only registers apps under path prefixes, it has no content
-editor of its own; a CMS editor (architecture.md §7's "The built-in CMS
-editor") is installed PER APP, into that app's OWN Space
-(`installCms(space)`, `@qu/app-shell`'s `cms-bundle.js`) — `bootstrap:
-platform` installs one for its own demo app (`#/demo/cms`) automatically;
-for your own app, call `installCms()` the same way from your own install
-script. Editing `#/admin`'s own content still needs
-`bin/install-admin-console.mjs` — no CMS editor for it yet (its Kinds
-have no `edit*()` counterparts, see architecture.md §7's own note on
-this gap).
+covering everything** — `#/admin` (one per platform, content in the SAME
+main Space, write-gated by `QU_RELAY_ADMINS`) only registers apps under
+path prefixes, it has no content editor of its own; a CMS editor
+(architecture.md §7's "The built-in CMS editor") is installed PER APP,
+into that app's OWN Space (`installCms(space)`, `@qu/app-shell`'s
+`cms-bundle.js`) — `bootstrap:platform` installs one for its own demo app
+(`#/demo/cms`) automatically; for your own app, call `installCms()` the
+same way from your own install script. Editing `#/admin`'s own content
+still needs `bin/install-admin-console.mjs` — no CMS editor for it yet
+(its Kinds have no `edit*()` counterparts, see architecture.md §7's own
+note on this gap).
 
 The rest of this subsection is the equivalent BY-HAND walkthrough — useful
 for a real deployment where you want full control over each identity/step
@@ -687,25 +687,29 @@ existing templates/styles/pages and lets you create or edit them straight
 from the browser — see architecture.md §7's "The built-in CMS editor" for
 how it's wired.
 
-**PLATFORM mode (several apps, one relay, a confidential admin realm,
-NOW THE DEFAULT)** — `bootstrap:platform` above already does everything
-below in one command; read on if you want to do it by hand or understand
-what it's actually doing. Instead of one fixed `QU_APP_ADMIN_PUB`, set
+**PLATFORM mode (several apps, one relay, ONE relay Space — NOW THE
+DEFAULT)** — `bootstrap:platform` above already does everything below in
+one command; read on if you want to do it by hand or understand what it's
+actually doing. Instead of one fixed `QU_APP_ADMIN_PUB`, set
 `QU_RELAY_ADMINS` (takes priority when both are set) — see
-architecture.md §7's "The Platform layer" for the full model, and
+architecture.md §7's "One relay Space, not two" for the full model, and
 `@qu/space-core`'s kind-schema.js own doc comment for the `'relay-admins'`
-ACL mode this rests on. `QU_RELAY_ADMINS` is a JSON array of `{pub, xPub}`
-(base64) — every relay-admin identity, all equally and symmetrically (no
-single "owner"), authorized to (a) write `qu-platform-apps` (register/
-manage apps under path prefixes) and (b) read/write the confidential admin
-realm's own content. This is the ONE static list PLATFORM mode needs — an
-ORDINARY app-admin needs NO separate static entry any more: any configured
-relay-admin simply `registerApp()`s their pubkey, and this relay discovers
-them live (`@qu/app-shell`'s own `live-app-resolver.js`), no restart:
+ACL mode this rests on. `QU_RELAY_ADMINS` is a JSON array of PLAIN base64
+signing pubkeys, e.g. `["<pub1>","<pub2>"]` — every relay-admin identity,
+all equally and symmetrically (no single "owner"), authorized to (a) write
+`qu-platform-apps` (register/manage apps under path prefixes) and (b)
+write the built-in admin console's own content, which lives in this SAME
+main Space (no separate confidential Space/relay-forwarder, no `/admin-ws`
+— an operator's own already-existing browser identity works the moment
+its pubkey is listed here, no separate identity to generate or import).
+This is the ONE static list PLATFORM mode needs — an ORDINARY app-admin
+needs NO separate static entry any more: any configured relay-admin simply
+`registerApp()`s their pubkey, and this relay discovers them live
+(`@qu/app-shell`'s own `live-app-resolver.js`), no restart:
 
 ```sh
 docker run -d -p 8081:8081 \
-  -e QU_RELAY_ADMINS='[{"pub":"<base64 relay-admin pubkey>","xPub":"<base64 relay-admin xPub>"}]' \
+  -e QU_RELAY_ADMINS='["<base64 relay-admin pubkey>"]' \
   -v qu-app-shell-relay-data:/data \
   qu-app-shell-relay
 ```
@@ -720,19 +724,22 @@ node packages/app-shell/bin/install-admin-console.mjs \
 ```
 
 This installs the console's own content (a `qu-admin-app` manifest, a
-template, one page with a "register an app" form) into the admin realm,
-then registers the `"admin"` alias in the MAIN space — a completely
-ordinary registry entry, not a special path the router hardcodes. From a
-browser signed in as that SAME identity, open `https://your-host/#/admin`:
-the console renders from installed content (not framework-built DOM), lists
-already-registered apps, and lets that identity register a new one — the
-app's own content still needs to be installed separately by whoever holds
-that app-admin's private key, e.g. via `installAppBundle()` (`@qu/app-core`'s
-Dev API) from your own script, the same way `demo/install-app-shell-demo.mjs`
-seeds a single app today. A visitor who is NOT in
-`QU_RELAY_ADMINS` sees only a plain "not found" at `#/admin` —
-the admin realm's content is genuinely `'encrypted'`-visibility, sealed for
-that member list alone, not merely hidden by the console's own UI.
+template, one page with a "register an app" form) into the SAME main
+Space, then registers the `"admin"` alias — a completely ordinary registry
+entry, not a special path the router hardcodes. From a browser signed in
+as ANY identity listed in `QU_RELAY_ADMINS` — including an operator's own
+regular, already-existing browser identity, no import needed — open
+`https://your-host/#/admin`: the console renders from installed content
+(not framework-built DOM), lists already-registered apps, and lets that
+identity register a new one — the app's own content still needs to be
+installed separately by whoever holds that app-admin's private key, e.g.
+via `installAppBundle()` (`@qu/app-core`'s Dev API) from your own script,
+the same way `demo/install-app-shell-demo.mjs` seeds a single app today. A
+visitor who is NOT in `QU_RELAY_ADMINS` sees the exact SAME console
+markup (it was never confidential — only a "register an app" form and a
+list of already-`'public'`-visibility apps) but any submit attempt is
+silently rejected by the relay's own independent `'relay-admins'` ACL
+check, never by the UI.
 
 ## 11. Granular events: notifications, presence, push, and debugging
 

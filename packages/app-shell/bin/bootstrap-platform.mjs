@@ -57,11 +57,11 @@
  * stack deploy`, a Kubernetes rollout, ...), because nothing mounts that
  * path as a volume. The symptom is exactly "a brand-new relay-admin/
  * demo-app-admin pubkey on every redeploy, `QU_RELAY_ADMINS` printed
- * again from scratch, the OLD relay-admin's already-installed admin-realm
- * content (sealed for the OLD identity's `xPub`) becomes unreadable by
- * the NEW one" - not a bug in the ACL/live-resolver machinery itself
- * (architecture.md's own "A fourth ACL mode" section), a deployment
- * footgun in how this ONE script is invoked. Two ways to avoid it:
+ * again from scratch, the OLD relay-admin's already-installed admin
+ * console content becomes un-writable by the NEW one" - not a bug in the
+ * ACL/live-resolver machinery itself (architecture.md's own "A fifth ACL
+ * mode" section), a deployment footgun in how this ONE script is invoked.
+ * Two ways to avoid it:
  *   1. Run this script from OUTSIDE the relay's own container lifecycle
  *      entirely (your own laptop, a CI runner, a separate small utility
  *      container) - `--dir` then naturally persists on THAT machine,
@@ -76,20 +76,22 @@
  *      identity` volume (mounted at `/admin-identity`, `QU_BOOTSTRAP_DIR`
  *      defaults to it there) for the reference setup. Whichever you pick,
  *      back up that directory like you would any other private key -
- *      losing it means generating a NEW relay-admin identity and starting
- *      the admin realm over.
+ *      losing it means generating a NEW relay-admin identity.
  *
- * MEMBERSHIP: the confidential admin realm never self-registers (no
- * `/admin-ws`-equivalent open-join exists, on purpose - kinds.js's own
- * "THE ADMIN REALM" doc comment) - `QU_RELAY_ADMINS` is the only way in,
- * hence printing it below (it doubles as the admin realm's own encrypted-
- * content member list AND the main Space's `qu-platform-apps` write-ACL
- * list - see `@qu/app-core`'s kinds.js own doc comment on the
- * `'relay-admins'` mode). The ordinary MAIN space's `'members'`-ACL Kinds,
- * by contrast, already support self-join (`QU_ALLOW_JOIN`, default true) -
- * this script uses exactly that (a plain `POST /join`, the SAME mechanism a
- * real browser visitor's `shell.js` uses) for both identities, so it never
- * needs `QU_MEMBERS_JSON` printed or configured at all.
+ * MEMBERSHIP: `QU_RELAY_ADMINS` is the ONE static list this script needs
+ * printed - it is the ONLY way to become a relay-admin (write-ACL for both
+ * `qu-platform-apps` and the admin console's own content, see
+ * `@qu/app-core`'s kinds.js own doc comment on the `'relay-admins'` mode).
+ * Ordinary `'members'`-ACL Kinds, by contrast, already support self-join
+ * (`QU_ALLOW_JOIN`, default true) - this script uses exactly that (a plain
+ * `POST /join`, the SAME mechanism a real browser visitor's `shell.js`
+ * uses) for both identities, so it never needs `QU_MEMBERS_JSON` printed
+ * or configured at all. Note that being a relay-admin is NOT tied to any
+ * particular generated identity - ANY pubkey works the moment it is
+ * listed, including a real operator's own already-existing browser
+ * identity (visible on the relay's unconfigured setup page) instead of
+ * the `relay-admin` identity this script generates for non-interactive
+ * bootstrapping.
  *
  * Usage:
  *   node packages/app-shell/bin/bootstrap-platform.mjs \
@@ -181,7 +183,7 @@ async function ensureIdentity(name, dir) {
  * step 2), discovered live by the relay itself.
  */
 function printConfigBlock({ relayAdmin }) {
-  const relayAdmins = JSON.stringify([{ pub: QuCrypto.toBase64(relayAdmin.signingPub), xPub: QuCrypto.toBase64(relayAdmin.xPublicKey) }]);
+  const relayAdmins = JSON.stringify([QuCrypto.toBase64(relayAdmin.signingPub)]);
   console.log('Paste this into your deployment\'s environment config (e.g. docker-compose.space-relay.yml\'s');
   console.log('qu-app-shell-relay service, or your own stack/Kubernetes/systemd config) - PUBLIC keys only,');
   console.log('nothing secret here:\n');
@@ -272,37 +274,28 @@ async function main() {
   }
   console.log('  relay is up.\n');
 
-  console.log('Connecting to the admin realm (/admin-ws) as relay-admin...');
-  const adminTransport = new WsClientTransport(`${relay.replace(/\/?$/, '')}/admin-ws`, { WebSocketImpl: WebSocket });
-  await adminTransport.connect();
-  const adminBus = new EventBus();
-  const adminSpace = new Space({ identity: relayAdmin, members: [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }], transport: adminTransport, bus: adminBus });
-  const adminWrites = trackWrites(adminBus);
-  // installAdminAppBundle()/createNode() always build a FRESH Y.Doc for whatever id they target -
-  // safe for a Node that doesn't exist yet, but calling it AGAIN for one that already does would
-  // duplicate every Y.Text field's content (html/content), not overwrite it - the exact footgun
-  // architecture.md's own edit*() functions exist to avoid, and there is no admin-realm edit*()
-  // counterpart yet (this file's own top doc comment). Check first, skip if already installed.
-  const adminResolver = new ContentResolver(adminSpace, { appAdminPub: ADMIN_REALM_ANCHOR, kinds: { appManifestKind: adminAppManifestKind } });
-  const adminAlreadyInstalled = (await adminResolver.resolveManifest({ timeout: 800 })) !== null;
-  let adminOk = true;
-  if (adminAlreadyInstalled) {
-    console.log('  admin console content already installed - skipping (edit it live at #/admin once bootstrapped, or re-run bin/install-admin-console.mjs to overwrite).');
-  } else {
-    console.log('  installing the built-in admin console content...');
-    await installAdminAppBundle(adminSpace, adminConsoleBundle);
-    adminOk = await waitUntilAllWritesAcked(adminWrites);
-  }
-  adminTransport.close();
-
-  console.log('Connecting to the main space as relay-admin (to register aliases)...');
+  console.log('Connecting to the main space as relay-admin...');
   await joinMainSpace(httpBase, relayAdmin, 'relay-admin');
   const mainTransport = new WsClientTransport(relay, { WebSocketImpl: WebSocket });
   await mainTransport.connect();
   const mainBus = new EventBus();
-  const relayAdmins = [relayAdmin.signingPub]; // qu-platform-apps is 'relay-admins'-ACL - this Space needs the list to write/read it at all, see kinds.js's own doc comment.
+  const relayAdmins = [relayAdmin.signingPub]; // qu-platform-apps AND the admin console's own content are both 'relay-admins'-ACL - this Space needs the list to write/read either, see kinds.js's own doc comment.
   const mainSpace = new Space({ identity: relayAdmin, members: [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }], relayAdmins, transport: mainTransport, bus: mainBus });
   const mainWrites = trackWrites(mainBus);
+
+  // installAdminAppBundle()/createNode() always build a FRESH Y.Doc for whatever id they target -
+  // safe for a Node that doesn't exist yet, but calling it AGAIN for one that already does would
+  // duplicate every Y.Text field's content (html/content), not overwrite it - the exact footgun
+  // architecture.md's own edit*() functions exist to avoid, and there is no admin-app edit*()
+  // counterpart yet (this file's own top doc comment). Check first, skip if already installed.
+  const adminResolver = new ContentResolver(mainSpace, { appAdminPub: ADMIN_REALM_ANCHOR, kinds: { appManifestKind: adminAppManifestKind } });
+  const adminAlreadyInstalled = (await adminResolver.resolveManifest({ timeout: 800 })) !== null;
+  if (adminAlreadyInstalled) {
+    console.log('  admin console content already installed - skipping (edit it live at #/admin once bootstrapped, or re-run bin/install-admin-console.mjs to overwrite).');
+  } else {
+    console.log('  installing the built-in admin console content...');
+    await installAdminAppBundle(mainSpace, adminConsoleBundle);
+  }
 
   const platform = new PlatformRuntime(mainSpace);
   const existingApps = await platform.resolveApps({ timeout: 800 });
@@ -380,7 +373,7 @@ async function main() {
   mainTransport.close();
   demoTransport.close();
 
-  if (!adminOk || !mainOk || !demoOk) {
+  if (!mainOk || !demoOk) {
     console.log('\n⚠ Some writes were never write-acked by the relay - it is reachable, but NOT (yet) running');
     console.log('  with this identity\'s config (a relay ignores QU_RELAY_ADMINS changes until it is');
     console.log('  actually (re)started with it - a plain restart of an already-running process/container');
@@ -400,9 +393,13 @@ async function main() {
   console.log(`  Its CMS editor:  ${httpBase}/#/${prefix}/cms\n`);
   console.log('Both consoles gate WRITES by real relay-enforced ACL, not by the UI - visiting as an ordinary,');
   console.log('freshly-generated browser identity renders everything fine (all content here is public), but a');
-  console.log('save attempt is silently rejected unless you are actually signed in as the right identity. To');
-  console.log('act as one of the two identities above in your browser\'s devtools console (same origin as the');
-  console.log('relay), paste:\n');
+  console.log('save attempt is silently rejected unless you are actually signed in as the right identity.');
+  console.log('For #/admin specifically, you do NOT have to import the generated relay-admin identity below -');
+  console.log('ANY pubkey works there the moment it is listed in QU_RELAY_ADMINS, including your own browser\'s');
+  console.log('already-existing identity (visit this relay once unconfigured to see its pubkey, or `window.Qu.pub`');
+  console.log('in any already-configured page\'s devtools console) - just add IT to QU_RELAY_ADMINS instead/as well.');
+  console.log('To act as one of the two identities below in your browser\'s devtools console (same origin as the');
+  console.log('relay) instead, paste:\n');
   for (const [label, identity] of [
     ['relay-admin (for #/admin)', relayAdmin],
     ['demo-app-admin (for #/' + prefix + '/cms)', demoAppAdmin],

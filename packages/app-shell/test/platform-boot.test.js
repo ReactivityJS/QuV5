@@ -1,14 +1,16 @@
 /**
- * PLATFORM BOOT — `startPlatform()` (boot.js), revised for the two-realm
- * design (architecture.md §7): a registered app resolves through the MAIN
- * Space as before; an UNREGISTERED app resolves too, via its own owner id,
- * with zero relay-admin involvement (the new default-routing fallback); an
- * unmatched route falls back to a landing page; and the built-in admin
- * console is now genuinely installed Qu CONTENT (`admin-console-bundle.js`)
- * living in a SEPARATE, confidentially-membered Space - resolved and
- * rendered through the exact same `AppRuntime`/`renderPage()` pipeline as
- * any other app, with `admin-actions.js`'s `wireAdminConsole()` as the only
- * framework-provided interactivity layered on top (never a `<script>`).
+ * PLATFORM BOOT — `startPlatform()` (boot.js), revised for the "one relay
+ * Space, not two" design (architecture.md §7): a registered app resolves
+ * through the MAIN Space as before; an UNREGISTERED app resolves too, via
+ * its own owner id, with zero relay-admin involvement (the default-routing
+ * fallback); an unmatched route falls back to a landing page; and the
+ * built-in admin console is genuinely installed Qu CONTENT
+ * (`admin-console-bundle.js`) living in this SAME ordinary main Space
+ * (`acl.write: 'relay-admins'`, kinds.js's own "THE ADMIN APP" doc
+ * comment) - resolved and rendered through the exact same
+ * `AppRuntime`/`renderPage()` pipeline as any other app, with
+ * `admin-actions.js`'s `wireAdminConsole()` as the only framework-provided
+ * interactivity layered on top (never a `<script>`).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -24,7 +26,6 @@ import {
   registerApp,
   installAdminAppBundle,
   createAppResolveKindSchema,
-  createAdminResolveKindSchema,
   platformAppsKind,
   PLATFORM_REGISTRY_ANCHOR,
 } from '@qu/app-core';
@@ -103,58 +104,40 @@ test('startPlatform() resolves a REGISTERED app by alias, an UNREGISTERED app by
   router.stop();
 });
 
-test('the built-in admin console is genuine installed content in a separate, confidentially-membered Space - a real admin sees and uses it, a non-admin gets a plain 404', async () => {
+test('the built-in admin console is genuine installed content in the SAME main Space - any relay-admin\'s own regular identity sees and uses it, a non-admin sees the same markup but cannot write', async () => {
   const relayAdmin = await actor();
   const calendarAdmin = await actor();
   const outsider = await actor();
-  const mainMembers = [
+  const members = [
     { pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey },
     { pub: outsider.signingPub, xPub: outsider.xPublicKey },
   ];
-  const adminMembers = [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }]; // outsider is NOT an admin-realm member.
 
-  const relayAdmins = [relayAdmin.signingPub];
-  const mainHub = createInProcessHub();
-  const mainResolveKindSchema = await createAppResolveKindSchema();
-  createRelayForwarder({ hub: mainHub, members: mainMembers, relayAdmins, resolveKindSchema: mainResolveKindSchema, storage: createMemoryStore() });
+  const relayAdmins = [relayAdmin.signingPub]; // outsider is NOT a relay-admin.
+  const hub = createInProcessHub();
+  const resolveKindSchema = await createAppResolveKindSchema();
+  createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema, storage: createMemoryStore() });
 
-  const adminHub = createInProcessHub();
-  const adminResolveKindSchema = await createAdminResolveKindSchema();
-  createRelayForwarder({ hub: adminHub, members: adminMembers, resolveKindSchema: adminResolveKindSchema, storage: createMemoryStore() });
-
-  async function connectMain(identity, peerId) {
-    const transport = new InProcessTransport(mainHub, peerId);
+  async function connect(identity, peerId) {
+    const transport = new InProcessTransport(hub, peerId);
     await transport.connect();
-    return new Space({ identity, members: mainMembers, relayAdmins, transport });
-  }
-  async function connectAdmin(identity, peerId) {
-    const transport = new InProcessTransport(adminHub, peerId);
-    await transport.connect();
-    return new Space({ identity, members: adminMembers, transport });
+    return new Space({ identity, members, relayAdmins, transport });
   }
 
-  // Bootstrap, as the relay-admin: install the console's own content into the admin realm, then
-  // register the "admin" alias in the MAIN space - see bin/install-admin-console.mjs for the real,
-  // two-process version of exactly these two steps.
-  const relayAdminMainSpace = await connectMain(relayAdmin, 'relay-admin-main');
-  const relayAdminAdminSpace = await connectAdmin(relayAdmin, 'relay-admin-admin');
-  await installAdminAppBundle(relayAdminAdminSpace, adminConsoleBundle);
-  await registerApp(relayAdminMainSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'admin' });
+  // Bootstrap, as the relay-admin, using ONE Space/connection for both steps - see
+  // bin/install-admin-console.mjs for the real, single-connection version of exactly this.
+  const relayAdminSpace = await connect(relayAdmin, 'relay-admin-bootstrap');
+  await installAdminAppBundle(relayAdminSpace, adminConsoleBundle);
+  await registerApp(relayAdminSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'admin' });
 
-  // A REAL admin visits #/admin: gets a second Space connected to the admin realm (as the real
-  // shell.js would), sees the installed content, and can register a new app THROUGH the rendered
-  // form (proving the content-driven write path end to end, not just its markup).
+  // A REAL relay-admin visits #/admin using their OWN regular identity/Space - no separate admin
+  // identity to generate or import - sees the installed content, and can register a new app
+  // THROUGH the rendered form (proving the content-driven write path end to end, not just its markup).
   {
     const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/admin' });
     const mountEl = window.document.querySelector('qu-app-shell');
-    const mainSpace = await connectMain(relayAdmin, 'relay-admin-visit');
-    const { router } = startPlatform({
-      space: mainSpace,
-      connectAdminSpace: () => connectAdmin(relayAdmin, 'relay-admin-visit-admin'),
-      mountEl,
-      window,
-      resolveTimeout: 500,
-    });
+    const mainSpace = await connect(relayAdmin, 'relay-admin-visit');
+    const { router } = startPlatform({ space: mainSpace, mountEl, window, resolveTimeout: 500 });
 
     await waitUntil(() => mountEl.textContent.includes('Relay-Admin'));
     assert.ok(mountEl.querySelector('form[data-qu-action="register-app"]'), 'the console is rendered from installed content, not hardcoded DOM-building');
@@ -168,33 +151,36 @@ test('the built-in admin console is genuine installed content in a separate, con
     await new Promise((resolve) => setTimeout(resolve, 300)); // let the write actually leave and land.
 
     const platformNodeId = await deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind);
-    const apps = await relayAdminMainSpace.getNode(platformNodeId).field('apps').toArray();
+    const apps = await relayAdminSpace.getNode(platformNodeId).field('apps').toArray();
     assert.ok(apps.some((a) => a.prefix === 'calendar' && a.name === 'Kalender'), 'submitting the content-driven form actually registered the app');
 
     router.stop();
   }
 
-  // An OUTSIDER (never a member of the admin realm's own Space) visits #/admin: the alias resolves
-  // (aliases are public metadata, not secret - kinds.js's own `platformAppsKind` doc comment), and a
-  // Space connection to the admin realm is even attempted (proving this isn't just a client-side
-  // courtesy check), but the relay's OWN subscribe-gate + the content's `'encrypted'` visibility mean
-  // nothing decrypts - the visitor gets the framework's ordinary "not found", never admin content.
+  // An OUTSIDER (an ordinary Space member, but NOT a relay-admin) visits #/admin: the console's own
+  // markup is now `'public'`-visibility (this design's own tradeoff - there was never anything
+  // secret IN it), so it renders identically - but WRITE-access is still gated by the relay's own
+  // independent 'relay-admins' ACL check, so a submit through the same form is silently rejected.
   {
     const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/admin' });
     const mountEl = window.document.querySelector('qu-app-shell');
-    const mainSpace = await connectMain(outsider, 'outsider-main');
-    const { router } = startPlatform({
-      space: mainSpace,
-      connectAdminSpace: () => connectAdmin(outsider, 'outsider-admin'),
-      mountEl,
-      window,
-      resolveTimeout: 300,
-    });
+    const mainSpace = await connect(outsider, 'outsider-visit');
+    const { router } = startPlatform({ space: mainSpace, mountEl, window, resolveTimeout: 500 });
 
-    await waitUntil(() => mountEl.innerHTML.length > 0);
-    await new Promise((resolve) => setTimeout(resolve, 400)); // let the (doomed) resolve attempt finish.
-    assert.ok(mountEl.textContent.includes('404'), 'an outsider sees the plain not-found fallback, never admin content');
-    assert.ok(!mountEl.textContent.includes('Kalender'), 'the outsider learns nothing about the admin realm\'s own content');
+    await waitUntil(() => mountEl.textContent.includes('Relay-Admin'));
+    assert.ok(mountEl.querySelector('form[data-qu-action="register-app"]'), 'an outsider sees the SAME installed admin console markup - it was never secret');
+
+    const form = mountEl.querySelector('form');
+    form.querySelector('input[name="prefix"]').value = 'sneaky';
+    form.querySelector('input[name="appAdminPub"]').value = QuCrypto.toBase64(calendarAdmin.signingPub);
+    form.querySelector('input[name="name"]').value = 'Sneaky';
+    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await new Promise((resolve) => setTimeout(resolve, 300)); // let the (doomed) write attempt finish.
+
+    const platformNodeId = await deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind);
+    const apps = await relayAdminSpace.getNode(platformNodeId).field('apps').toArray();
+    assert.ok(!apps.some((a) => a.prefix === 'sneaky'), 'an outsider\'s submit is rejected by the relay\'s own independent relay-admins ACL check, never just a UI courtesy');
 
     router.stop();
   }

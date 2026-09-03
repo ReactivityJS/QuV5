@@ -54,8 +54,33 @@
  * value) via `collectionRegistryKinds`, or its enumeration writes
  * (`dev.js`'s `createCollectionItem()`) get silently rejected exactly
  * like a misclassified `qu-template-registry` would.
+ *
+ * THE ADMIN APP (architecture.md §7's "One relay Space, not two"): lives in
+ * this SAME main Space now, not a separate confidential relay-forwarder -
+ * `adminAppManifestKind`/`adminPageKind`/`adminTemplateKind`/
+ * `adminStyleKind` are `acl.write: 'relay-admins'` (a DIFFERENT mode from
+ * `pageKind`'s `'content'` fallback below, so they genuinely need their own
+ * classification, unlike Collections above) anchored on the fixed
+ * `ADMIN_REALM_ANCHOR` (kinds.js's own "THE ADMIN APP" doc comment) - since
+ * all four share that SAME `acl`/`persistence` shape, telling them apart
+ * from EACH OTHER is only for correctness of the returned Kind-Schema
+ * object's OWN field list, never required for the ACL/persistence check
+ * itself. The manifest id is precomputable with no extra input
+ * (`deriveOwnerNodeId(ADMIN_REALM_ANCHOR, ...)`, a singleton); PAGES/
+ * TEMPLATES/STYLES are content-addressed by NAME
+ * (`deriveContentNodeId(ADMIN_REALM_ANCHOR, kind, name)`), so their names
+ * must be told to this function - `adminTemplateNames`/`adminPageRoutes`/
+ * `adminStyleNames` default to exactly what the built-in
+ * `admin-console-bundle.js` ships (one template `"main"`, one page `"/"`,
+ * no style) - pass your own if a deployment's admin console grows beyond
+ * that reference bundle. (Dynamic, registry-driven admin-content discovery
+ * - the same live-reactive idea `qu-platform-apps` now uses for app-admins
+ * - is real, separate future work; the admin console's own content stays a
+ * small, fixed, known set for now, same scope boundary this design already
+ * documents elsewhere.)
  */
 import { deriveOwnerNodeId } from '@qu/space-core';
+import { deriveContentNodeId } from './content-id.js';
 import {
   appManifestKind,
   routeRegistryKind,
@@ -66,17 +91,31 @@ import {
   PLATFORM_REGISTRY_ANCHOR,
   adminAppManifestKind,
   adminPageKind,
+  adminTemplateKind,
+  adminStyleKind,
   ADMIN_REALM_ANCHOR,
 } from './kinds.js';
 
-/** @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], collectionRegistryKinds?: object[]}} params - `appAdminPub` (singular) is a convenience alias for `appAdminPubs: [appAdminPub]`. `collectionRegistryKinds` - every Collection's `registryKind` this relay should recognize (see this file's own top doc comment on "COLLECTIONS") - each is checked against every configured owner. @returns {Promise<(nodeId: string) => object>} */
-export async function createAppResolveKindSchema({ appAdminPub, appAdminPubs, collectionRegistryKinds = [] } = {}) {
+/** @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], collectionRegistryKinds?: object[], adminTemplateNames?: string[], adminPageRoutes?: string[], adminStyleNames?: string[]}} params - `appAdminPub` (singular) is a convenience alias for `appAdminPubs: [appAdminPub]`. `collectionRegistryKinds` - every Collection's `registryKind` this relay should recognize (see this file's own top doc comment on "COLLECTIONS") - each is checked against every configured owner. `adminTemplateNames`/`adminPageRoutes`/`adminStyleNames` - see this file's own top doc comment on "THE ADMIN APP". @returns {Promise<(nodeId: string) => object>} */
+export async function createAppResolveKindSchema({
+  appAdminPub,
+  appAdminPubs,
+  collectionRegistryKinds = [],
+  adminTemplateNames = ['main'],
+  adminPageRoutes = ['/'],
+  adminStyleNames = [],
+} = {}) {
   const owners = [...(appAdminPubs ?? []), ...(appAdminPub ? [appAdminPub] : [])];
   const manifestIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, appManifestKind.kind))));
   const registryIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, routeRegistryKind.kind))));
   const templateRegistryIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, templateRegistryKind.kind))));
   const styleRegistryIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, styleRegistryKind.kind))));
   const platformId = await deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind);
+
+  const adminManifestId = await deriveOwnerNodeId(ADMIN_REALM_ANCHOR, adminAppManifestKind.kind);
+  const adminTemplateIds = new Set(await Promise.all(adminTemplateNames.map((name) => deriveContentNodeId(ADMIN_REALM_ANCHOR, adminTemplateKind.kind, name))));
+  const adminPageIds = new Set(await Promise.all(adminPageRoutes.map((route) => deriveContentNodeId(ADMIN_REALM_ANCHOR, adminPageKind.kind, route))));
+  const adminStyleIds = new Set(await Promise.all(adminStyleNames.map((name) => deriveContentNodeId(ADMIN_REALM_ANCHOR, adminStyleKind.kind, name))));
 
   const collectionRegistryById = new Map();
   for (const registryKind of collectionRegistryKinds) {
@@ -86,6 +125,10 @@ export async function createAppResolveKindSchema({ appAdminPub, appAdminPubs, co
   }
 
   return (nodeId) => {
+    if (nodeId === adminManifestId) return adminAppManifestKind;
+    if (adminTemplateIds.has(nodeId)) return adminTemplateKind;
+    if (adminPageIds.has(nodeId)) return adminPageKind;
+    if (adminStyleIds.has(nodeId)) return adminStyleKind;
     if (manifestIds.has(nodeId)) return appManifestKind;
     if (registryIds.has(nodeId)) return routeRegistryKind;
     if (templateRegistryIds.has(nodeId)) return templateRegistryKind;
@@ -94,21 +137,4 @@ export async function createAppResolveKindSchema({ appAdminPub, appAdminPubs, co
     if (nodeId === platformId) return platformAppsKind;
     return pageKind;
   };
-}
-
-/**
- * THE ADMIN REALM'S OWN `resolveKindSchema` - for the SEPARATE relay-
- * forwarder instance that serves it (see `packages/app-shell/relay-server.js`'s
- * own "ADMIN REALM" doc comment), never the main one above: this realm has
- * no per-owner disambiguation to do at all (there is exactly one admin
- * realm, anchored on the fixed `ADMIN_REALM_ANCHOR` - kinds.js's own "THE
- * ADMIN REALM" doc comment), so the only real branch is "the one manifest
- * id" vs. "everything else" - same "any one Kind stands in for the rest,
- * the relay only ever consults `acl`/`persistence`" reasoning
- * `createAppResolveKindSchema()` above already documents for `pageKind`.
- * @returns {Promise<(nodeId: string) => object>}
- */
-export async function createAdminResolveKindSchema() {
-  const manifestId = await deriveOwnerNodeId(ADMIN_REALM_ANCHOR, adminAppManifestKind.kind);
-  return (nodeId) => (nodeId === manifestId ? adminAppManifestKind : adminPageKind);
 }

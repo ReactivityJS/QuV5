@@ -45,8 +45,8 @@ export class ContentResolver {
    *   comment for why only one owner is supported yet. `kinds` overrides
    *   which Kind-Schemas each method resolves against - defaults to the
    *   ordinary public `qu-app`/`qu-page`/`qu-template`/`qu-style` set;
-   *   `platform.js`'s admin-realm resolution passes the `qu-admin-*`
-   *   variants (`kinds.js`'s own "THE ADMIN REALM" doc comment) instead,
+   *   `platform.js`'s admin-app resolution passes the `qu-admin-*`
+   *   variants (`kinds.js`'s own "THE ADMIN APP" doc comment) instead,
    *   together with the fixed `ADMIN_REALM_ANCHOR` as `appAdminPub` - every
    *   id-derivation call below is unchanged either way, only WHICH Kind
    *   (and therefore which envelope visibility/ACL) it resolves against.
