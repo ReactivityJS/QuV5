@@ -32,13 +32,21 @@ import {
   adminPageKind,
   adminTemplateKind,
   adminStyleKind,
-  ADMIN_REALM_ANCHOR,
+  adminRouteRegistryKind,
+  globalAppAnchor,
 } from './kinds.js';
 
 /** The registry's own id never changes - see `platform.js`'s identically-reasoned `platformRegistryId()`, duplicated here (not imported) to keep this file's own dependency surface unchanged; both derive the SAME id from the SAME fixed anchor + Kind, so they always agree. */
 let platformRegistryIdPromise = null;
 function platformRegistryId() {
   return (platformRegistryIdPromise ??= deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind));
+}
+
+/** Memoized per-prefix - `globalAppAnchor()` (kinds.js) hashes on every call, cheap but pointless to redo for the SAME prefix within one process. */
+const globalAppAnchorCache = new Map();
+function cachedGlobalAppAnchor(prefix) {
+  if (!globalAppAnchorCache.has(prefix)) globalAppAnchorCache.set(prefix, globalAppAnchor(prefix));
+  return globalAppAnchorCache.get(prefix);
 }
 
 /** Polls `checkFn` (may itself be async - `'atomic'`-shape fields' own `.get()` is a Promise, `'text'`-shape's is not, see field.js) until it returns truthy or `timeout` elapses - local here (not imported from resolver.js) so this file stays independent of that one; same shape as its own `waitFor()`. Used only by the `edit*()` functions below, to make sure a Node this Space hasn't seen before has actually finished syncing (its founding grant included - see kind-schema.js's own "THE 'content' ACL mode" doc comment) before writing to it. */
@@ -100,8 +108,8 @@ export async function createApp(space, { name, version = '1.0', rootTemplate = n
  * single read) never pays it again after the first call, since
  * `space.getNode(id)` above then finds it immediately.
  */
-async function getOrSyncRegistryNode(space, registryKind) {
-  const id = await deriveOwnerNodeId(space.identity.signingPub, registryKind.kind);
+async function getOrSyncRegistryNode(space, registryKind, ownerPub = space.identity.signingPub) {
+  const id = await deriveOwnerNodeId(ownerPub, registryKind.kind);
   const existing = space.getNode(id);
   if (existing) return existing;
   const { node } = await space.useNode(id, registryKind);
@@ -361,13 +369,14 @@ export async function installAppBundle(space, bundle) {
  * `platform.js`'s own doc comment on the default, registration-free
  * routing fallback).
  * @param {import('@qu/space-core').Space} space - a relay-admin's own Space (see this function's own doc comment above).
- * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'admin'}} params
+ * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'global'}} params
  *   `prefix` is matched against a route's FIRST path segment (no
  *   leading/trailing slash, e.g. `"forum"` for `#/forum/...`).
- *   `realm: 'admin'` (default `'main'`) routes this prefix into the
- *   built-in admin app instead (`appAdminPub` is ignored/omitted for those
- *   entries - the admin app has no single owner, see kinds.js's own "THE
- *   ADMIN APP" doc comment).
+ *   `realm: 'global'` (default `'main'`) routes this prefix into content
+ *   ANY relay-admin collectively administers instead (`appAdminPub` is
+ *   ignored/omitted for those entries - a global app has no single owner,
+ *   see kinds.js's own "GLOBAL APP CONTENT" doc comment; `prefix` itself IS
+ *   the identifier `createGlobalApp()`/etc. anchor their ids on).
  */
 export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main' }) {
   const id = await platformRegistryId();
@@ -377,49 +386,158 @@ export async function registerApp(space, { prefix, appAdminPub, name, realm = 'm
 }
 
 /**
- * ADMIN APP DEV API — the exact same shape as `createApp()`/
+ * GLOBAL APP DEV API — the exact same shape as `createApp()`/
  * `createTemplate()`/`createStyle()`/`createPage()`/`installAppBundle()`
- * above, writing the `qu-admin-*` Kinds (kinds.js) at ids anchored on the
- * fixed `ADMIN_REALM_ANCHOR` instead of a real app-admin's pubkey - there
- * is only ONE admin app per relay, so no per-owner disambiguation is
- * needed (see kinds.js's own "THE ADMIN APP" doc comment). `acl.write:
- * 'relay-admins'` on every `qu-admin-*` Kind means these calls succeed for
- * ANY identity listed in the relay's own `QU_RELAY_ADMINS` (checked
- * independently by both `space` itself and the relay - never just this
- * file's say-so) - `space` is the SAME ordinary main Space any visitor
- * connects to, no separate confidential realm/transport to bootstrap
- * first, and no separate identity to generate/import either: whichever
- * identity `space` already uses (an operator's own already-existing
- * browser/CLI identity, the moment its pubkey is a configured relay-admin)
- * can call these directly.
+ * above, writing the `qu-admin-*` Kinds (kinds.js) at ids anchored on
+ * `globalAppAnchor(prefix)` instead of a real app-admin's pubkey - `prefix`
+ * is the SAME string this app is (or will be) `registerApp()`ed under with
+ * `realm: 'global'`, disambiguating one global app's content from another's
+ * (see kinds.js's own "GLOBAL APP CONTENT" doc comment - these functions
+ * are NOT specific to the one built-in admin console any more; that console
+ * is simply whichever caller passes `prefix: 'admin'`, same as
+ * `bin/install-admin-console.mjs` does). `acl.write: 'relay-admins'` on
+ * every `qu-admin-*` Kind means these calls succeed for ANY identity
+ * listed in the relay's own `QU_RELAY_ADMINS` (checked independently by
+ * both `space` itself and the relay - never just this file's say-so) -
+ * `space` is the SAME ordinary main Space any visitor connects to, no
+ * separate confidential realm/transport to bootstrap first, and no
+ * separate identity to generate/import either: whichever identity `space`
+ * already uses (an operator's own already-existing browser/CLI identity,
+ * the moment its pubkey is a configured relay-admin) can call these
+ * directly, for ANY global app, not just one it happened to create itself.
  */
-export async function createAdminApp(space, { name, version = '1.0', rootTemplate = null, defaultRoute = '/', theme = null, metadata = '' }) {
-  const id = await deriveOwnerNodeId(ADMIN_REALM_ANCHOR, adminAppManifestKind.kind);
+export async function createGlobalApp(space, prefix, { name, version = '1.0', rootTemplate = null, defaultRoute = '/', theme = null, metadata = '' }) {
+  const anchor = await cachedGlobalAppAnchor(prefix);
+  const id = await deriveOwnerNodeId(anchor, adminAppManifestKind.kind);
   return space.createNode(adminAppManifestKind, { name, version, rootTemplate, defaultRoute, theme, metadata }, { id });
 }
 
-/** Admin app counterpart to `createTemplate()`. */
-export async function createAdminTemplate(space, { name, html }) {
-  const id = await deriveContentNodeId(ADMIN_REALM_ANCHOR, adminTemplateKind.kind, name);
+/**
+ * Global-app counterpart to `createTemplate()` - see `createGlobalApp()`'s
+ * own doc comment on `prefix`. UNLIKE `createGlobalPage()`, this has no
+ * registry `@qu/app-shell`'s `live-app-resolver.js` watches yet (kinds.js's
+ * own "GLOBAL APP CONTENT" doc comment - "TEMPLATES/STYLES stay a smaller,
+ * more static set... a deliberate, separate scope boundary"), so a relay
+ * only classifies THIS write correctly if `name` is in the STATIC
+ * `templateNames` list `createAppResolveKindSchema()` was configured with
+ * for `prefix` - true for the built-in admin console (`['main']`, its
+ * OWN default) but NOT for any other, dynamically-registered global app
+ * unless a deployment wires its own static list. Calling this for a
+ * dynamically-registered global app's non-default template name will
+ * silently fail (the relay misclassifies it against the ordinary
+ * `'content'`-ACL fallback and rejects the write) until that gap is
+ * closed - real, separate future work, not attempted in this pass.
+ */
+export async function createGlobalTemplate(space, prefix, { name, html }) {
+  const anchor = await cachedGlobalAppAnchor(prefix);
+  const id = await deriveContentNodeId(anchor, adminTemplateKind.kind, name);
   return space.createNode(adminTemplateKind, { html }, { id });
 }
 
-/** Admin app counterpart to `createStyle()`. */
-export async function createAdminStyle(space, { name, css }) {
-  const id = await deriveContentNodeId(ADMIN_REALM_ANCHOR, adminStyleKind.kind, name);
+/** Global-app counterpart to `createStyle()` - see `createGlobalTemplate()`'s own doc comment (including its "not yet dynamically discoverable" caveat - identical here for `styleNames`). */
+export async function createGlobalStyle(space, prefix, { name, css }) {
+  const anchor = await cachedGlobalAppAnchor(prefix);
+  const id = await deriveContentNodeId(anchor, adminStyleKind.kind, name);
   return space.createNode(adminStyleKind, { css }, { id });
 }
 
-/** Admin app counterpart to `createPage()`. */
-export async function createAdminPage(space, { route, title, template = null, content = '' }) {
-  const id = await deriveContentNodeId(ADMIN_REALM_ANCHOR, adminPageKind.kind, route);
+/** Global-app counterpart to `createPage()` - see `createGlobalApp()`'s own doc comment on `prefix`. */
+export async function createGlobalPage(space, prefix, { route, title, template = null, content = '' }) {
+  const anchor = await cachedGlobalAppAnchor(prefix);
+  const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
   return space.createNode(adminPageKind, { route, title, template, content }, { id });
 }
 
-/** Admin app counterpart to `installAppBundle()` - see that function's own doc comment; identical shape, writes the `qu-admin-*` Kinds via the four functions just above. No `routes`/route-registry counterpart yet - not needed for the one built-in admin console page (see this package's own README on the reference bundle). */
-export async function installAdminAppBundle(space, bundle) {
-  await createAdminApp(space, bundle.manifest);
-  for (const template of bundle.templates ?? []) await createAdminTemplate(space, template);
-  for (const style of bundle.styles ?? []) await createAdminStyle(space, style);
-  for (const page of bundle.pages ?? []) await createAdminPage(space, page);
+/** Global-app counterpart to `installAppBundle()` - see that function's own doc comment; identical shape, writes the `qu-admin-*` Kinds via the four functions just above, all anchored on `prefix` (see `createGlobalApp()`'s own doc comment). No `routes`/route-registry counterpart yet - not needed for the built-in admin console's one page (see this package's own README on the reference bundle). */
+export async function installGlobalAppBundle(space, prefix, bundle) {
+  await createGlobalApp(space, prefix, bundle.manifest);
+  for (const template of bundle.templates ?? []) await createGlobalTemplate(space, prefix, template);
+  for (const style of bundle.styles ?? []) await createGlobalStyle(space, prefix, style);
+  for (const page of bundle.pages ?? []) await createGlobalPage(space, prefix, page);
+}
+
+/**
+ * UPDATES an existing global app's template - see `editTemplate()`'s own
+ * doc comment for the full "why never re-`createNode()`" reasoning
+ * (identical here, just against `adminTemplateKind` instead of
+ * `templateKind`); `prefix` (not `ownerPub`) identifies WHICH global app's
+ * content this targets - see `createGlobalApp()`'s own doc comment. Unlike
+ * `editTemplate()`, there is no single "owner" to default to: ANY
+ * currently-configured relay-admin may call this for ANY global app,
+ * exactly the point of `acl.write: 'relay-admins'`.
+ */
+export async function editGlobalTemplate(space, prefix, { name, html, timeout } = {}) {
+  const anchor = await cachedGlobalAppAnchor(prefix);
+  const id = await deriveContentNodeId(anchor, adminTemplateKind.kind, name);
+  const { node, release } = await space.useNode(id, adminTemplateKind);
+  const synced = await waitForSync(() => node.field('html').get() !== '', { timeout });
+  if (!synced) {
+    release();
+    throw new Error(`editGlobalTemplate: template "${name}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalTemplate() for a genuinely new one`);
+  }
+  replaceText(node.field('html'), html);
+  release();
+  return node;
+}
+
+/** Global-app counterpart to `editStyle()` - see `editGlobalTemplate()`'s own doc comment. */
+export async function editGlobalStyle(space, prefix, { name, css, timeout } = {}) {
+  const anchor = await cachedGlobalAppAnchor(prefix);
+  const id = await deriveContentNodeId(anchor, adminStyleKind.kind, name);
+  const { node, release } = await space.useNode(id, adminStyleKind);
+  const synced = await waitForSync(() => node.field('css').get() !== '', { timeout });
+  if (!synced) {
+    release();
+    throw new Error(`editGlobalStyle: style "${name}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalStyle() for a genuinely new one`);
+  }
+  replaceText(node.field('css'), css);
+  release();
+  return node;
+}
+
+/** Global-app counterpart to `editPage()` - see `editGlobalTemplate()`'s own doc comment, and `editPage()`'s own on the per-field update semantics (only fields actually passed are updated). */
+export async function editGlobalPage(space, prefix, { route, title, template, content, data, timeout } = {}) {
+  const anchor = await cachedGlobalAppAnchor(prefix);
+  const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
+  const { node, release } = await space.useNode(id, adminPageKind);
+  const synced = await waitForSync(async () => {
+    const t = await node.field('title').get();
+    return t !== '' && node.field('content').get() !== '';
+  }, { timeout });
+  if (!synced) {
+    release();
+    throw new Error(`editGlobalPage: page "${route}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalPage() for a genuinely new one`);
+  }
+  if (title !== undefined) await node.field('title').set(title);
+  if (template !== undefined) await node.field('template').set(template);
+  if (content !== undefined) replaceText(node.field('content'), content);
+  if (data !== undefined) await node.field('data').set(data);
+  release();
+  return node;
+}
+
+/**
+ * Global-app counterpart to `publishRoute()` - adds one entry to `prefix`'s
+ * OWN route registry (`adminRouteRegistryKind`, `acl.write: 'relay-admins'`
+ * - kinds.js's own doc comment on why this needs a DIFFERENT registry Kind
+ * from `routeRegistryKind`, not just a different anchor: several
+ * relay-admins share ONE registry here, with no single self-certifying
+ * owner). Unlike `publishRoute()`, THIS registry is also what
+ * `@qu/app-shell`'s `live-app-resolver.js` watches to reclassify a
+ * brand-new global page's write correctly WITHOUT a relay restart (see
+ * that file's own doc comment) - so for a global app, calling this is not
+ * merely a sitemap/enumeration nicety, it is what makes a genuinely NEW
+ * route reachable at all the first time any relay-admin creates it.
+ * Deduplicates by `route`, unlike `publishRoute()`'s own unchanged
+ * "never deduplicates" behavior - safe here since every caller for a given
+ * route is functionally interchangeable (any relay-admin), so a second
+ * call for the same route is always a harmless no-op, never a meaningful
+ * "second announcement" the way it might be for an independently-owned app.
+ */
+export async function publishGlobalRoute(space, prefix, { route, title }) {
+  const anchor = await cachedGlobalAppAnchor(prefix);
+  const node = await getOrSyncRegistryNode(space, adminRouteRegistryKind, anchor);
+  const existing = await node.field('routes').toArray();
+  if (!existing.some((entry) => entry?.route === route)) await node.field('routes').push({ route, title });
+  return node;
 }

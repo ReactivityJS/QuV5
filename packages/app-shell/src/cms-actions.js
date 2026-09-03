@@ -90,26 +90,32 @@ import {
   editStyle,
   editPage,
   publishRoute,
+  createGlobalPage,
+  editGlobalPage,
+  publishGlobalRoute,
   deriveContentNodeId,
   templateKind,
   styleKind,
   pageKind,
+  adminPageKind,
   routeRegistryKind,
   templateRegistryKind,
   styleRegistryKind,
+  adminRouteRegistryKind,
+  globalAppAnchor,
 } from '@qu/app-core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 
-/** See this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...". Releases `previous` (if any) THEN opens+holds a fresh subscription for `(kind, name)`, owned by `space.identity` (the same default `ownerPub` `editTemplate()`/`editStyle()`/`editPage()` themselves use). @returns {Promise<{node: object, release: () => void}>} */
-async function holdEdit(space, kind, name, previous) {
+/** See this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...". Releases `previous` (if any) THEN opens+holds a fresh subscription for `(kind, name)`, owned by `ownerPub` (defaults to `space.identity` - the same default `editTemplate()`/`editStyle()`/`editPage()` themselves use; a GLOBAL page passes `globalAppAnchor(prefix)` instead, see `wirePages()`'s own global-mode branch). @returns {Promise<{node: object, release: () => void}>} */
+async function holdEdit(space, kind, name, previous, ownerPub = space.identity.signingPub) {
   previous?.release();
-  const id = await deriveContentNodeId(space.identity.signingPub, kind.kind, name);
+  const id = await deriveContentNodeId(ownerPub, kind.kind, name);
   return space.useNode(id, kind);
 }
 
-/** See this file's own top doc comment, "KEEPING EACH SECTION'S OWN REGISTRY SUBSCRIPTION ALIVE...". Opens (and never releases - see that comment on why) a subscription to this identity's OWN `registryKind` Node, so every later `refreshList()`/`registerContentName()`/`publishRoute()` call in the same CMS session finds it already attached. */
-async function holdRegistry(space, registryKind) {
-  const id = await deriveOwnerNodeId(space.identity.signingPub, registryKind.kind);
+/** See this file's own top doc comment, "KEEPING EACH SECTION'S OWN REGISTRY SUBSCRIPTION ALIVE...". Opens (and never releases - see that comment on why) a subscription to `ownerPub`'s `registryKind` Node (defaults to `space.identity` - a GLOBAL app's registry passes `globalAppAnchor(prefix)` instead), so every later `refreshList()`/`registerContentName()`/`publishRoute()`/`publishGlobalRoute()` call in the same CMS session finds it already attached. */
+async function holdRegistry(space, registryKind, ownerPub = space.identity.signingPub) {
+  const id = await deriveOwnerNodeId(ownerPub, registryKind.kind);
   return space.useNode(id, registryKind);
 }
 
@@ -172,7 +178,13 @@ async function refreshTemplateSelect({ mountEl, doc, resolver }) {
   select.value = current;
 }
 
-async function wireTemplates({ mountEl, doc, space, resolver }) {
+async function wireTemplates({ mountEl, doc, space, resolver, global }) {
+  // Global apps have no template REGISTRY yet (kinds.js's own "GLOBAL APP CONTENT" doc comment -
+  // "TEMPLATES/STYLES stay a smaller, more static set for global apps for now," matching the
+  // priority the user themselves set: pages first, templates/styles optional) - a deliberate,
+  // documented scope cut, not an oversight. Skip wiring this section entirely rather than half-wire
+  // a list that can never enumerate anything.
+  if (global) return;
   const list = mountEl.querySelector('[data-qu-bind="cms-template-list"]');
   const form = mountEl.querySelector('form[data-qu-action="cms-template-form"]');
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="template"]');
@@ -237,7 +249,8 @@ async function wireTemplates({ mountEl, doc, space, resolver }) {
   await refreshList();
 }
 
-async function wireStyles({ mountEl, doc, space, resolver }) {
+async function wireStyles({ mountEl, doc, space, resolver, global }) {
+  if (global) return; // see wireTemplates()'s own identical comment.
   const list = mountEl.querySelector('[data-qu-bind="cms-style-list"]');
   const form = mountEl.querySelector('form[data-qu-action="cms-style-form"]');
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="style"]');
@@ -299,14 +312,27 @@ async function wireStyles({ mountEl, doc, space, resolver }) {
   await refreshList();
 }
 
-async function wirePages({ mountEl, doc, space, resolver }) {
+/**
+ * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, resolver: ContentResolver, global?: boolean, prefix?: string}} params
+ *   `global`/`prefix` - see `wireCms()`'s own doc comment. In global mode,
+ *   every write goes through `createGlobalPage()`/`editGlobalPage()`/
+ *   `publishGlobalRoute()` (`@qu/app-core`'s Dev API) instead of the
+ *   ordinary per-owner `createPage()`/`editPage()`/`publishRoute()` - ANY
+ *   configured relay-admin may then create/edit ANY page under this app,
+ *   not just whoever happened to create it first (kinds.js's own "GLOBAL
+ *   APP CONTENT" doc comment) - `refreshTemplateSelect()` is skipped
+ *   entirely here (no template registry for global apps yet, see
+ *   `wireTemplates()`'s own doc comment on that scope cut).
+ */
+async function wirePages({ mountEl, doc, space, resolver, global = false, prefix }) {
   const list = mountEl.querySelector('[data-qu-bind="cms-page-list"]');
   const form = mountEl.querySelector('form[data-qu-action="cms-page-form"]');
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="page"]');
   if (!list && !form) return;
 
-  holdRegistry(space, routeRegistryKind).catch(() => {}); // see wireTemplates()'s own identical comment.
-  await refreshTemplateSelect({ mountEl, doc, resolver });
+  const anchor = global ? await globalAppAnchor(prefix) : undefined;
+  holdRegistry(space, global ? adminRouteRegistryKind : routeRegistryKind, anchor).catch(() => {}); // see wireTemplates()'s own identical comment.
+  if (!global) await refreshTemplateSelect({ mountEl, doc, resolver });
 
   let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".
 
@@ -326,7 +352,7 @@ async function wirePages({ mountEl, doc, space, resolver }) {
       btn.type = 'button';
       btn.textContent = route;
       btn.addEventListener('click', async () => {
-        activeEdit = await holdEdit(space, pageKind, route, activeEdit);
+        activeEdit = await holdEdit(space, global ? adminPageKind : pageKind, route, activeEdit, anchor);
         const page = await resolver.resolvePage(route, { timeout: 2000 });
         if (!page) return;
         enterEditMode(form, {
@@ -359,7 +385,25 @@ async function wirePages({ mountEl, doc, space, resolver }) {
             throw new Error(`"Strukturierte Daten" ist kein gültiges JSON: ${err.message}`);
           }
         }
-        if (mode === 'edit') {
+        if (global) {
+          if (mode === 'edit') await editGlobalPage(space, prefix, { route, title, template, content, data, timeout: 2000 });
+          else {
+            // PUBLISH THE ROUTE FIRST, THEN CREATE THE PAGE - order matters here, the same "register
+            // before seeding" reasoning bootstrap-platform.mjs's own doc comment documents for a
+            // brand-new app-admin: the relay's live resolver (live-app-resolver.js) only classifies
+            // a page under this global app as `adminPageKind` ('relay-admins'-ACL) once it has
+            // observed the route in `adminRouteRegistryKind` - creating the page FIRST would race
+            // that write against a still-stale classification, silently rejected as the generic
+            // 'content'-ACL fallback (no grant for this anchor-derived id exists, or ever will).
+            // The settle delay gives the relay's own internal watcher time to actually rebuild
+            // before the page write follows - the SAME margin bootstrap-platform.mjs's own explicit
+            // wait-for-ack-plus-settle uses, just a fixed delay here rather than tracking acks
+            // through this file's own bus (which cms-actions.js has no handle on).
+            await publishGlobalRoute(space, prefix, { route, title });
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            await createGlobalPage(space, prefix, { route, title, template, content, data });
+          }
+        } else if (mode === 'edit') {
           await editPage(space, { route, title, template, content, data, timeout: 2000 });
         } else {
           await createPage(space, { route, title, template, content, data });
@@ -384,17 +428,25 @@ async function wirePages({ mountEl, doc, space, resolver }) {
 }
 
 /**
- * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, appAdminPub: Uint8Array}} params
+ * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, appAdminPub: Uint8Array, global?: boolean, prefix?: string}} params
  *   `space`/`appAdminPub` - the app whose content is being managed: the
  *   VISITING identity is `space.identity` (may or may not be `appAdminPub`
  *   itself or a granted co-editor - see `cms-bundle.js`'s own doc comment
  *   on why this file never tries to tell the difference client-side).
+ *   `global`/`prefix` - `boot.js`'s `startPlatform()` passes these for any
+ *   `realm: 'global'` app OTHER than the built-in admin console itself
+ *   (which gets `wireAdminConsole()` instead, see that file's own doc
+ *   comment) - `appAdminPub` is then `globalAppAnchor(prefix)`, not a real
+ *   identity, and pages resolve/write through the `qu-admin-*` Kinds
+ *   (`adminPageKind`/`adminRouteRegistryKind`) any configured relay-admin
+ *   may use, not just whoever created a given page - see `wirePages()`'s
+ *   own doc comment.
  */
-export async function wireCms({ mountEl, doc, space, appAdminPub }) {
-  const resolver = new ContentResolver(space, { appAdminPub });
+export async function wireCms({ mountEl, doc, space, appAdminPub, global = false, prefix }) {
+  const resolver = new ContentResolver(space, { appAdminPub, kinds: global ? { pageKind: adminPageKind, routeRegistryKind: adminRouteRegistryKind } : undefined });
   await Promise.all([
-    wireTemplates({ mountEl, doc, space, resolver }),
-    wireStyles({ mountEl, doc, space, resolver }),
-    wirePages({ mountEl, doc, space, resolver }),
+    wireTemplates({ mountEl, doc, space, resolver, global }),
+    wireStyles({ mountEl, doc, space, resolver, global }),
+    wirePages({ mountEl, doc, space, resolver, global, prefix }),
   ]);
 }

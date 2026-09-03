@@ -3,7 +3,7 @@
  * architecture.md §7 talks about, applied to the built-in admin app
  * itself: no hardcoded DOM-building JS, just a
  * `{manifest, templates, pages}` object in the exact shape `@qu/app-core`'s
- * `installAdminAppBundle()` already consumes (the SAME shape
+ * `installGlobalAppBundle()` already consumes (the SAME shape
  * `installAppBundle()` uses for an ordinary app - see that function's own
  * doc comment). `bin/install-admin-console.mjs` writes this into the SAME
  * main Space every other app's content lives in, once, at bootstrap; from

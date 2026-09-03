@@ -60,7 +60,7 @@ import { QuCrypto } from '@qu/core';
 import { Space, deriveOwnerNodeId } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport';
 import WebSocket from 'ws';
-import { createAppResolveKindSchema, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
+import { createAppResolveKindSchema, platformAppsKind, PLATFORM_REGISTRY_ANCHOR, adminRouteRegistryKind, globalAppAnchor } from '@qu/app-core';
 
 /**
  * @param {{collectionRegistryKinds?: object[]}} [params] - forwarded to every `createAppResolveKindSchema()` rebuild, see that function's own doc comment.
@@ -87,14 +87,48 @@ export function createLiveAppResolveKindSchema({ collectionRegistryKinds = [] } 
     const { node } = await space.useNode(platformId, platformAppsKind); // never released - lives for this relay process's own lifetime.
     const field = node.field('apps');
 
+    // WATCHING EVERY GLOBAL APP'S OWN ROUTE REGISTRY - the SAME reactive idea as `qu-platform-apps`
+    // itself, one level down: a relay-admin CREATING a brand-new global app's page needs its route
+    // correctly classified (`adminPageKind`, 'relay-admins'-ACL) the moment it's published, not
+    // after a restart - see `@qu/app-core`'s `dev.js`'s own `publishGlobalRoute()` doc comment.
+    // Global apps are only ever ADDED (`qu-platform-apps`'s own `ListField` has no removal), so a
+    // watch, once started for a given prefix, never needs tearing down - `watchedPrefixes` just
+    // tracks which ones already have one, so `ensureGlobalWatches()` never double-subscribes.
+    const watchedPrefixes = new Set();
+    const globalPageRoutesByPrefix = new Map(); // prefix -> string[], updated in place by each registry's own observe() callback.
+
+    async function watchGlobalRouteRegistry(prefix) {
+      const anchor = await globalAppAnchor(prefix);
+      const registryId = await deriveOwnerNodeId(anchor, adminRouteRegistryKind.kind);
+      const { node: registryNode } = await space.useNode(registryId, adminRouteRegistryKind); // never released - same "lives for this process" posture as the platform registry above.
+      const routesField = registryNode.field('routes');
+      const syncRoutes = async () => {
+        globalPageRoutesByPrefix.set(prefix, await routesField.toArray());
+        await rebuild();
+      };
+      routesField.observe(syncRoutes); // fire-and-forget from the ListField's own synchronous handler - each call's own rebuild() below settles independently, see ensureGlobalWatches()'s own comment.
+      await syncRoutes(); // initial snapshot for this newly-discovered global app, same reasoning as the platform registry's own initial rebuild() below.
+    }
+
+    async function ensureGlobalWatches(apps) {
+      const prefixes = apps.filter((a) => a?.realm === 'global').map((a) => a.prefix);
+      const newOnes = prefixes.filter((prefix) => !watchedPrefixes.has(prefix));
+      for (const prefix of newOnes) watchedPrefixes.add(prefix);
+      await Promise.all(newOnes.map(watchGlobalRouteRegistry)); // each call's own rebuild()s (via syncRoutes()) are harmless no-ops until this function's own rebuild() below runs anyway.
+    }
+
     async function rebuild() {
-      const apps = await field.toArray();
+      const apps = (await field.toArray()).filter(Boolean);
+      await ensureGlobalWatches(apps);
       const appAdminPubs = apps
-        .filter(Boolean)
         .map((a) => a.appAdminPub)
         .filter(Boolean)
         .map((b64) => QuCrypto.fromBase64(b64));
-      current = await createAppResolveKindSchema({ appAdminPubs, collectionRegistryKinds });
+      const globalApps = [...watchedPrefixes].map((prefix) => ({
+        prefix,
+        pageRoutes: (globalPageRoutesByPrefix.get(prefix) ?? []).filter(Boolean).map((r) => r.route),
+      }));
+      current = await createAppResolveKindSchema({ appAdminPubs, collectionRegistryKinds, globalApps });
     }
     field.observe(rebuild);
     await rebuild(); // initial snapshot - covers a relay restart with an already-populated registry, not just apps registered AFTER this call.

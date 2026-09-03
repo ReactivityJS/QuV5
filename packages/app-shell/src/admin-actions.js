@@ -11,8 +11,9 @@
  * ATTRIBUTE, the content itself stays inert markup.
  *
  * Two conventions, both scoped to whatever `mountEl` currently holds after
- * `@qu/app-renderer`'s `renderPage()` ran for a `realm: 'admin'` route
- * (`boot.js`'s `startPlatform()` calls `wireAdminConsole()` right after):
+ * `@qu/app-renderer`'s `renderPage()` ran for the built-in admin console's
+ * own route (`prefix === 'admin'` - `boot.js`'s `startPlatform()` calls
+ * `wireAdminConsole()` right after):
  *
  *   - `<form data-qu-action="register-app">` with `name="prefix"`/
  *     `name="appAdminPub"`/`name="name"` inputs - submitting it calls
@@ -72,7 +73,7 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
       }
       for (const app of apps) {
         const li = doc.createElement('li');
-        const owner = app.realm === 'admin' ? 'Admin' : `${QuCrypto.toBase64(app.appAdminPub).slice(0, 20)}…`;
+        const owner = app.realm === 'global' ? 'Global (alle Relay-Admins)' : `${QuCrypto.toBase64(app.appAdminPub).slice(0, 20)}…`;
         li.textContent = `#/${app.prefix} — ${app.name ?? '(unbenannt)'} (${owner})`;
         list.appendChild(li);
       }

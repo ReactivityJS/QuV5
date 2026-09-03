@@ -682,8 +682,9 @@ Space every other app's content does.
   doc comment on the mode - a flat, symmetric list, like `'members'`, but
   checked independently of ordinary Space membership), ONE GLOBAL registry
   per relay anchored on the fixed `PLATFORM_REGISTRY_ANCHOR` (`kinds.js`,
-  the same idea `ADMIN_REALM_ANCHOR` below already established) rather than
-  one Node per relay-admin's own pubkey - see this document's own "A fourth
+  the same idea `globalAppAnchor(prefix)` below uses, one anchor per app)
+  rather than one Node per relay-admin's own pubkey - see this document's
+  own "A fourth
   ACL mode" subsection further down for the full "why" and what changed.
   Holds an additive-only `ListField` of `{prefix, appAdminPub, name, realm}`
   - `ListField` has no removal primitive, so there is no `unregisterApp()`.
@@ -693,7 +694,7 @@ Space every other app's content does.
   different identities' writes on purpose (an app-admin installs their own
   app; only a relay-admin decides it's reachable under a nice name). An
   alias's mere EXISTENCE is not confidential (`'public'` visibility,
-  `qu-platform-apps`'s own field) - only a `realm: 'admin'` alias's actual
+  `qu-platform-apps`'s own field) - only a `realm: 'global'` alias's actual
   CONTENT is (see below).
 - **Default, registration-free**: `PlatformRuntime.resolveForPath(route)`
   falls back to trying the route's first path segment as a literal
@@ -706,7 +707,7 @@ Space every other app's content does.
   call) sufficient on its own for an app to go live.
 
 *One relay Space, not two (a real, deliberate simplification from an
-earlier revision of this design):* a `realm: 'admin'` alias
+earlier revision of this design):* a `realm: 'global'` alias
 (conventionally named `"admin"`, but that is a NAMING convention the
 bootstrap installer picks, not a router special case) resolves into the
 built-in admin app's own content, living in the exact SAME main `Space`
@@ -725,17 +726,19 @@ relay-admin, just administer the relay?" (the same "one identity,
 multiple owner-relationships" model QuV3 already used, and the same model
 this whole document's Kind/ACL system is built around everywhere else).
 The fix: fold the admin app's Kinds (`qu-admin-app`/`qu-admin-page`/
-`qu-admin-template`/`qu-admin-style`, `kinds.js`'s own "THE ADMIN APP" doc
-comment) into `acl.write: 'relay-admins'` - the EXACT SAME primitive
+`qu-admin-template`/`qu-admin-style`, `kinds.js`'s own "GLOBAL APP CONTENT"
+doc comment) into `acl.write: 'relay-admins'` - the EXACT SAME primitive
 `qu-platform-apps` already uses (this document's own "A fourth ACL mode"
-subsection) - anchored on the fixed `ADMIN_REALM_ANCHOR` (name kept for
-continuity with the earlier revision) instead of a separate confidential
-transport. `resolver.js`'s `ContentResolver` (and `runtime.js`'s
-`AppRuntime`) still take an optional `kinds` override for exactly this -
-`boot.js`'s `startPlatform()` passes the `qu-admin-*` set and
-`ADMIN_REALM_ANCHOR` for a `realm: 'admin'` match, otherwise the ordinary
-public set and the matched app's own `appAdminPub` - the SAME
-`AppRuntime`/`ContentResolver` code path, the SAME `Space`, either way,
+subsection) - anchored on `globalAppAnchor('admin')` instead of a separate
+confidential transport (a later revision, see "Global apps, not just one
+admin console" further down, generalizes this SAME anchor to any number of
+apps, not only the built-in console). `resolver.js`'s `ContentResolver`
+(and `runtime.js`'s `AppRuntime`) still take an optional `kinds` override
+for exactly this - `boot.js`'s `startPlatform()` passes the `qu-admin-*`
+set and that app's own `globalAppAnchor(prefix)` for a `realm: 'global'`
+match, otherwise the ordinary public set and the matched app's own
+`appAdminPub` - the SAME `AppRuntime`/`ContentResolver` code path, the SAME
+`Space`, either way,
 only WHICH Kinds differ.
 
 The tradeoff, made explicit: the admin console's own MARKUP (a "register
@@ -753,7 +756,7 @@ design - see `admin-actions.js`'s own doc comment).
 **The built-in admin console is itself installed Qu content, not
 hardcoded framework DOM-building** - `packages/app-shell/admin-console-
 bundle.js` (a `{manifest, templates, pages}` bundle, the exact shape
-`installAdminAppBundle()` consumes) ships as this package's own reference
+`installGlobalAppBundle()` consumes) ships as this package's own reference
 "Package," installed once via `packages/app-shell/bin/install-admin-
 console.mjs` (a real, separate process holding the bootstrapping
 identity's private key - connects ONCE to the main Space to both install
@@ -1076,8 +1079,9 @@ own doc comment). Two changes close this:
   key).
 - **`qu-platform-apps` is now ONE GLOBAL registry**, anchored on a fixed,
   non-cryptographic `PLATFORM_REGISTRY_ANCHOR` (`kinds.js`, the same idea
-  `ADMIN_REALM_ANCHOR` already established one section up) instead of one
-  Node per relay-admin's own pubkey - a real, deliberate change from the
+  `globalAppAnchor(prefix)` uses one section up, just a single anchor
+  instead of one per app) instead of one Node per relay-admin's own pubkey
+  - a real, deliberate change from the
   earlier `'named'`-ACL shape, which only ever let ONE relay-admin's own
   registry be consulted at all (`PlatformRuntime` took a single
   `relayAdminPub`); this shape genuinely lets several relay-admins share
@@ -1222,6 +1226,92 @@ identities that changed, from e.g. a SIGHUP handler or an admin-UI action)
 straightforward to build - deliberately not built in this pass, since it
 needs its own trigger-mechanism decision first.
 
+**Global apps, not just one admin console - relay-admins administer ALL
+of them, not only register them:** a real gap surfaced by an operator
+actually using this: relay-admins could register a third-party app under a
+prefix (`registerApp()`), but that app's own PAGES stayed `'content'`-ACL,
+owned by whichever ONE identity created them - a relay-admin, even one
+listed as such from boot, had no automatic write access to it. The
+built-in admin console's own `'relay-admins'`-ACL content was the ONE
+exception, hardcoded as a SINGLE app anchored on one fixed constant
+(`ADMIN_REALM_ANCHOR`, an earlier revision of this section). Matching the
+user's own original framing from the very start of this design - "Admins
+verwalten auch erstmal die globalen Apps und CMS-Inhalte" (admins ALSO
+administer the global apps and CMS content, for now) - this is generalized
+from "the one admin console" to ANY number of relay-admin-administered
+"global" apps:
+
+- `kinds.js`'s `globalAppAnchor(prefix)` replaces the single fixed
+  `ADMIN_REALM_ANCHOR` with one anchor PER PREFIX (`sha256("qu-global-app:"
+  + prefix)`) - the built-in admin console is simply `globalAppAnchor('admin')`,
+  no longer a framework special case. The SAME `qu-admin-*` Kinds (kept
+  their name for continuity) now serve EVERY global app, told apart only by
+  which anchor their ids are derived from.
+- `platformAppsKind`'s `realm` field is `'main'|'global'` now (renamed
+  from `'admin'`, which was really always "this alias has no single
+  owner," not "this is THE admin console specifically") - `registerApp(...,
+  {realm: 'global'})` works for any prefix, not just `"admin"`.
+- `dev.js` gained a full parallel Dev API - `createGlobalApp()`/
+  `createGlobalTemplate()`/`createGlobalStyle()`/`createGlobalPage()`/
+  `installGlobalAppBundle()`/`editGlobalTemplate()`/`editGlobalStyle()`/
+  `editGlobalPage()`/`publishGlobalRoute()` - each taking `prefix` where
+  the ordinary `create*()`/`edit*()` take `ownerPub` (or default to
+  `space.identity.signingPub`). ANY configured relay-admin can call these
+  for ANY global app - not just whoever created it - which is the actual
+  point: no per-admin `grantContentWriter()` bootstrapping, and a relay-
+  admin added LATER automatically gets full write access too, the same
+  "checked independently of who created it" property `'relay-admins'`-ACL
+  already gives `qu-platform-apps` and the admin console itself.
+- **A brand-new global page needs its OWN dynamic discovery, the same way
+  a brand-new app-admin already did** - `kinds.js` gained
+  `adminRouteRegistryKind` (`'relay-admins'`-ACL counterpart to
+  `routeRegistryKind`, one Node per global app, anchored the same way);
+  `publishGlobalRoute()` writes to it, and `@qu/app-shell`'s
+  `live-app-resolver.js` now watches EVERY currently-known global app's OWN
+  route registry (discovered reactively from `qu-platform-apps` itself,
+  the same `realm: 'global'` entries), rebuilding the live
+  `resolveKindSchema` whenever any of them changes - a relay-admin
+  publishing a brand-new route under an EXISTING global app needs no relay
+  restart, mirroring `qu-platform-apps`'s own live-discovery story one
+  level down. **Ordering matters here too, the exact same reason
+  `bootstrap-platform.mjs`'s own "REGISTER FIRST, THEN SEED CONTENT" doc
+  comment already documents for a brand-new app-admin**: `publishGlobalRoute()`
+  must land (and the relay's own watcher must have rebuilt) BEFORE
+  `createGlobalPage()`'s own write for that SAME route, or the relay still
+  classifies the page against the generic `'content'`-ACL fallback and
+  silently rejects it - `cms-actions.js`'s own submit handler publishes the
+  route, waits a short settle, THEN creates the page, in that order,
+  exactly for this reason.
+- **Deliberately NOT yet built**: templates/styles have no equivalent
+  registry - `createGlobalTemplate()`/`createGlobalStyle()` only work for
+  names a relay was STATICALLY configured to expect (true for the built-in
+  console's own `"main"` template, its own default; NOT true for any other
+  global app's non-default template/style names, which the relay silently
+  rejects until this gap is closed) - matching the priority the user
+  themselves set ("Das eine sind pages im Storage abzulegen. Und Templates
+  und Styles optional") - pages first, templates/styles a deliberate,
+  separate scope cut, not an oversight.
+- `cms-actions.js`'s `wireCms({..., global, prefix})` gained a genuine
+  "global mode": the SAME CMS editor UI now works against a global app's
+  content (via `createGlobalPage()`/`editGlobalPage()`/
+  `publishGlobalRoute()` and the matching `kinds`/`appAdminPub` override on
+  its `ContentResolver`) instead of only an independently-owned app's own
+  Space - `boot.js`'s `startPlatform()` wires it this way for any `realm:
+  'global'` route OTHER than the built-in admin console itself (which
+  keeps its own dedicated `wireAdminConsole()`). The templates/styles
+  sections of the CMS editor are a deliberate no-op in global mode (no
+  registry to enumerate against yet, see above) - only the pages section is
+  wired.
+
+Verified end-to-end against a real relay with TWO independent relay-admin
+identities and no restart between steps: relay-admin A registers a
+brand-new global app ("blog") and creates its home page; relay-admin B - a
+completely different identity, never involved in creating anything above -
+edits that SAME page and creates a brand-new one under the SAME app,
+BOTH through the real browser CMS UI (`#/blog/cms`), not just the Dev API
+directly; every result is independently readable by a fresh, uninvolved
+visitor identity afterward.
+
 **Reading this as a CMS, not just a router:** the admin console proves the
 general shape - "UI legt sich selbst innerhalb des Storage an und hat
 zuständige Admins" (the user's own framing) - a piece of UI is installed
@@ -1234,7 +1324,7 @@ styles are now genuinely stored and edited THROUGH the UI, and page data
 filling those templates is saved through the same editor, no CLI/Dev-API
 script required for day-to-day content work. Nothing here is
 admin-app-specific in principle: `installAppBundle()`/
-`installAdminAppBundle()` are already the SAME shape, `ContentResolver`'s
+`installGlobalAppBundle()` are already the SAME shape, `ContentResolver`'s
 `kinds` override already makes "which Kind-Schema set a piece of content
 resolves against" a parameter, not a hardcoded choice. What is genuinely
 NOT built yet, for this to be a fully general CMS: editing the built-in

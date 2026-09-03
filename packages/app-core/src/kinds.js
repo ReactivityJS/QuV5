@@ -70,6 +70,7 @@
  * (otherwise sensible) DEFAULT for a case it wasn't designed for.
  */
 import { defineKind } from '@qu/space-core';
+import { QuCrypto } from '@qu/core';
 
 /** @param {object} kindSchema @returns {object} A shallow copy with `metaVisibility` forced to `'public'` - see this file's own doc comment for why. */
 function publicMeta(kindSchema) {
@@ -192,8 +193,9 @@ export function defineCollectionKind(itemKindName, { fields }) {
  * operator's config alone is enough - `'named'` would need one admin's
  * PRIVATE key to sign a grant for every other admin, something no relay
  * process ever holds). `PLATFORM_REGISTRY_ANCHOR` below is therefore a
- * FIXED, non-cryptographic id input (same idea as `ADMIN_REALM_ANCHOR`
- * further down this file) - there is exactly ONE such registry per relay,
+ * FIXED, non-cryptographic id input (same idea as `globalAppAnchor()`
+ * further down this file, just a single anchor instead of one per prefix)
+ * - there is exactly ONE such registry per relay,
  * so its id carries no ownership meaning, only "'relay-admins'-ACL, THIS
  * Kind" (mirrors `deriveOwnerNodeId()`'s own "self-certifying" idea, just
  * with a list-membership check instead of a single owner pubkey behind it).
@@ -227,14 +229,16 @@ export const platformAppsKind = publicMeta(
   defineKind('qu-platform-apps', {
     fields: {
       /**
-       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'admin'}>`
+       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global'}>`
        * - see `dev.js`'s `registerApp()`/`platform.js`'s `PlatformRuntime`.
-       * `realm: 'admin'` entries (`appAdminPub: null`) route into the
-       * built-in admin app (see this file's own "THE ADMIN APP" doc
-       * comment) instead of an ordinary owner-pubkey-addressed app - the
-       * SAME registry, the SAME `'public'`-visibility mapping, no separate
-       * mechanism. This
-       * mapping is itself only a convenience: `PlatformRuntime.resolveForPath()`
+       * `realm: 'global'` entries (`appAdminPub: null`) route into content
+       * ANY configured relay-admin collectively administers (see this
+       * file's own "GLOBAL APP CONTENT" doc comment) instead of an
+       * ordinary owner-pubkey-addressed app - the SAME registry, the SAME
+       * `'public'`-visibility mapping, no separate mechanism; the built-in
+       * admin console is simply the one ALWAYS-present `realm: 'global'`
+       * entry (conventionally at prefix `"admin"`), not a special case.
+       * This mapping is itself only a convenience: `PlatformRuntime.resolveForPath()`
        * falls back to treating an UNREGISTERED prefix as a literal
        * base64url-encoded owner pubkey when nothing here matches, so no
        * app-admin needs a relay-admin's cooperation just to be reachable at
@@ -298,50 +302,65 @@ export const styleKind = publicMeta(
 );
 
 /**
- * THE ADMIN APP (architecture.md §7, REVISED — no longer a separate
- * confidential realm, see this document's own "One relay Space, not two"
- * subsection for the full "why" this changed): the built-in admin
- * console's own manifest/page/template/style, living in the SAME open,
- * ordinary main Space as any other app's content - resolved through the
- * exact same `AppRuntime`/`ContentResolver` pipeline, no second `Space`,
- * no second relay-forwarder, no `/admin-ws`. Same fields/shapes as
- * `qu-app`/`qu-page`/`qu-template`/`qu-style` above, `publicMeta()`-wrapped
- * the same way - a visitor who isn't a relay-admin can read the console's
- * own markup (there was never anything secret IN it - a "register an
- * app" form and a list of already-`'public'`-visibility
- * `qu-platform-apps` entries) but, per `acl.write: 'relay-admins'` below,
- * can never write to it.
+ * GLOBAL APP CONTENT (architecture.md §7, REVISED TWICE — first "One relay
+ * Space, not two" folded the built-in admin console into the ordinary main
+ * Space instead of a separate confidential realm; this revision
+ * generalizes that SAME `'relay-admins'`-ACL idea from "the one admin
+ * console" to ANY number of relay-admin-administered apps): `qu-admin-app`/
+ * `qu-admin-page`/`qu-admin-template`/`qu-admin-style` (Kind names kept for
+ * continuity with the admin-console-only revision of this design - they
+ * are NOT specific to the built-in admin console any more) are the
+ * `acl.write: 'relay-admins'` counterparts to `qu-app`/`qu-page`/
+ * `qu-template`/`qu-style` above: content ANY configured relay-admin may
+ * write, with NO single distinguished owner - "wir berechtigen in dem
+ * Space alle Admins des Relays" (the user's own framing), now for as many
+ * GLOBAL apps as a deployment registers, not just one. A `platformAppsKind`
+ * entry's `realm: 'global'` (see that Kind's own doc comment) marks an app
+ * as globally administered this way, as opposed to an ordinary `realm:
+ * 'main'` app owned by one independent app-admin identity
+ * (`acl.write: 'content'`, above). The built-in admin console
+ * (`bin/install-admin-console.mjs`) is simply the FIRST, conventionally-
+ * always-installed global app - `registerApp({prefix: 'admin', realm:
+ * 'global'})` - not a framework special case any more: `platform.js`'s own
+ * routing treats every `realm: 'global'` entry identically, whatever its
+ * prefix.
  *
  * `acl.write: 'relay-admins'` (`@qu/space-core`'s kind-schema.js own doc
  * comment on the mode) is exactly the same primitive `qu-platform-apps`
  * uses: a flat, symmetric, boot-time-configured list (`QU_RELAY_ADMINS`),
- * checked completely independently of ordinary Space membership - "wir
- * berechtigen in dem Space alle Admins des Relays" (the user's own
- * framing), no single "owner." Crucially, this means ANY configured
- * relay-admin can install/edit this content using their OWN ALREADY-
- * EXISTING identity (the same one their browser already generated and
- * persists via `loadOrCreateIdentity()`/`IDENTITY_STORAGE_KEY`) the
- * moment their pubkey is listed in `QU_RELAY_ADMINS` - no separate
- * "admin realm" keypair to generate and import into the browser, no
- * private key ever needs to move between a script and a browser tab.
+ * checked completely independently of ordinary Space membership. Crucially,
+ * this means ANY configured relay-admin can install/edit ANY global app's
+ * content using their OWN ALREADY-EXISTING identity (the same one their
+ * browser already generated and persists via `loadOrCreateIdentity()`/
+ * `IDENTITY_STORAGE_KEY`) the moment their pubkey is listed in
+ * `QU_RELAY_ADMINS` - no separate "app owner" keypair to generate and
+ * import into the browser, no private key ever needs to move between a
+ * script and a browser tab, and no per-relay-admin `grantContentWriter()`
+ * bootstrapping needed either (unlike `'content'`-ACL, which would need
+ * one admin's PRIVATE key to sign a grant for every OTHER admin, and would
+ * need re-granting for every FUTURE relay-admin added later - `'relay-
+ * admins'` needs neither, by construction).
  *
- * Node ids need no real owner pubkey to stay unique - there is exactly
- * ONE admin app per relay, so `ADMIN_REALM_ANCHOR` (name kept for
- * continuity with earlier revisions of this design) is a fixed, public,
- * NON-cryptographic 32-byte constant (nobody's private key corresponds to
- * it - it is never used to verify a signature, only fed through the exact
- * same `deriveOwnerNodeId()`/`deriveContentNodeId()` functions every other
- * Kind here already uses, purely as a stable hash input) - see
- * `dev.js`'s `createAdminApp()`/`createAdminPage()`/etc. and
- * `resolver.js`/`runtime.js`'s optional `kinds` override for how
+ * Node ids need no real owner pubkey to stay unique - `globalAppAnchor(prefix)`
+ * below derives a fixed, public, NON-cryptographic 32-byte anchor PER
+ * PREFIX (nobody's private key corresponds to it - it is never used to
+ * verify a signature, only fed through the exact same
+ * `deriveOwnerNodeId()`/`deriveContentNodeId()` functions every other Kind
+ * here already uses, purely as a stable hash input), so several global
+ * apps' content Nodes never collide with each other. See `dev.js`'s
+ * `createGlobalApp()`/`createGlobalPage()`/etc. and `resolver.js`/
+ * `runtime.js`'s optional `kinds`/`appAdminPub` override for how
  * `ContentResolver`/`AppRuntime` reuse their EXACT existing id-derivation
- * code paths for this, unchanged, just handed this constant instead of a
- * real app-admin's pubkey.
+ * code paths for this, unchanged, just handed an anchor instead of a real
+ * app-admin's pubkey - `boot.js`'s `startPlatform()` passes
+ * `globalAppAnchor(match.prefix)` for any `realm: 'global'` match, no
+ * longer one hardcoded constant.
  */
-export const ADMIN_REALM_ANCHOR = new Uint8Array(32);
-ADMIN_REALM_ANCHOR.set(new TextEncoder().encode('qu-admin-realm'));
+export async function globalAppAnchor(prefix) {
+  return QuCrypto.sha256(new TextEncoder().encode(`qu-global-app:${prefix}`));
+}
 
-/** Admin app counterpart to `appManifestKind` - see this file's own "THE ADMIN APP" doc comment. */
+/** Global-app counterpart to `appManifestKind` - see this file's own "GLOBAL APP CONTENT" doc comment. */
 export const adminAppManifestKind = publicMeta(
   defineKind('qu-admin-app', {
     fields: {
@@ -356,7 +375,7 @@ export const adminAppManifestKind = publicMeta(
   })
 );
 
-/** Admin app counterpart to `pageKind`, including its `data` field (kept in lockstep - `resolver.js`'s `resolvePage()` is shared code, used for both `pageKind` and this one via its `kinds` override, and unconditionally reads `data`). Node id = `deriveContentNodeId(ADMIN_REALM_ANCHOR, 'qu-admin-page', route)`. */
+/** Global-app counterpart to `pageKind`, including its `data` field (kept in lockstep - `resolver.js`'s `resolvePage()` is shared code, used for both `pageKind` and this one via its `kinds` override, and unconditionally reads `data`). Node id = `deriveContentNodeId(globalAppAnchor(prefix), 'qu-admin-page', route)`. */
 export const adminPageKind = publicMeta(
   defineKind('qu-admin-page', {
     fields: {
@@ -370,7 +389,7 @@ export const adminPageKind = publicMeta(
   })
 );
 
-/** Admin app counterpart to `templateKind`. Node id = `deriveContentNodeId(ADMIN_REALM_ANCHOR, 'qu-admin-template', name)`. */
+/** Global-app counterpart to `templateKind`. Node id = `deriveContentNodeId(globalAppAnchor(prefix), 'qu-admin-template', name)`. */
 export const adminTemplateKind = publicMeta(
   defineKind('qu-admin-template', {
     fields: {
@@ -380,11 +399,39 @@ export const adminTemplateKind = publicMeta(
   })
 );
 
-/** Admin app counterpart to `styleKind`. Node id = `deriveContentNodeId(ADMIN_REALM_ANCHOR, 'qu-admin-style', name)`. */
+/** Global-app counterpart to `styleKind`. Node id = `deriveContentNodeId(globalAppAnchor(prefix), 'qu-admin-style', name)`. */
 export const adminStyleKind = publicMeta(
   defineKind('qu-admin-style', {
     fields: {
       css: { shape: 'text', visibility: 'public' },
+    },
+    acl: { write: 'relay-admins' },
+  })
+);
+
+/**
+ * Global-app counterpart to `routeRegistryKind` - `acl.write: 'relay-admins'`
+ * instead of `'named'`, since a global app has NO single owner identity to
+ * self-certify a `'named'`-ACL registry against: ANY configured relay-admin
+ * may add a route here, not just whichever one happened to create it (the
+ * SAME reasoning `platformAppsKind`'s own doc comment gives for why
+ * `qu-platform-apps` itself isn't `'named'`-ACL either). One Node id per
+ * global app - `deriveOwnerNodeId(globalAppAnchor(prefix), 'qu-admin-
+ * route-registry')` - shared by every relay-admin who publishes a route
+ * under that prefix. `@qu/app-shell`'s `live-app-resolver.js` watches this
+ * Node for EVERY currently-known global app (the same reactive idea it
+ * already applies to `qu-platform-apps` itself), so a relay-admin creating
+ * a brand-new page under an EXISTING global app needs no relay restart -
+ * unlike `templateRegistryKind`/`styleRegistryKind`, this one has no global
+ * counterpart yet (templates/styles stay a smaller, more static set for
+ * global apps for now - a deliberate, separate scope boundary, not an
+ * oversight).
+ */
+export const adminRouteRegistryKind = publicMeta(
+  defineKind('qu-admin-route-registry', {
+    fields: {
+      /** `Array<{route: string, title: string}>` - see resolver.js's `resolveRoutes()`. */
+      routes: { shape: 'list', visibility: 'public' },
     },
     acl: { write: 'relay-admins' },
   })
