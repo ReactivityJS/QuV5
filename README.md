@@ -127,10 +127,25 @@ npm run bootstrap:platform
 ```
 
 **Run this from ANYWHERE with network access to your relay's URL - your
-own laptop, a CI runner, wherever - never inside the relay's own
-container**, and it never touches your deployment config at all: it
-generates a `relay-admin` and a `demo-app-admin` identity locally, then
-either
+own laptop, a CI runner, wherever is easiest** (never touches your
+deployment config either way): it generates a `relay-admin` and a
+`demo-app-admin` identity locally, then either
+
+**A REAL FOOTGUN if you run it via `docker exec` into the SAME container
+you'll later redeploy** (common on managed platforms like Rancher/
+Kubernetes where a separate machine/toolchain is inconvenient): the
+identity it generates defaults to a path INSIDE the container's own
+filesystem, which does NOT survive a redeploy - the symptom is a
+brand-new `relay-admin`/`demo-app-admin` pubkey printed every time you
+run it, and the OLD relay-admin's already-installed admin-realm content
+becomes permanently unreadable once its identity is gone. If you must run
+it this way, set `QU_BOOTSTRAP_DIR` (or pass `--dir`) to a path backed by
+a volume that actually survives redeploys - `docker-compose.space-relay.yml`'s
+own `qu-app-shell-relay-admin-identity` volume (mounted at `/admin-identity`,
+`QU_BOOTSTRAP_DIR` already defaults to it there) is the reference setup;
+back that volume up like you would any other private key. The script
+itself warns loudly when `--dir`/`QU_BOOTSTRAP_DIR` isn't set, for exactly
+this reason.
 
 - the relay isn't configured yet → **prints the exact `QU_RELAY_ADMINS`
   value** (public keys only, one JSON array - the ONE static list a

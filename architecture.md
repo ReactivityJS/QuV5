@@ -1056,6 +1056,36 @@ own doc comment). Two changes close this:
   even though the CLI-driven bootstrap had installed everything correctly.
   Fixed with a dedicated `fetchRelayAdmins()` (`identity.js`) that decodes
   the plain pubkey array directly.
+- **`bootstrap-platform.mjs`'s identity directory must actually PERSIST,
+  or the relay-admin identity is silently ephemeral** - a real deployment
+  footgun this design caught in practice, not a theoretical one: the
+  script's default `--dir` lives next to the script itself, inside the npm
+  package/container image. Running it repeatedly against the SAME
+  already-running container works fine (same filesystem), but `docker
+  exec`ing into a container that later gets REDEPLOYED (a very natural
+  pattern on managed platforms like Rancher/Kubernetes, where exposing an
+  extra port or a separate toolchain just to bootstrap once is
+  inconvenient) silently generates a BRAND-NEW relay-admin/demo-app-admin
+  keypair on every redeploy - nothing mounts that path as a volume, so a
+  fresh container has a fresh filesystem. The observed symptom: a
+  different `QU_RELAY_ADMINS` value printed every time, and the OLD
+  relay-admin's already-installed admin-realm content (sealed for the OLD
+  identity's `xPub` - `'members'`-mode encryption has no retroactive
+  re-keying, see `docs/v5-space-core-guide.md`'s own "known gaps" section)
+  becomes permanently unreadable once that identity is gone - this is a
+  deployment-invocation bug, not a flaw in the `'relay-admins'` ACL
+  mechanism itself. Fixed three ways: (1) `QU_BOOTSTRAP_DIR` env var lets
+  an operator point the identity directory at durable storage without an
+  explicit `--dir` every time; (2) the script now warns LOUDLY whenever
+  neither is set, rather than silently doing the ephemeral thing; (3)
+  `docker-compose.space-relay.yml` ships a dedicated
+  `qu-app-shell-relay-admin-identity` volume (mounted at `/admin-identity`,
+  `QU_BOOTSTRAP_DIR` defaults to it there) as the reference setup for
+  anyone who does need the `docker exec` flow - kept as a SEPARATE volume
+  from the relay's own `/data`, not merged into it, to keep "the relay's
+  own mirror" and "an administrator's local private key material"
+  conceptually distinct trust domains even when they happen to live on the
+  same host.
 - **Revocation remains open** for `qu-platform-apps`'s CONTENT: its `apps`
   field is a `ListField` with no removal primitive, so there is still no
   `unregisterApp()` - real, separate work if "revoke a registered app's

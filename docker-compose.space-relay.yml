@@ -5,9 +5,9 @@ services:
   # (which moved to the opt-in "legacy-chat" profile - see its own comment further down). Starts fine
   # with zero configuration (a setup page instead of an app/platform) - the fastest path to an
   # actually-configured platform, including the built-in admin console and one CMS-managed demo
-  # shell-app, is ONE command run from anywhere with network access to this relay's URL (never
-  # inside the container, and not tied to any particular deployment method - see its own doc
-  # comment on why):
+  # shell-app, is ONE command run from anywhere with network access to this relay's URL (ideally
+  # from OUTSIDE this container's own lifecycle entirely - your own laptop, a CI runner - and not
+  # tied to any particular deployment method - see its own doc comment on why):
   #
   #   node packages/app-shell/bin/bootstrap-platform.mjs --relay ws://<this-host>:8081
   #
@@ -15,6 +15,17 @@ services:
   # never writes this file or any deployment config for you. See the root README.md's "Deploying the
   # App Shell" section and docs/v5-space-core-guide.md §10 for the full walkthrough and every env var
   # below.
+  #
+  # RUNNING IT VIA `docker exec` INSTEAD (e.g. `docker exec -it <container> npm run
+  # bootstrap:platform` - common on managed platforms like Rancher/Kubernetes where exposing an
+  # extra port or a separate toolchain is inconvenient): THIS WORKS, but only because
+  # `qu-app-shell-relay-admin-identity` below is mounted at `QU_BOOTSTRAP_DIR` - without a
+  # persistent volume there, the relay-admin identity this generates lives on the CONTAINER's own
+  # ephemeral filesystem and is silently LOST on every redeploy, printing a brand-new
+  # QU_RELAY_ADMINS every time and orphaning whatever the OLD identity had already installed in the
+  # admin realm (bootstrap-platform.mjs's own top doc comment, "PERSISTING THE IDENTITY DIRECTORY" -
+  # a real, observed failure mode, not a hypothetical one). Back up that volume like you would any
+  # other private key.
   #
   # DOCKER STACK / SWARM (`docker stack deploy -c docker-compose.space-relay.yml <stack>`): Swarm
   # does NOT build images - `build:` below is ignored under stack deploy, and `image:` (present on
@@ -63,8 +74,18 @@ services:
       # 'members'-ACL content, if you add any - see relay-server.js's own doc comment). Set to the
       # exact string "false" to lock it down.
       QU_ALLOW_JOIN: ${QU_ALLOW_JOIN:-}
+      # Read by bootstrap-platform.mjs ONLY (not this relay process itself) when run via `docker
+      # exec` into THIS container - points its generated relay-admin/demo-app-admin identity files
+      # at the persistent volume below instead of its default (ephemeral) location next to the
+      # script. See this file's own top "RUNNING IT VIA docker exec INSTEAD" comment.
+      QU_BOOTSTRAP_DIR: /admin-identity
     volumes:
       - qu-app-shell-relay-data:/data
+      # Survives redeploys/recreation (unlike the container's own filesystem) - see this file's own
+      # top "RUNNING IT VIA docker exec INSTEAD" comment for why this exists at all. Irrelevant if
+      # you bootstrap from outside the container (the documented default flow) - that path persists
+      # on whatever machine you actually run bootstrap-platform.mjs from instead.
+      - qu-app-shell-relay-admin-identity:/admin-identity
     restart: unless-stopped
 
   # THE OLD, hardcoded chat demo relay (packages/space-transport's own relay-server.js) - kept as an
@@ -105,4 +126,5 @@ services:
 
 volumes:
   qu-app-shell-relay-data:
+  qu-app-shell-relay-admin-identity:
   qu-space-relay-data:

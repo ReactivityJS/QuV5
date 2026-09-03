@@ -39,7 +39,45 @@
  * actually install content - it reuses the SAME already-generated
  * identities the second time, never regenerating them. Every write here
  * is idempotent or dedup-checked (see inline comments), so a THIRD, later
- * run (e.g. to re-install a newer admin console) is a harmless no-op too.
+ * run (e.g. to re-install a newer admin console) is a harmless no-op too -
+ * PROVIDED `--dir`/`QU_BOOTSTRAP_DIR` points at storage that actually
+ * SURVIVES a redeploy (see "PERSISTING THE IDENTITY DIRECTORY" below) -
+ * otherwise every run looks like a totally fresh setup, forever.
+ *
+ * PERSISTING THE IDENTITY DIRECTORY - A REAL FOOTGUN, NOT HYPOTHETICAL:
+ * this script's whole "run it, paste the printed config, redeploy, run it
+ * again" flow only works if the SAME `relay-admin`/`demo-app-admin`
+ * keypairs are found on the SECOND run - `ensureIdentity()` below only
+ * generates a fresh keypair when NOTHING is found at `<dir>/<name>.json`.
+ * The default `--dir` (next to this script, inside the npm package/image)
+ * lives on the CONTAINER's own ephemeral filesystem - fine for `docker
+ * exec`ing into an ALREADY-RUNNING container repeatedly (the same
+ * container, same filesystem), but GONE the instant that container is
+ * recreated (any redeploy: `docker compose up` after a pull, `docker
+ * stack deploy`, a Kubernetes rollout, ...), because nothing mounts that
+ * path as a volume. The symptom is exactly "a brand-new relay-admin/
+ * demo-app-admin pubkey on every redeploy, `QU_RELAY_ADMINS` printed
+ * again from scratch, the OLD relay-admin's already-installed admin-realm
+ * content (sealed for the OLD identity's `xPub`) becomes unreadable by
+ * the NEW one" - not a bug in the ACL/live-resolver machinery itself
+ * (architecture.md's own "A fourth ACL mode" section), a deployment
+ * footgun in how this ONE script is invoked. Two ways to avoid it:
+ *   1. Run this script from OUTSIDE the relay's own container lifecycle
+ *      entirely (your own laptop, a CI runner, a separate small utility
+ *      container) - `--dir` then naturally persists on THAT machine,
+ *      untouched by the relay's own redeploys. This is the intended,
+ *      documented flow (root README.md's "Deploying the App Shell").
+ *   2. If you genuinely need to `docker exec` into the SAME container
+ *      that gets redeployed (common with managed platforms like Rancher/
+ *      Kubernetes where exposing an extra port or running a separate
+ *      toolchain is inconvenient), point `--dir`/`QU_BOOTSTRAP_DIR` at a
+ *      path backed by a volume that SURVIVES container recreation - see
+ *      `docker-compose.space-relay.yml`'s own `qu-app-shell-relay-admin-
+ *      identity` volume (mounted at `/admin-identity`, `QU_BOOTSTRAP_DIR`
+ *      defaults to it there) for the reference setup. Whichever you pick,
+ *      back up that directory like you would any other private key -
+ *      losing it means generating a NEW relay-admin identity and starting
+ *      the admin realm over.
  *
  * MEMBERSHIP: the confidential admin realm never self-registers (no
  * `/admin-ws`-equivalent open-join exists, on purpose - kinds.js's own
@@ -83,9 +121,14 @@ import { adminConsoleBundle } from '../admin-console-bundle.js';
 import { installCms } from '../cms-bundle.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_DIR = join(HERE, '..', '.platform-identities');
 
 function parseArgs(argv) {
-  const opts = { relay: 'ws://localhost:8081', dir: join(HERE, '..', '.platform-identities'), prefix: 'demo' };
+  // QU_BOOTSTRAP_DIR - optional env var default, so a docker-compose.space-relay.yml-style
+  // deployment can point this at an actually-persistent volume (see this file's own top doc
+  // comment, "PERSISTING THE IDENTITY DIRECTORY") without every invocation needing an explicit
+  // --dir flag. --dir (if given) still wins over it.
+  const opts = { relay: 'ws://localhost:8081', dir: process.env.QU_BOOTSTRAP_DIR || DEFAULT_DIR, prefix: 'demo' };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--relay') opts.relay = argv[++i];
     else if (argv[i] === '--dir') opts.dir = argv[++i];
@@ -193,6 +236,23 @@ async function main() {
   const httpBase = relay.replace(/^ws/, 'http');
 
   console.log('Qu V5 — Platform bootstrap\n');
+
+  // Neither --dir nor QU_BOOTSTRAP_DIR was given - the identity directory defaults to a path next
+  // to this script, INSIDE the npm package/container image. That's fine run repeatedly against the
+  // SAME already-running container, but is silently wiped by ANY redeploy (a fresh container has a
+  // fresh filesystem) - see this file's own top doc comment, "PERSISTING THE IDENTITY DIRECTORY",
+  // for the real, observed symptom (a brand-new relay-admin pubkey printed on every redeploy) and
+  // the two ways to actually fix it.
+  if (dir === DEFAULT_DIR) {
+    console.warn(
+      '⚠  --dir/QU_BOOTSTRAP_DIR not set - using the default, which does NOT survive a container\n' +
+        '   redeploy/recreation. If you are running this via `docker exec` into a container that will\n' +
+        '   later be redeployed, your relay-admin identity WILL change on the next redeploy unless you\n' +
+        '   point --dir/QU_BOOTSTRAP_DIR at a volume that survives it - see this script\'s own top doc\n' +
+        '   comment ("PERSISTING THE IDENTITY DIRECTORY") and docker-compose.space-relay.yml\'s\n' +
+        '   qu-app-shell-relay-admin-identity volume for the reference setup.\n'
+    );
+  }
 
   const relayAdmin = await ensureIdentity('relay-admin', dir);
   const demoAppAdmin = await ensureIdentity('demo-app-admin', dir);
