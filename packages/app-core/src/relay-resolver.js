@@ -40,6 +40,18 @@
  * Registering a genuinely new app-admin therefore still needs a relay
  * restart with an updated `appAdminPubs` list, exactly like adding a new
  * `'members'`-mode member already does today.
+ *
+ * COLLECTIONS (`kinds.js`'s `defineCollectionKind()`): an item Kind needs
+ * NO entry here at all - it shares `pageKind`'s exact `acl`/`persistence`
+ * shape (`'content'`, durable), so the fallback below already classifies
+ * it correctly, same as `qu-template`/`qu-style` themselves. A
+ * Collection's own REGISTRY Kind is the one piece that DOES need
+ * telling apart, for the SAME reason `qu-template-registry`/
+ * `qu-style-registry` do (this file's own opening paragraph) - pass every
+ * Collection's `registryKind` (from `defineCollectionKind()`'s own return
+ * value) via `collectionRegistryKinds`, or its enumeration writes
+ * (`dev.js`'s `createCollectionItem()`) get silently rejected exactly
+ * like a misclassified `qu-template-registry` would.
  */
 import { deriveOwnerNodeId } from '@qu/space-core';
 import {
@@ -54,19 +66,28 @@ import {
   ADMIN_REALM_ANCHOR,
 } from './kinds.js';
 
-/** @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], relayAdminPub?: Uint8Array}} params - `appAdminPub` (singular) is a convenience alias for `appAdminPubs: [appAdminPub]`. @returns {Promise<(nodeId: string) => object>} */
-export async function createAppResolveKindSchema({ appAdminPub, appAdminPubs, relayAdminPub } = {}) {
+/** @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], relayAdminPub?: Uint8Array, collectionRegistryKinds?: object[]}} params - `appAdminPub` (singular) is a convenience alias for `appAdminPubs: [appAdminPub]`. `collectionRegistryKinds` - every Collection's `registryKind` this relay should recognize (see this file's own top doc comment on "COLLECTIONS") - each is checked against every configured owner. @returns {Promise<(nodeId: string) => object>} */
+export async function createAppResolveKindSchema({ appAdminPub, appAdminPubs, relayAdminPub, collectionRegistryKinds = [] } = {}) {
   const owners = [...(appAdminPubs ?? []), ...(appAdminPub ? [appAdminPub] : [])];
   const manifestIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, appManifestKind.kind))));
   const registryIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, routeRegistryKind.kind))));
   const templateRegistryIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, templateRegistryKind.kind))));
   const styleRegistryIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, styleRegistryKind.kind))));
   const platformId = relayAdminPub ? await deriveOwnerNodeId(relayAdminPub, platformAppsKind.kind) : null;
+
+  const collectionRegistryById = new Map();
+  for (const registryKind of collectionRegistryKinds) {
+    for (const pub of owners) {
+      collectionRegistryById.set(await deriveOwnerNodeId(pub, registryKind.kind), registryKind);
+    }
+  }
+
   return (nodeId) => {
     if (manifestIds.has(nodeId)) return appManifestKind;
     if (registryIds.has(nodeId)) return routeRegistryKind;
     if (templateRegistryIds.has(nodeId)) return templateRegistryKind;
     if (styleRegistryIds.has(nodeId)) return styleRegistryKind;
+    if (collectionRegistryById.has(nodeId)) return collectionRegistryById.get(nodeId);
     if (nodeId === platformId) return platformAppsKind;
     return pageKind;
   };

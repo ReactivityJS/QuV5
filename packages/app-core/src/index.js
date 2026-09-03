@@ -12,6 +12,7 @@ export {
   adminTemplateKind,
   adminStyleKind,
   ADMIN_REALM_ANCHOR,
+  defineCollectionKind,
 } from './kinds.js';
 export { deriveContentNodeId } from './content-id.js';
 export { ContentResolver } from './resolver.js';
@@ -35,5 +36,7 @@ export {
   createAdminStyle,
   createAdminPage,
   installAdminAppBundle,
+  createCollectionItem,
+  editCollectionItem,
 } from './dev.js';
 export { createAppResolveKindSchema, createAdminResolveKindSchema } from './relay-resolver.js';

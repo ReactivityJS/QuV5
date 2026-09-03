@@ -85,8 +85,13 @@ export function renderIndexHtml({ appAdminPub = null, relayAdminPub = null } = {
     <h2>Nächste Schritte</h2>
     <ol>
       <li>Am schnellsten: <pre>npm run bootstrap:platform</pre> - erzeugt eine EIGENE
-        (server-seitige) Identity, konfiguriert PLATTFORM-Modus automatisch und
-        installiert Admin-Konsole + eine CMS-verwaltete Demo-Shell-App. Siehe
+        (server-seitige) Identity und gibt beim ersten Lauf die nötigen
+        <code>QU_RELAY_ADMIN_PUB</code>/<code>QU_APP_ADMIN_PUBS</code>/
+        <code>QU_RELAY_ADMIN_MEMBERS_JSON</code>-Werte zum Einfügen in DEINE
+        Deployment-Config aus (egal ob Compose, <code>docker stack</code>,
+        Kubernetes, ...) - schreibt selbst nichts. Nach dem Neu-Deployen mit
+        diesen Werten installiert ein zweiter Lauf Admin-Konsole + eine
+        CMS-verwaltete Demo-Shell-App. Siehe
         <code>packages/app-shell/bin/bootstrap-platform.mjs</code>.</li>
       <li>Von Hand, mit DEINER Browser-Identity von oben: für EINE einzelne App setze
         deren Pubkey als <code>QU_APP_ADMIN_PUB</code>. Für eine PLATTFORM aus mehreren

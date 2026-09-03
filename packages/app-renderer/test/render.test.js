@@ -51,6 +51,69 @@ test('renderPage() with a null page/template renders the built-in "not found" fa
   assert.ok(mountEl.innerHTML.includes('404'));
 });
 
+test('renderPage() fills extra named slots from page.data, alongside the "content" slot', () => {
+  const { document } = dom();
+  const mountEl = document.getElementById('mount');
+
+  renderPage({
+    mountEl,
+    doc: document,
+    templateHtml: '<article><header data-slot="author"><qu-slot name="author"></qu-slot></header><main><qu-slot name="content"></qu-slot></main></article>',
+    page: { title: 'A post', content: '<p>Body</p>', data: { author: 'Alice' } },
+    css: '',
+  });
+
+  assert.equal(mountEl.querySelector('[data-slot="author"]').innerHTML, 'Alice');
+  assert.equal(mountEl.querySelector('main').innerHTML, '<p>Body</p>');
+});
+
+test('renderPage() sanitizes string data-slot values, and stringifies non-string ones', () => {
+  const { document } = dom();
+  const mountEl = document.getElementById('mount');
+
+  renderPage({
+    mountEl,
+    doc: document,
+    templateHtml: '<div><qu-slot name="bio"></qu-slot><qu-slot name="views"></qu-slot></div>',
+    page: { title: 'x', content: '', data: { bio: '<script>alert(1)</script><b>hi</b>', views: 42 } },
+    css: '',
+  });
+
+  assert.ok(!mountEl.innerHTML.includes('<script'));
+  assert.ok(mountEl.innerHTML.includes('<b>hi</b>'));
+  assert.ok(mountEl.innerHTML.includes('42'));
+});
+
+test('renderPage() with no page.data (or data: null) fills only the "content" slot - fully backward compatible', () => {
+  const { document } = dom();
+  const mountEl = document.getElementById('mount');
+
+  renderPage({
+    mountEl,
+    doc: document,
+    templateHtml: '<main><qu-slot name="content"></qu-slot><qu-slot name="author">default author</qu-slot></main>',
+    page: { title: 'x', content: '<p>Body</p>', data: null },
+    css: '',
+  });
+
+  assert.equal(mountEl.innerHTML, '<main><p>Body</p>default author</main>');
+});
+
+test("renderPage()'s own content field wins over a same-named data key", () => {
+  const { document } = dom();
+  const mountEl = document.getElementById('mount');
+
+  renderPage({
+    mountEl,
+    doc: document,
+    templateHtml: '<qu-slot name="content"></qu-slot>',
+    page: { title: 'x', content: 'real content', data: { content: 'accidental collision' } },
+    css: '',
+  });
+
+  assert.equal(mountEl.innerHTML, 'real content');
+});
+
 test('renderPage() called twice with the same styleId updates the existing <style>, never duplicates it', () => {
   const { document } = dom();
   const mountEl = document.getElementById('mount');

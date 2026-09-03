@@ -151,3 +151,37 @@ test('grantContentWriter() lets a SPECIFIC other identity edit ONE page - the "u
   assert.equal(page.title, 'v2 by editor');
   assert.equal(page.content, 'v2 body');
 });
+
+test('createPage()/editPage() carry structured `data` (kinds.js\'s pageKind own field) alongside title/content - readable by an unrelated visitor, and fully optional/backward compatible', async () => {
+  const admin = await actor();
+  const visitor = await actor();
+  const members = [{ pub: admin.signingPub, xPub: admin.xPublicKey }, { pub: visitor.signingPub, xPub: visitor.xPublicKey }];
+  const hub = await setupHub(members);
+  const adminSpace = await connect(hub, admin, members, 'admin');
+
+  // A page created with NO `data` at all - the pre-existing, backward-compatible case.
+  await createPage(adminSpace, { route: '/', title: 'Start', content: 'plain page' });
+  // A page created WITH structured data (a "blog post" shape, without needing a Collection).
+  await createPage(adminSpace, {
+    route: '/blog/hello',
+    title: 'Hello',
+    content: 'v1 body',
+    data: { author: 'Alice', tags: ['qu', 'cms'] },
+  });
+
+  const visitorSpace = await connect(hub, visitor, members, 'visitor');
+  const resolver = new ContentResolver(visitorSpace, { appAdminPub: admin.signingPub });
+
+  const plain = await resolver.resolvePage('/');
+  assert.equal(plain.data, null);
+
+  const post = await resolver.resolvePage('/blog/hello');
+  assert.deepEqual(post.data, { author: 'Alice', tags: ['qu', 'cms'] });
+
+  // editPage() replaces the WHOLE data object (an 'atomic' field, not merged key-by-key).
+  await editPage(adminSpace, { route: '/blog/hello', data: { author: 'Bob' } });
+  await waitUntil(async () => (await resolver.resolvePage('/blog/hello'))?.data?.author === 'Bob');
+  const edited = await resolver.resolvePage('/blog/hello');
+  assert.deepEqual(edited.data, { author: 'Bob' });
+  assert.equal(edited.title, 'Hello'); // untouched field survives a partial edit, same as title/content already do.
+});

@@ -113,74 +113,74 @@ console + as many CMS-managed shell-apps as you register) - a SEPARATE
 image from the core `@qu/space-transport` relay, so the framework layer
 never depends on an application-layer package (see
 `packages/space-transport/src/relay-server.js`'s own doc comment). This is
-now the DEFAULT service - no `--profile` needed.
+now the DEFAULT service - no `--profile` needed. Works the same under
+`docker stack deploy` (Swarm) - see "Docker Swarm / `docker stack`" below
+for the one thing that's different there (pre-built images).
 
 Starts fine with zero configuration (a setup page instead of a platform).
-The fastest way to an actually-configured platform - the built-in admin
-console AND one CMS-managed demo shell-app, both real content, not
-placeholders - is one script (`packages/app-shell/bin/bootstrap-
-platform.mjs`, `npm run bootstrap:platform`), run either way below:
-
-**With Node.js on your host:**
+Getting to an actually-configured platform is always the SAME two steps,
+regardless of how you deploy - Compose, `docker stack`, Kubernetes, bare
+metal:
 
 ```sh
 npm run bootstrap:platform
 ```
 
-One command, done - see below for what it actually does.
+**Run this from ANYWHERE with network access to your relay's URL - your
+own laptop, a CI runner, wherever - never inside the relay's own
+container**, and it never touches your deployment config at all: it
+generates a `relay-admin` and a `demo-app-admin` identity locally, then
+either
 
-**Docker only, no local Node.js:** the SAME script also runs fine via
-`docker exec` (the container already has Node + every dependency), but
-needs to be run TWICE with one step in between, because of what it
-writes: a `.env` with the generated public keys, which `docker compose`
-only ever reads from your HOST's OWN project directory to configure the
-container at `up`/recreate time - a `.env` written INSIDE an
-already-running container lives on THAT container's own filesystem
-instead, invisible to `docker compose`, and the container has no way to
-restart itself from within either way:
+- the relay isn't configured with them yet → **prints the exact
+  `QU_RELAY_ADMIN_PUB`/`QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_MEMBERS_JSON`
+  values** (public keys only) for YOU to paste into however you manage
+  your deployment's environment - `docker-compose.space-relay.yml`
+  directly, your own `docker stack` file, a Kubernetes manifest, systemd,
+  whatever - then redeploy however you already do (`docker compose up -d`,
+  `docker stack deploy`, ...) and run the SAME command again; or
+- the relay already has them (this second run, or any later one) →
+  installs the admin console, creates a demo shell-app with its own CMS
+  editor installed, registers both under `#/admin` and `#/demo`, and
+  prints the exact URLs plus ready-to-paste browser devtools snippets so
+  you can actually act as either identity.
 
-```sh
-docker exec -ti $(docker ps -qf name=<your-compose-project>) npm run bootstrap:platform
-# -> generates identities, writes .env INSIDE the container, then tells you it can't finish yet
-docker compose -f docker-compose.space-relay.yml cp qu-app-shell-relay:/app/.env ./.env
-docker compose -f docker-compose.space-relay.yml up -d   # recreates the container WITH that .env
-docker exec -ti $(docker ps -qf name=<your-compose-project>) npm run bootstrap:platform
-# -> same identities (already generated), now finishes: installs content, prints the URLs
-```
-
-No private key is ever lost between these two runs - the identities were
-already generated and persisted (inside the container, under
-`packages/app-shell/.platform-identities/`) by the first one; the second
-run just reuses them. The script itself detects it's running inside a
-container and prints this exact recipe if a run can't finish yet, so this
-isn't something you need to memorize.
-
-Either way, it generates a `relay-admin` and a `demo-app-admin` identity,
-writes their public keys into `.env` (safe to re-run, never overwrites
-anything you've configured there by hand), and - once the relay has
-(re)started with that config - installs the admin console, creates a demo
-shell-app, installs its CMS editor, and registers both under `#/admin`
-and `#/demo`. Prints the exact URLs to open plus ready-to-paste browser
-devtools snippets so you can actually act as either identity. See
+Two runs on a totally fresh setup is normal, not a bug - see
 `packages/app-shell/bin/bootstrap-platform.mjs`'s own doc comment for the
-full "why," and the guide's own "App Shell deployment" subsection for the
-env-var reference if you'd rather configure it by hand.
+full "why" (in short: env vars are read once at relay boot, so it can't
+verify your paste took effect without actually trying a write and seeing
+if the relay acks it). Safe to re-run any time afterward too - every step
+checks first, never re-creates content that already exists.
 
 For a single, fixed app instead of a platform, set `QU_APP_ADMIN_PUB`
 directly (ignored once `QU_RELAY_ADMIN_PUB` - platform mode - is also
 set) - see the guide's own walkthrough.
 
+**Docker Swarm / `docker stack`:** `docker stack deploy` doesn't build
+images the way `docker compose` does - build and tag the image yourself
+first (on every node that needs it, or push to a registry all nodes can
+pull from), THEN deploy:
+
+```sh
+docker build -f packages/app-shell/Dockerfile -t qu-app-shell-relay:latest .
+docker stack deploy -c docker-compose.space-relay.yml <your-stack-name>
+```
+
+`profiles:` (used to gate the legacy chat relay behind an opt-in flag) is
+a Compose-only concept Swarm doesn't understand - under `docker stack
+deploy` that service deploys too, unconditionally (harmless - an idle
+service on a different port - remove its block from your own copy of the
+file if you'd rather it not run at all).
+
 **"Noch keine Anwendung auf dieser Plattform installiert" / `#/admin`
 shows the same thing, not the console** - this is the expected state
-right after `docker compose up` alone, not a bug: starting the relay
-gives you an EMPTY platform (a running Space, nothing written to it yet).
-`#/admin` is an ORDINARY registered alias like any other (`architecture.md`
-§7 - "kein Sonderfall zu normalen Spaces") - until something has actually
-registered it AND installed the console's own content, it resolves to
-nothing, so it falls through to this SAME generic landing page. Run
-`npm run bootstrap:platform` (above) to fix both at once; see its own
-"Two passes are sometimes needed" doc comment if a first run tells you to
-restart the relay and re-run it.
+right after deploying alone, not a bug: starting the relay gives you an
+EMPTY platform (a running Space, nothing written to it yet). `#/admin` is
+an ORDINARY registered alias like any other (`architecture.md` §7 - "kein
+Sonderfall zu normalen Spaces") - until something has actually registered
+it AND installed the console's own content, it resolves to nothing, so it
+falls through to this SAME generic landing page. `npm run bootstrap:
+platform` (above) fixes both at once.
 
 **The Admin-UI (`#/admin`) and a CMS editor (`#/<prefix>/cms`) are TWO
 DIFFERENT things, at two different levels** - a common point of confusion:

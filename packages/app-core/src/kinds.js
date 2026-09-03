@@ -125,6 +125,53 @@ export const styleRegistryKind = defineKind('qu-style-registry', {
 });
 
 /**
+ * COLLECTIONS — many STRUCTURED items of one caller-defined shape, all
+ * owned by one identity (a blog's posts, a contact list, a forum's
+ * threads, a chat's messages - "Blog-Post usw." in the user's own
+ * framing). Generalizes the EXACT SAME `acl.write: 'content'`
+ * self-certifying-per-item + `acl.write: 'named'` enumeration-registry
+ * pattern `qu-page`/`qu-template`/`qu-style` (and their own
+ * `*RegistryKind`s) already establish above, into ONE reusable call
+ * instead of hand-writing a fresh Kind-Schema pair per use case. `fields`
+ * is entirely caller-defined (any shape `defineKind()` itself accepts,
+ * `'atomic'`/`'text'`/`'list'`) - a blog post's `{title, author,
+ * publishedAt, tags, body}` is exactly as valid a Collection item shape
+ * as a contact's `{name, email, phone}` or a forum thread's own fields.
+ *
+ * `dev.js`'s `createCollectionItem()`/`editCollectionItem()` and
+ * `resolver.js`'s `resolveCollectionItems()`/`resolveCollectionItem()`
+ * are the generic counterparts to `createTemplate()`/`editTemplate()`/
+ * `resolveTemplateNames()`/`resolveTemplate()` - same mechanics, just
+ * parametrized by the `{itemKind, registryKind, registryField}` this
+ * function returns instead of one hardcoded Kind.
+ *
+ * NOT YET COVERED (see architecture.md §7's own roadmap note): a
+ * Collection's items aren't wired into `HashRouter`/`AppRuntime.
+ * resolveRoute()` (a blog's individual posts don't get their own `#/...`
+ * sub-routes automatically - only `qu-page` does that), the CMS editor
+ * (`cms-actions.js`) has no UI yet for AUTHORING a new Collection type or
+ * its items, and there is no reactive/live-binding story for a
+ * Collection's data in a rendered template - all real, deliberately
+ * separate future work, not attempted in this pass.
+ *
+ * @param {string} itemKindName - e.g. `"qu-blog-post"` - also derives the registry Kind's own name (`"qu-blog-post-registry"`).
+ * @param {{fields: object}} params - `fields` in the exact shape `defineKind()`'s own `fields` argument takes.
+ * @returns {{itemKind: object, registryKind: object, registryField: string}}
+ */
+export function defineCollectionKind(itemKindName, { fields }) {
+  const itemKind = publicMeta(defineKind(itemKindName, { fields, acl: { write: 'content' } }));
+  const registryField = 'items';
+  const registryKind = defineKind(`${itemKindName}-registry`, {
+    fields: {
+      /** `Array<{name: string}>` - `name` here is each item's own `path` (dev.js's `createCollectionItem()`) - see `resolveCollectionItems()`. */
+      [registryField]: { shape: 'list', visibility: 'public' },
+    },
+    acl: { write: 'named' },
+  });
+  return { itemKind, registryKind, registryField };
+}
+
+/**
  * THE PLATFORM APP REGISTRY (docs/app-shell-arbeitsauftrag.md §19-21) - one
  * per relay-admin, mapping a URL PATH PREFIX to the `qu-app` that owns it:
  * `Array<{prefix: string, appAdminPub: string (base64), name: string}>`.
@@ -179,6 +226,24 @@ export const pageKind = publicMeta(
       title: { shape: 'atomic', visibility: 'public' },
       template: { shape: 'atomic', visibility: 'public' }, // a qu-template PATH
       content: { shape: 'text', visibility: 'public' }, // real Y.Text - collaborative editing "for free" (docs §7)
+      /**
+       * STRUCTURED page data, beyond the single `content` blob above - an
+       * arbitrary JSON-serializable object, e.g. `{author: 'Alice',
+       * publishedAt: '2026-01-01', tags: ['qu','cms']}`. Each top-level key
+       * is resolved into the SAME-NAMED `<qu-slot>` in the page's template
+       * (`@qu/app-renderer`'s `render.js`), ALONGSIDE the `"content"` slot,
+       * never instead of it - a template author defines however many named
+       * slots a page actually needs, not just one. `null`/unset (the
+       * default) means no extra slots - fully backward compatible with
+       * every page that only ever used `title`+`content`. Deliberately
+       * `'atomic'`-shape (a single opaque value, last-write-wins as a
+       * whole, unlike `content`'s field-level collaborative Y.Text) - this
+       * is for STATIC structured authoring (a blog post's byline, a
+       * page's meta description, ...), not live/reactive per-visitor data
+       * (see architecture.md §7's own roadmap note on why that's
+       * deliberately NOT this field's job).
+       */
+      data: { shape: 'atomic', visibility: 'public' },
     },
     acl: { write: 'content' },
   })
@@ -260,13 +325,14 @@ export const adminAppManifestKind = defineKind('qu-admin-app', {
   acl: { write: 'members' },
 });
 
-/** Admin-realm counterpart to `pageKind`. Node id = `deriveContentNodeId(ADMIN_REALM_ANCHOR, 'qu-admin-page', route)`. */
+/** Admin-realm counterpart to `pageKind`, including its `data` field (kept in lockstep - `resolver.js`'s `resolvePage()` is shared code, used for both `pageKind` and this one via its `kinds` override, and unconditionally reads `data`). Node id = `deriveContentNodeId(ADMIN_REALM_ANCHOR, 'qu-admin-page', route)`. */
 export const adminPageKind = defineKind('qu-admin-page', {
   fields: {
     route: { shape: 'atomic' },
     title: { shape: 'atomic' },
     template: { shape: 'atomic' },
     content: { shape: 'text' },
+    data: { shape: 'atomic' },
   },
   acl: { write: 'members' },
 });

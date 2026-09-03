@@ -105,6 +105,7 @@ test('the CMS editor is genuine installed content - an app-admin creates AND edi
   pageForm.querySelector('[name="title"]').value = 'Start v1';
   templateSelect.value = 'layout/main';
   pageForm.querySelector('[name="content"]').value = '<p>v1 content</p>';
+  pageForm.querySelector('[name="data"]').value = '{"author": "Alice"}';
   submit(pageForm, window);
   await waitUntil(() => /Gespeichert/.test(pageForm.querySelector('[data-qu-status]')?.textContent ?? ''));
   await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].some((b) => b.textContent === '/'));
@@ -119,6 +120,7 @@ test('the CMS editor is genuine installed content - an app-admin creates AND edi
     assert.equal(page.title, 'Start v1');
     assert.equal(page.content, '<p>v1 content</p>');
     assert.equal(page.template, 'layout/main');
+    assert.deepEqual(page.data, { author: 'Alice' });
   }
 
   // --- EDIT the existing page by clicking it in the list, changing the content, and saving again. ---
@@ -130,9 +132,11 @@ test('the CMS editor is genuine installed content - an app-admin creates AND edi
   await waitUntil(() => pageForm.querySelector('input[name="mode"]').value === 'edit');
   assert.equal(pageForm.querySelector('[name="title"]').value, 'Start v1');
   assert.ok(pageForm.querySelector('[name="route"]').readOnly, 'the key field is locked while editing - saving must target the SAME Node');
+  assert.equal(JSON.parse(pageForm.querySelector('[name="data"]').value).author, 'Alice', 'the existing structured data is loaded back into the form as JSON');
 
   pageForm.querySelector('[name="title"]').value = 'Start v2';
   pageForm.querySelector('[name="content"]').value = '<p>v2 content</p>';
+  // "data" left untouched - editing other fields must not silently clear it.
   submit(pageForm, window);
   await waitUntil(() => /Gespeichert/.test(pageForm.querySelector('[data-qu-status]')?.textContent ?? ''));
 
@@ -142,6 +146,7 @@ test('the CMS editor is genuine installed content - an app-admin creates AND edi
     const page = await resolver.resolvePage('/', { timeout: 2000 });
     assert.equal(page.title, 'Start v2');
     assert.equal(page.content, '<p>v2 content</p>');
+    assert.deepEqual(page.data, { author: 'Alice' });
   }
 
   // --- "Neue Seite" resets the form back to create mode. ---

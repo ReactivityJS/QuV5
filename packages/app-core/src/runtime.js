@@ -40,6 +40,16 @@ export class AppRuntime {
     return this._resolver.resolveStyleNames(options);
   }
 
+  /** @returns {Promise<Array<{name}>>} See `ContentResolver.resolveCollectionItems()`. */
+  resolveCollectionItems(options) {
+    return this._resolver.resolveCollectionItems(options);
+  }
+
+  /** @returns {Promise<object|null>} See `ContentResolver.resolveCollectionItem()`. */
+  resolveCollectionItem(path, options) {
+    return this._resolver.resolveCollectionItem(path, options);
+  }
+
   /**
    * Resolves everything needed to render one route in one call: the
    * Manifest (for `theme`/`defaultRoute`/the fallback root template), the

@@ -79,9 +79,9 @@ export async function createStyle(space, { name, css }) {
   return node;
 }
 
-/** Creates a page at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-page', route)` - see `createTemplate()`'s own doc comment. `template` is a template NAME (resolved via content-id.js at render time), not a Node id. Does NOT auto-register into `routeRegistryKind` (unlike `createTemplate()`/`createStyle()`'s own registries) - call `publishRoute()` separately, unchanged pre-existing behavior. */
-export async function createPage(space, { route, title, template = null, content = '' }) {
-  return space.createNode(pageKind, { route, title, template, content }, { path: route });
+/** Creates a page at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-page', route)` - see `createTemplate()`'s own doc comment. `template` is a template NAME (resolved via content-id.js at render time), not a Node id. `data` is optional STRUCTURED content beyond the single `content` blob - see kinds.js's `pageKind` own doc comment on its `data` field (an arbitrary JSON object, one extra named `<qu-slot>` filled per top-level key). Does NOT auto-register into `routeRegistryKind` (unlike `createTemplate()`/`createStyle()`'s own registries) - call `publishRoute()` separately, unchanged pre-existing behavior. */
+export async function createPage(space, { route, title, template = null, content = '', data = null }) {
+  return space.createNode(pageKind, { route, title, template, content, data }, { path: route });
 }
 
 /**
@@ -143,8 +143,8 @@ export async function editStyle(space, { name, css, ownerPub = space.identity.si
   return node;
 }
 
-/** Page counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). Only fields actually passed are updated; omit `title`/`template`/`content` to leave them unchanged. `title`/`template` are `'atomic'`-shape (`field.set()`); `content` is `'text'`-shape, see `replaceText()`'s own doc comment. */
-export async function editPage(space, { route, title, template, content, ownerPub = space.identity.signingPub, timeout } = {}) {
+/** Page counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). Only fields actually passed are updated; omit `title`/`template`/`content`/`data` to leave them unchanged. `title`/`template`/`data` are `'atomic'`-shape (`field.set()`); `content` is `'text'`-shape, see `replaceText()`'s own doc comment. `data` is kinds.js's `pageKind` own structured-data field (see its doc comment) - passing it REPLACES the whole object (an `'atomic'` field is one opaque last-write-wins value, not merged key-by-key). */
+export async function editPage(space, { route, title, template, content, data, ownerPub = space.identity.signingPub, timeout } = {}) {
   const id = await deriveContentNodeId(ownerPub, pageKind.kind, route);
   const { node, release } = await space.useNode(id, pageKind);
   // Wait for BOTH title AND content (separate envelopes - see resolver.js's own resolvePage() doc
@@ -162,6 +162,64 @@ export async function editPage(space, { route, title, template, content, ownerPu
   if (title !== undefined) await node.field('title').set(title);
   if (template !== undefined) await node.field('template').set(template);
   if (content !== undefined) replaceText(node.field('content'), content);
+  if (data !== undefined) await node.field('data').set(data);
+  release();
+  return node;
+}
+
+/**
+ * CREATES one item in a Collection (`kinds.js`'s `defineCollectionKind()`)
+ * at content-addressed id `deriveContentNodeId(space.identity.signingPub,
+ * itemKind.kind, path)` - the exact same self-grant + registry-
+ * registration shape `createTemplate()`/`createStyle()` already establish
+ * above, generalized to any caller-defined item shape. `path` is the
+ * item's own stable key WITHIN the collection (a slug, a numeric id as a
+ * string, ...) - not its human-facing title (put that in `fields` instead,
+ * e.g. `{title, ...}`, if the item shape has one).
+ * @param {import('@qu/space-core').Space} space
+ * @param {{itemKind: object, registryKind: object, registryField: string, path: string, fields: object}} params - the first three come straight from `defineCollectionKind()`'s own return value; `fields` are the item's initial field values, matching that Kind's own `fields` declaration.
+ */
+export async function createCollectionItem(space, { itemKind, registryKind, registryField, path, fields }) {
+  const node = await space.createNode(itemKind, fields, { path });
+  await registerContentName(space, registryKind, registryField, path);
+  return node;
+}
+
+/**
+ * UPDATES an existing Collection item - see `editTemplate()`'s own doc
+ * comment for the full "why never re-`createNode()`" reasoning and the
+ * `ownerPub`/granted-co-editor pattern, identical here. `fields` is a
+ * PARTIAL update - only keys actually present in it are written, each
+ * according to ITS OWN declared shape (`'atomic'` → `field.set()`,
+ * `'text'` → `replaceText()`, matching `itemKind.fields[name].shape`).
+ * Unlike `editPage()`'s fixed `title`+`content` sync check, a Collection's
+ * field set is entirely caller-defined - this waits for ANY ONE of the
+ * item's own fields to have a value as its "the Node itself has synced"
+ * signal instead.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{itemKind: object, path: string, fields: object, ownerPub?: Uint8Array, timeout?: number}} params
+ */
+export async function editCollectionItem(space, { itemKind, path, fields, ownerPub = space.identity.signingPub, timeout } = {}) {
+  const id = await deriveContentNodeId(ownerPub, itemKind.kind, path);
+  const { node, release } = await space.useNode(id, itemKind);
+  const fieldNames = Object.keys(itemKind.fields);
+  const synced = await waitForSync(async () => {
+    for (const name of fieldNames) {
+      const value = await node.field(name).get();
+      if (value !== null && value !== undefined && value !== '') return true;
+    }
+    return false;
+  }, { timeout });
+  if (!synced) {
+    release();
+    throw new Error(`editCollectionItem: "${path}" (${itemKind.kind}) does not exist (or has not synced within ${timeout ?? 3000}ms) - use createCollectionItem() for a genuinely new one`);
+  }
+  for (const [name, value] of Object.entries(fields ?? {})) {
+    const field = node.field(name);
+    if (typeof field.set === 'function') await field.set(value);
+    else if (typeof field.insert === 'function') replaceText(field, value);
+    else throw new Error(`editCollectionItem: field "${name}" (shape ${itemKind.fields[name]?.shape}) has no updater`);
+  }
   release();
   return node;
 }
