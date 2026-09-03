@@ -10,19 +10,22 @@
  *      actually use. This script NEVER writes that config for you and
  *      NEVER assumes anything about your deployment method (no `.env`
  *      file, no container filesystem, no `docker exec`/`docker compose`
- *      awareness at all) - `QU_RELAY_ADMIN_PUB`/`QU_APP_ADMIN_PUBS`/
- *      `QU_RELAY_ADMIN_MEMBERS_JSON` are read by the relay at BOOT time
- *      only (same static-list posture `QU_MEMBERS_JSON` already takes -
- *      see `relay-server.js`'s own doc comment on why), so YOU decide how
+ *      awareness at all) - `QU_RELAY_ADMINS` is read by the relay at BOOT
+ *      time only (same static-list posture `QU_MEMBERS_JSON` already takes
+ *      - see `relay-server.js`'s own doc comment on why), so YOU decide how
  *      that config reaches your relay and gets it (re)started with it -
  *      this script only ever talks to the relay over its public URL
  *      (`--relay`), exactly like `bin/install-admin-console.mjs`/
  *      `demo/install-app-shell-demo.mjs` already do, so it works
  *      identically regardless of whether that relay lives in a Compose
  *      service, a Swarm/`docker stack` service, a Kubernetes Pod, or bare
- *      metal.
- *   2. Once the relay is actually reachable AND configured with those
- *      exact keys (verified by attempting a real write and checking it
+ *      metal. Unlike an app-admin (`demo-app-admin` below), which needs NO
+ *      static config at all any more - `registerApp()` alone (this script's
+ *      own step 2) is enough, the relay discovers it live (see
+ *      `@qu/app-shell`'s own `live-app-resolver.js`) - `QU_RELAY_ADMINS` is
+ *      genuinely the ONLY static list this whole deployment needs.
+ *   2. Once the relay is actually reachable AND configured with that
+ *      exact list (verified by attempting a real write and checking it
  *      gets acked - a relay still running the OLD config accepts the
  *      connection fine but silently drops the write), installs the admin
  *      console, creates a demo shell-app with its own CMS editor
@@ -40,13 +43,15 @@
  *
  * MEMBERSHIP: the confidential admin realm never self-registers (no
  * `/admin-ws`-equivalent open-join exists, on purpose - kinds.js's own
- * "THE ADMIN REALM" doc comment) - `QU_RELAY_ADMIN_MEMBERS_JSON` is the
- * only way in, hence printing it below. The ordinary MAIN space's
- * `'members'`-ACL Kinds, by contrast, already support self-join
- * (`QU_ALLOW_JOIN`, default true) - this script uses exactly that (a plain
- * `POST /join`, the SAME mechanism a real browser visitor's `shell.js`
- * uses) for both identities, so it never needs `QU_MEMBERS_JSON` printed
- * or configured at all.
+ * "THE ADMIN REALM" doc comment) - `QU_RELAY_ADMINS` is the only way in,
+ * hence printing it below (it doubles as the admin realm's own encrypted-
+ * content member list AND the main Space's `qu-platform-apps` write-ACL
+ * list - see `@qu/app-core`'s kinds.js own doc comment on the
+ * `'relay-admins'` mode). The ordinary MAIN space's `'members'`-ACL Kinds,
+ * by contrast, already support self-join (`QU_ALLOW_JOIN`, default true) -
+ * this script uses exactly that (a plain `POST /join`, the SAME mechanism a
+ * real browser visitor's `shell.js` uses) for both identities, so it never
+ * needs `QU_MEMBERS_JSON` printed or configured at all.
  *
  * Usage:
  *   node packages/app-shell/bin/bootstrap-platform.mjs \
@@ -124,27 +129,22 @@ async function ensureIdentity(name, dir) {
 }
 
 /**
- * Prints the exact three env vars a PLATFORM-mode relay needs, ready to
- * paste into whatever `environment:`/env-var mechanism your deployment
- * actually uses (Compose, a `docker stack deploy` stack file, Kubernetes,
- * systemd, ...) - see this file's own top doc comment on why this script
- * never tries to write that config for you.
+ * Prints the ONE env var a PLATFORM-mode relay needs, ready to paste into
+ * whatever `environment:`/env-var mechanism your deployment actually uses
+ * (Compose, a `docker stack deploy` stack file, Kubernetes, systemd, ...) -
+ * see this file's own top doc comment on why this script never tries to
+ * write that config for you. `demo-app-admin` needs NO entry here at all -
+ * it becomes reachable purely through `registerApp()` (this script's own
+ * step 2), discovered live by the relay itself.
  */
-function printConfigBlock({ relayAdmin, demoAppAdmin }) {
-  const relayAdminPub = QuCrypto.toBase64(relayAdmin.signingPub);
-  const appAdminPub = QuCrypto.toBase64(demoAppAdmin.signingPub);
-  const relayAdminMembers = JSON.stringify([{ pub: relayAdminPub, xPub: QuCrypto.toBase64(relayAdmin.xPublicKey) }]);
-  const appAdminPubs = JSON.stringify([appAdminPub]);
-  console.log('Paste these into your deployment\'s environment config (e.g. docker-compose.space-relay.yml\'s');
+function printConfigBlock({ relayAdmin }) {
+  const relayAdmins = JSON.stringify([{ pub: QuCrypto.toBase64(relayAdmin.signingPub), xPub: QuCrypto.toBase64(relayAdmin.xPublicKey) }]);
+  console.log('Paste this into your deployment\'s environment config (e.g. docker-compose.space-relay.yml\'s');
   console.log('qu-app-shell-relay service, or your own stack/Kubernetes/systemd config) - PUBLIC keys only,');
   console.log('nothing secret here:\n');
-  console.log(`  QU_RELAY_ADMIN_PUB=${relayAdminPub}`);
-  console.log(`  QU_APP_ADMIN_PUBS=${appAdminPubs}`);
-  console.log(`  QU_RELAY_ADMIN_MEMBERS_JSON=${relayAdminMembers}\n`);
+  console.log(`  QU_RELAY_ADMINS=${relayAdmins}\n`);
   console.log('  # docker-compose.space-relay.yml / a docker-compose-syntax stack file - environment: block:');
-  console.log(`      QU_RELAY_ADMIN_PUB: '${relayAdminPub}'`);
-  console.log(`      QU_APP_ADMIN_PUBS: '${appAdminPubs}'`);
-  console.log(`      QU_RELAY_ADMIN_MEMBERS_JSON: '${relayAdminMembers}'\n`);
+  console.log(`      QU_RELAY_ADMINS: '${relayAdmins}'\n`);
 }
 
 /** Plain `POST /join`, the SAME self-registration mechanism a real browser's `shell.js`/`identity.js` uses - see this file's own top doc comment on why this is used instead of also managing `QU_MEMBERS_JSON`. */
@@ -204,7 +204,7 @@ async function main() {
   const healthy = await waitForHealthy(httpBase, { attempts: 5, interval: 800 });
   if (!healthy) {
     console.log(`\n❌ Relay not reachable at ${relay}.\n`);
-    printConfigBlock({ relayAdmin, demoAppAdmin });
+    printConfigBlock({ relayAdmin });
     console.log('Deploy your relay with that config (however you deploy - docker compose, docker stack');
     console.log('deploy, Kubernetes, bare metal, ...), then re-run this exact command to finish.');
     process.exitCode = 1;
@@ -240,10 +240,11 @@ async function main() {
   const mainTransport = new WsClientTransport(relay, { WebSocketImpl: WebSocket });
   await mainTransport.connect();
   const mainBus = new EventBus();
-  const mainSpace = new Space({ identity: relayAdmin, members: [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }], transport: mainTransport, bus: mainBus });
+  const relayAdmins = [relayAdmin.signingPub]; // qu-platform-apps is 'relay-admins'-ACL - this Space needs the list to write/read it at all, see kinds.js's own doc comment.
+  const mainSpace = new Space({ identity: relayAdmin, members: [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }], relayAdmins, transport: mainTransport, bus: mainBus });
   const mainWrites = trackWrites(mainBus);
 
-  const platform = new PlatformRuntime(mainSpace, { relayAdminPub: relayAdmin.signingPub });
+  const platform = new PlatformRuntime(mainSpace);
   const existingApps = await platform.resolveApps({ timeout: 800 });
   if (!existingApps.some((a) => a.prefix === 'admin')) {
     console.log('  registering the "admin" alias...');
@@ -305,11 +306,11 @@ async function main() {
 
   if (!adminOk || !mainOk || !demoOk) {
     console.log('\n⚠ Some writes were never write-acked by the relay - it is reachable, but NOT (yet) running');
-    console.log('  with this identity\'s config (a relay ignores QU_RELAY_ADMIN_PUB/QU_APP_ADMIN_PUBS/');
-    console.log('  QU_RELAY_ADMIN_MEMBERS_JSON changes until it is actually (re)started with them - a plain');
-    console.log('  restart of an already-running process/container does NOT re-read them by itself either,');
-    console.log('  the process/container needs to be RECREATED with the new config).\n');
-    printConfigBlock({ relayAdmin, demoAppAdmin });
+    console.log('  with this identity\'s config (a relay ignores QU_RELAY_ADMINS changes until it is');
+    console.log('  actually (re)started with it - a plain restart of an already-running process/container');
+    console.log('  does NOT re-read it by itself either, the process/container needs to be RECREATED with');
+    console.log('  the new config).\n');
+    printConfigBlock({ relayAdmin });
     console.log('Update your deployment with that config and redeploy/recreate it (however you deploy),');
     console.log('then re-run this exact command - it reuses the same identities and finishes from here.');
     process.exitCode = 1;

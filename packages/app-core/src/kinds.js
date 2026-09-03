@@ -172,9 +172,10 @@ export function defineCollectionKind(itemKindName, { fields }) {
 }
 
 /**
- * THE PLATFORM APP REGISTRY (docs/app-shell-arbeitsauftrag.md §19-21) - one
- * per relay-admin, mapping a URL PATH PREFIX to the `qu-app` that owns it:
- * `Array<{prefix: string, appAdminPub: string (base64), name: string}>`.
+ * THE PLATFORM APP REGISTRY (docs/app-shell-arbeitsauftrag.md §19-21) - ONE
+ * GLOBAL, relay-wide registry (not one per relay-admin identity - see
+ * "OWNERSHIP" below), mapping a URL PATH PREFIX to the `qu-app` that owns
+ * it: `Array<{prefix: string, appAdminPub: string (base64), name: string}>`.
  * This is what lets ONE App Shell deployment host SEVERAL independent apps
  * (a messenger at `#/messages`, a forum at `#/forum`, ...), each with its
  * OWN app-admin identity/content, without the Shell or the Relay ever
@@ -182,41 +183,69 @@ export function defineCollectionKind(itemKindName, { fields }) {
  * how a route gets split into `(prefix, subPath)` and delegated to the
  * matching app's own `AppRuntime`.
  *
- * Same singleton-per-owner shape as `appManifestKind`/`routeRegistryKind`
- * (`acl.write: 'named'`, self-certifying id, no membership gate to even
- * discover it) - a relay-admin is just another identity, not a relay-side
- * superuser (docs §19: "Das Relay soll nicht einfach selbst als
- * allmächtiger Benutzer auftreten"). Registering an app here does NOT
- * grant its app-admin anything beyond a routing slot - each app's own
- * content stays governed entirely by ITS OWN `acl.write`/`grantWriter()`,
- * exactly as if it were the only app on the relay.
+ * OWNERSHIP: `acl.write: 'relay-admins'` (`@qu/space-core`'s kind-schema.js
+ * own doc comment on the mode), NOT `'named'` - several relay-admins,
+ * configured as one flat, boot-time list (`QU_RELAY_ADMINS`, see
+ * `packages/app-shell/relay-server.js`'s own doc comment), may all register
+ * apps here on equal footing, with no single distinguished "owner" identity
+ * and no manual per-admin `grantWriter()` bootstrapping needed (a relay
+ * operator's config alone is enough - `'named'` would need one admin's
+ * PRIVATE key to sign a grant for every other admin, something no relay
+ * process ever holds). `PLATFORM_REGISTRY_ANCHOR` below is therefore a
+ * FIXED, non-cryptographic id input (same idea as `ADMIN_REALM_ANCHOR`
+ * further down this file) - there is exactly ONE such registry per relay,
+ * so its id carries no ownership meaning, only "'relay-admins'-ACL, THIS
+ * Kind" (mirrors `deriveOwnerNodeId()`'s own "self-certifying" idea, just
+ * with a list-membership check instead of a single owner pubkey behind it).
+ * This is a real, deliberate change from an earlier revision of this Kind
+ * (one registry NODE per relay-admin's own pubkey, `acl.write: 'named'`) -
+ * that shape only ever let ONE relay-admin's own registry be consulted at
+ * all (`PlatformRuntime` took a single `relayAdminPub`), so multiple
+ * relay-admins never actually shared one registry; this shape genuinely
+ * does. Registering an app here does NOT grant its app-admin anything
+ * beyond a routing slot - each app's own content stays governed entirely by
+ * ITS OWN `acl.write`/`grantWriter()`, exactly as if it were the only app
+ * on the relay (docs §19: "Das Relay soll nicht einfach selbst als
+ * allmächtiger Benutzer auftreten").
+ *
+ * `publicMeta()`-wrapped for the same reason `pageKind`/etc. are (this
+ * file's own top doc comment) - `'relay-admins'`-ACL Kinds default their
+ * meta-stamp to `'encrypted'` (kind-schema.js), but this registry's own
+ * fields are all `'public'` and it lives in the OPEN-JOIN main Space, where
+ * every visitor (not just relay-admins) must be able to read it to resolve
+ * routes at all.
  *
  * ONLY ADDITIVE for now - `ListField` (see `@qu/space-core`'s `field.js`)
  * has no removal primitive, so there is no `unregisterApp()`; the Dev
  * API/admin UI built on this can only ever grow the list. Real, separate
  * work if "unmount an app" is ever needed (see docs' own "Nicht-Ziele").
  */
-export const platformAppsKind = defineKind('qu-platform-apps', {
-  fields: {
-    /**
-     * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'admin'}>`
-     * - see `dev.js`'s `registerApp()`/`platform.js`'s `PlatformRuntime`.
-     * `realm: 'admin'` entries (`appAdminPub: null`) route into the
-     * confidential admin realm (see this file's own "THE ADMIN REALM" doc
-     * comment) instead of an ordinary owner-pubkey-addressed app - the
-     * SAME registry, the SAME `'public'`-visibility mapping (an alias
-     * existing, and which realm it points at, is not itself a secret -
-     * only the realm's own CONTENT is), no separate mechanism. This
-     * mapping is itself only a convenience: `PlatformRuntime.resolveForPath()`
-     * falls back to treating an UNREGISTERED prefix as a literal
-     * base64url-encoded owner pubkey when nothing here matches, so no
-     * app-admin needs a relay-admin's cooperation just to be reachable at
-     * all - registering a prefix here only ever adds a prettier alias.
-     */
-    apps: { shape: 'list', visibility: 'public' },
-  },
-  acl: { write: 'named' },
-});
+export const PLATFORM_REGISTRY_ANCHOR = new Uint8Array(32);
+PLATFORM_REGISTRY_ANCHOR.set(new TextEncoder().encode('qu-platform-registry'));
+
+export const platformAppsKind = publicMeta(
+  defineKind('qu-platform-apps', {
+    fields: {
+      /**
+       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'admin'}>`
+       * - see `dev.js`'s `registerApp()`/`platform.js`'s `PlatformRuntime`.
+       * `realm: 'admin'` entries (`appAdminPub: null`) route into the
+       * confidential admin realm (see this file's own "THE ADMIN REALM" doc
+       * comment) instead of an ordinary owner-pubkey-addressed app - the
+       * SAME registry, the SAME `'public'`-visibility mapping (an alias
+       * existing, and which realm it points at, is not itself a secret -
+       * only the realm's own CONTENT is), no separate mechanism. This
+       * mapping is itself only a convenience: `PlatformRuntime.resolveForPath()`
+       * falls back to treating an UNREGISTERED prefix as a literal
+       * base64url-encoded owner pubkey when nothing here matches, so no
+       * app-admin needs a relay-admin's cooperation just to be reachable at
+       * all - registering a prefix here only ever adds a prettier alias.
+       */
+      apps: { shape: 'list', visibility: 'public' },
+    },
+    acl: { write: 'relay-admins' },
+  })
+);
 
 /** One page (docs §7). Node id = `deriveContentNodeId(ownerPub, 'qu-page', route)`. Write-ACL: the owner, plus anyone explicitly `grantWriter(id, 'qu-page', granteePub, {path: route})`ed - see kind-schema.js's own "THE 'content' ACL mode" doc comment. */
 export const pageKind = publicMeta(

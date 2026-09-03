@@ -11,10 +11,10 @@ services:
   #
   #   node packages/app-shell/bin/bootstrap-platform.mjs --relay ws://<this-host>:8081
   #
-  # It prints an environment: block (QU_RELAY_ADMIN_PUB/QU_APP_ADMIN_PUBS/QU_RELAY_ADMIN_MEMBERS_JSON)
-  # to paste below yourself and redeploy with - it never writes this file or any deployment config
-  # for you. See the root README.md's "Deploying the App Shell" section and
-  # docs/v5-space-core-guide.md §10 for the full walkthrough and every env var below.
+  # It prints an environment: block (QU_RELAY_ADMINS) to paste below yourself and redeploy with - it
+  # never writes this file or any deployment config for you. See the root README.md's "Deploying the
+  # App Shell" section and docs/v5-space-core-guide.md §10 for the full walkthrough and every env var
+  # below.
   #
   # DOCKER STACK / SWARM (`docker stack deploy -c docker-compose.space-relay.yml <stack>`): Swarm
   # does NOT build images - `build:` below is ignored under stack deploy, and `image:` (present on
@@ -39,22 +39,20 @@ services:
       # at / instead). Generate an app-admin identity yourself (QuCrypto.generateKeypair() from
       # @qu/core) and set its base64 signing pubkey here.
       QU_APP_ADMIN_PUB: ${QU_APP_ADMIN_PUB:-}
-      # PLATFORM mode instead of the single app above (architecture.md §7) - set a relay-admin's
-      # base64 signing pubkey here to own the qu-platform-apps alias registry, from which that
-      # identity can register however many already-installed apps under path prefixes. Takes
-      # priority over QU_APP_ADMIN_PUB when both are set - see relay-server.js's own doc comment.
-      QU_RELAY_ADMIN_PUB: ${QU_RELAY_ADMIN_PUB:-}
-      # PLATFORM mode only - JSON array of every ORDINARY app-admin pubkey this relay should accept
-      # content writes from (a STATIC, boot-time list - see relay-server.js's own doc comment on
-      # why). Irrelevant to the admin realm itself - see QU_RELAY_ADMIN_MEMBERS_JSON below.
-      QU_APP_ADMIN_PUBS: ${QU_APP_ADMIN_PUBS:-}
-      # The CONFIDENTIAL admin realm's own membership (architecture.md §7's "ADMIN REALM") - a
-      # wholly separate Space/relay-forwarder from the main one above, reached at /admin-ws, never
-      # open-join. JSON array of {"pub","xPub"} (base64) - every identity trusted to read/write the
-      # built-in admin console's own content. Empty/unset still starts the admin realm (so it CAN be
+      # PLATFORM mode instead of the single app above (architecture.md §7) - takes priority over
+      # QU_APP_ADMIN_PUB when both are set. JSON array of {"pub","xPub"} (base64) - every relay-admin
+      # identity, all equally and symmetrically (no single "owner"), authorized to (a) write
+      # qu-platform-apps (register/manage already-installed apps under path prefixes - a BRAND NEW
+      # app-admin needs no separate config here at all, `registerApp()` alone is enough, discovered
+      # live by this relay itself - see @qu/app-shell's own live-app-resolver.js) and (b) read/write
+      # the CONFIDENTIAL admin realm's own content (architecture.md §7's "ADMIN REALM" - a wholly
+      # separate Space/relay-forwarder from the main one above, reached at /admin-ws, never
+      # open-join). This is the ONE static list this whole deployment needs - see @qu/space-core's
+      # kinds.js/kind-schema.js own doc comment on the 'relay-admins' ACL mode, and
+      # relay-server.js's own doc comment. Empty/unset still starts the admin realm (so it CAN be
       # bootstrapped - see packages/app-shell/bin/install-admin-console.mjs) but nobody can decrypt
-      # anything written to it yet.
-      QU_RELAY_ADMIN_MEMBERS_JSON: ${QU_RELAY_ADMIN_MEMBERS_JSON:-}
+      # anything written to it yet, and nobody can write qu-platform-apps either.
+      QU_RELAY_ADMINS: ${QU_RELAY_ADMINS:-}
       # OPTIONAL - qu-page/qu-template/qu-style are 'content'-ACL (self-certifying per-owner grants,
       # @qu/app-core's kinds.js), not 'members'-ACL, so an app-admin needs no entry here just to
       # WRITE their own content. Only relevant for an app's OWN, separately-defined 'members'-ACL

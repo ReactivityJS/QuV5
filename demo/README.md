@@ -117,8 +117,9 @@ relay, a real Admin-UI (installed Qu content, not framework-built DOM), and
 a real shell-app whose templates/styles/pages are stored AND edited through
 its own CMS editor. `bootstrap:platform` (`packages/app-shell/bin/
 bootstrap-platform.mjs`) generates two local identities and, on a fresh
-setup, PRINTS the `QU_RELAY_ADMIN_PUB`/`QU_APP_ADMIN_PUBS`/
-`QU_RELAY_ADMIN_MEMBERS_JSON` values for you to paste into however you
+setup, PRINTS the `QU_RELAY_ADMINS` value (the ONE static list a platform
+deployment needs - a brand-new app-admin needs no separate config at all,
+discovered live once registered) for you to paste into however you
 deploy (never writes your deployment config itself, on purpose - works
 identically for Compose, `docker stack`, Kubernetes, bare metal); once
 you've redeployed with those and re-run the same command, it installs the

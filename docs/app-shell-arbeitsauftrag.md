@@ -382,7 +382,7 @@ unten ursprünglich skizziert) Owner globaler Content-Kinds zu sein, ist die
    ohne Mitwirkung des relay-admin (`PlatformRuntime.resolveForPath()`s
    eigener Fallback).
 2. Ein ECHTER, separater, vertraulicher `Space`/Relay-Forwarder (der
-   "Admin-Realm", eigene `members`-Liste via `QU_RELAY_ADMIN_MEMBERS_JSON`,
+   "Admin-Realm", eigene `members`-Liste via `QU_RELAY_ADMINS`,
    erreicht über `/admin-ws`) für alles, was tatsächlich NUR für Admins
    lesbar sein soll — inklusive der eingebauten `#/admin`-Konsole selbst,
    die als GEWÖHNLICHER, installierter Qu-Content dort lebt
@@ -394,14 +394,21 @@ bleibt alleiniger Owner seines eigenen `qu-app`/`qu-page`/`qu-template`/
 `qu-style`, der relay-admin entscheidet nur, WELCHE bereits installierten
 Apps unter welchem Präfix eine Alias-Adresse bekommen (bzw. wer den
 Admin-Realm lesen/schreiben darf — dort gilt `acl.write: 'members'`, jeder
-konfigurierte Admin gleichberechtigt, kein Einzel-Owner). Relay-seitige ACL
-für mehrere App-Admins bleibt eine STATISCHE, beim Relay-Start
-konfigurierte Liste (`QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_PUB` in
-`packages/app-shell/relay-server.js`) — aus dem selben Grund, aus dem
-`QU_MEMBERS_JSON` das bereits ist (`resolveKindSchema` wird synchron
-aufgerufen, siehe `relay-resolver.js`s eigener Kommentar). Live-Discovery
-neuer App-Admins ohne Relay-Neustart bleibt offen (siehe architecture.md §7,
-letzter Absatz).
+konfigurierte Admin gleichberechtigt, kein Einzel-Owner). `qu-platform-apps`
+selbst ist inzwischen `acl.write: 'relay-admins'` (`@qu/space-core`s
+kind-schema.js eigener Kommentar zu diesem Modus) — dieselbe STATISCHE,
+beim Relay-Start konfigurierte Liste (`QU_RELAY_ADMINS`, ersetzt die
+früheren getrennten `QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_PUB`/
+`QU_RELAY_ADMIN_MEMBERS_JSON`) trägt jetzt sowohl die Admin-Realm-
+Mitgliedschaft als auch das Schreibrecht auf die Plattform-Registry, mit
+mehreren gleichberechtigten Relay-Admins statt einem Einzel-Owner. Ein
+NEUER App-Admin braucht dagegen KEINEN eigenen statischen Eintrag mehr:
+`registerApp()` allein genügt, der Relay beobachtet `qu-platform-apps`
+selbst live (`packages/app-shell/src/live-app-resolver.js`, eine interne,
+über `InProcessTransport` an den eigenen Hub angebundene `Space`) und
+reklassifiziert die neue Identität ohne Neustart — die früher hier als
+offen benannte Live-Discovery-Lücke (siehe architecture.md §7) ist damit
+geschlossen.
 
 **Anpassung:** Das Original unterstellt eine bereits vorhandene, erweiterbare
 ACL-Hierarchie (Space → Namespace → Kind → Node → Field). Die gibt es nicht.

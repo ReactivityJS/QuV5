@@ -104,7 +104,14 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  * - a correct no-op unless the resolved page happens to be the built-in
  * CMS editor (`cms-bundle.js`'s `installCms()`), which any app-admin can
  * install into their OWN app's Space, same as `startApp()` does below.
- * @param {{space: import('@qu/space-core').Space, relayAdminPub: Uint8Array, connectAdminSpace?: () => Promise<import('@qu/space-core').Space>, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
+ * @param {{space: import('@qu/space-core').Space, connectAdminSpace?: () => Promise<import('@qu/space-core').Space>, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
+ *   `space` - MUST have been constructed with a `relayAdmins` list (see
+ *   `Space`'s own constructor doc comment) matching the relay's own
+ *   `QU_RELAY_ADMINS` config, or `qu-platform-apps` reads/writes fail this
+ *   Space's own independent ACL check regardless of what the relay allows
+ *   (`kinds.js`'s own `platformAppsKind` doc comment on the `'relay-admins'`
+ *   mode) - `shell.js`'s own boot sequence fetches that list and passes it
+ *   through, same as it already does for `members`.
  *   `connectAdminSpace` - lazily builds (and this function memoizes) the
  *   Space connected to the admin realm's own relay-forwarder; only called
  *   the first time a route actually resolves into `realm: 'admin'` - most
@@ -113,8 +120,8 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  *   to the landing page instead of throwing.
  * @returns {{platform: PlatformRuntime, router: HashRouter}}
  */
-export function startPlatform({ space, relayAdminPub, connectAdminSpace, mountEl, window, styleId, resolveTimeout }) {
-  const platform = new PlatformRuntime(space, { relayAdminPub });
+export function startPlatform({ space, connectAdminSpace, mountEl, window, styleId, resolveTimeout }) {
+  const platform = new PlatformRuntime(space);
   const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
   let adminSpacePromise = null;
   const getAdminSpace = () => (adminSpacePromise ??= connectAdminSpace());

@@ -10,13 +10,15 @@
  *   1. to the ADMIN realm's own WS endpoint (`/admin-ws`) and writes the
  *      built-in console's content there (`installAdminAppBundle()`,
  *      `admin-console-bundle.js`) - succeeds only if this identity is
- *      already listed in that relay's `QU_RELAY_ADMIN_MEMBERS_JSON` (see
+ *      already listed in that relay's `QU_RELAY_ADMINS` (see
  *      `relay-server.js`'s own "ADMIN REALM" doc comment - admin
  *      membership is never self-registered);
  *   2. to the MAIN Space and writes ONE `qu-platform-apps` alias
  *      (`registerApp()`) mapping the chosen prefix (`"admin"` by default)
- *      to `realm: 'admin'` - succeeds only if this identity matches that
- *      relay's `QU_RELAY_ADMIN_PUB`.
+ *      to `realm: 'admin'` - succeeds only if this identity is ALSO in
+ *      that SAME `QU_RELAY_ADMINS` list (`qu-platform-apps` is now
+ *      `acl.write: 'relay-admins'`, checked against that exact list - see
+ *      `@qu/space-core`'s kind-schema.js own doc comment on the mode).
  *
  * Run once per deployment (re-running is harmless - every write here is
  * idempotent/overwriting, same as `installAppBundle()`'s own posture).
@@ -82,8 +84,7 @@ async function main() {
   const { relay, prefix, dir, name } = parseArgs(process.argv.slice(2));
   const identity = await ensureIdentity(dir);
   console.log(`Qu V5 — admin console installer: identity [${await QuCrypto.fingerprint(identity.signingPub)}]`);
-  console.log(`Public signing key (add to QU_RELAY_ADMIN_MEMBERS_JSON / QU_RELAY_ADMIN_PUB): ${QuCrypto.toBase64(identity.signingPub)}`);
-  console.log(`Public X25519 key (add to QU_RELAY_ADMIN_MEMBERS_JSON's xPub):                ${QuCrypto.toBase64(identity.xPublicKey)}`);
+  console.log(`Add this identity to QU_RELAY_ADMINS as {"pub":"${QuCrypto.toBase64(identity.signingPub)}","xPub":"${QuCrypto.toBase64(identity.xPublicKey)}"}`);
 
   console.log(`\nConnecting to the admin realm at ${relay}/admin-ws …`);
   const adminTransport = new WsClientTransport(`${relay.replace(/\/?$/, '')}/admin-ws`, { WebSocketImpl: WebSocket });

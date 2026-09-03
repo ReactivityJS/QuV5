@@ -80,6 +80,28 @@
  *     Kind-agnostic "who may edit THIS specific page/event/post" primitive
  *     any many-per-owner content Kind wants - chat, calendar, forum, and
  *     CMS content alike, not something reinvented per app.
+ *   - `'relay-admins'` - a FLAT, symmetric list of writers, exactly like
+ *     `'members'`, but checked against a list a `Space`/relay is
+ *     constructed with SEPARATELY from ordinary Space membership (a new
+ *     `relayAdmins` constructor param on both - see space.js's
+ *     `_isAuthorizedWriter()` and `@qu/space-transport`'s relay.js
+ *     `buildWriteAcl()`), never against `members`/`QU_ALLOW_JOIN`-style
+ *     self-registration. Exists for content that must (a) live in an
+ *     OPEN-JOIN Space (so ordinary visitors can read it with zero
+ *     membership - `'members'`-ACL there would let ANY self-joined visitor
+ *     write it too, which is never wanted) and (b) be writable by SEVERAL
+ *     co-equal, boot-time-configured admin identities with no single
+ *     "owner" and no manual per-admin `grantWriter()` dance (unlike
+ *     `'named'`, which needs one real keypair as the self-certifying
+ *     "owner" before anyone else can be granted, and the OWNER's own
+ *     private key to sign each grant - something a relay operator's config
+ *     alone can never do). `@qu/app-core`'s `platformAppsKind` (the
+ *     relay-admin-managed app registry) is the reference use - see that
+ *     file's own doc comment. A Node id under this mode carries no
+ *     ownership meaning at all (any fixed, precomputable value works, e.g.
+ *     `deriveOwnerNodeId(SOME_FIXED_ANCHOR, kind)`) since authorization
+ *     never depends on it, only on the signer's pubkey being in the
+ *     configured list.
  * A Node's meta-stamp (see node.js's `stampMeta()`) follows `'public'`
  * visibility automatically when `acl.write === 'owner'`/`'named'` (an
  * identity Node's own existence/kind should be as discoverable as its
@@ -129,7 +151,7 @@ import { QuCrypto } from '@qu/core';
 
 const SHAPES = new Set(['atomic', 'text', 'list']);
 const VISIBILITIES = new Set(['encrypted', 'public']);
-const ACL_MODES = new Set(['members', 'owner', 'named', 'content']);
+const ACL_MODES = new Set(['members', 'owner', 'named', 'content', 'relay-admins']);
 const PERSISTENCE_MODES = new Set(['durable', 'volatile']);
 
 /** Prefix for a self-certifying owner/named Node id - see `deriveOwnerNodeId()`. Deliberately the same "~" convention Qu's earlier path-based identity Nodes used. */
@@ -175,11 +197,13 @@ export function defineKind(kind, { fields, acl = { write: 'members' }, notifyTop
     acl: Object.freeze({ ...acl }),
     notifyTopics: Object.freeze([...notifyTopics]),
     persistence,
-    // A 'members'/'content'-Kind Node's meta stays 'encrypted' (pre-existing behavior for
-    // 'members', unchanged; 'content' follows it since it's equally many-per-owner content, not an
-    // identity); an 'owner'/'named' identity Node's meta is 'public' automatically - see this
-    // file's own doc comment.
-    metaVisibility: acl.write === 'members' || acl.write === 'content' ? 'encrypted' : 'public',
+    // A 'members'/'content'/'relay-admins'-Kind Node's meta stays 'encrypted' (pre-existing
+    // behavior for 'members', unchanged; 'content' and 'relay-admins' follow it since neither is a
+    // self-certifying identity Node either); an 'owner'/'named' identity Node's meta is 'public'
+    // automatically - see this file's own doc comment. A Kind that wants 'relay-admins' content to
+    // ALSO be publicly readable (the common case - e.g. `platformAppsKind`) overrides
+    // `metaVisibility` itself, same as `@qu/app-core`'s `publicMeta()` already does for `'content'`.
+    metaVisibility: acl.write === 'members' || acl.write === 'content' || acl.write === 'relay-admins' ? 'encrypted' : 'public',
   });
 }
 

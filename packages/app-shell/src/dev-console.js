@@ -2,7 +2,7 @@
  * DEV CONSOLE — exposes `window.Qu`, a small identity-bootstrapping API any
  * page this bundle loads on gets for free, the relay's own UNCONFIGURED
  * setup page in particular (`build.mjs`'s `renderIndexHtml()`, the "no
- * QU_APP_ADMIN_PUB/QU_RELAY_ADMIN_PUB set yet" branch): rather than making
+ * QU_APP_ADMIN_PUB/QU_RELAY_ADMINS set yet" branch): rather than making
  * an operator run a separate script just to GENERATE a bootstrapping
  * identity, the setup page itself now loads this SAME bundle (`/bundle.js`,
  * already built and served regardless of configuration state) and this
@@ -29,8 +29,8 @@
  * anywhere on the page gets its `textContent` set to the current
  * identity's base64 signing/X25519 pubkey once ready - `build.mjs`'s own
  * unconfigured-page markup uses this so the exact values `QU_APP_ADMIN_PUB`/
- * `QU_RELAY_ADMIN_PUB`/`QU_MEMBERS_JSON`/`QU_RELAY_ADMIN_MEMBERS_JSON`
- * expect are copy-pasteable straight off the page, no devtools required -
+ * `QU_MEMBERS_JSON`/`QU_RELAY_ADMINS` expect are copy-pasteable straight off
+ * the page, no devtools required -
  * `window.Qu` itself (`Qu.pub`/`Qu.xPub`/`Qu.identity`) stays available
  * for anyone who prefers the console, or wants the raw keys for a script.
  */

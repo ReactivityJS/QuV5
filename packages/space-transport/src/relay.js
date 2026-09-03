@@ -215,10 +215,15 @@ import { PresenceTracker } from './presence-tracker.js';
 const HELLO_DOMAIN = 'qu-space-hello-v1'; // MUST match @qu/space-core's own HELLO_DOMAIN (space.js) - duplicated as a literal rather than imported, to keep this package's only @qu/space-core dependency at "the same version, not a live shared module" (matches this file's own already-existing `verifyEnvelope` import boundary).
 
 /**
- * @param {{hub: object, members: Array<{pub: Uint8Array}>, resolveKindSchema: (nodeId: string) => object, storage?: object, volatileStorage?: object, bus?: import('@qu/events').EventBus, presence?: PresenceTracker}} params
+ * @param {{hub: object, members: Array<{pub: Uint8Array}>, relayAdmins?: Array<Uint8Array>, resolveKindSchema: (nodeId: string) => object, storage?: object, volatileStorage?: object, bus?: import('@qu/events').EventBus, presence?: PresenceTracker}} params
+ *   `relayAdmins` - optional, default `[]` - signing pubkeys authorized to write an `acl.write:
+ *     'relay-admins'` Kind (see `@qu/space-core`'s kind-schema.js), checked completely
+ *     independently of `members`/self-join - mirrors the identically-named `Space` constructor
+ *     param (that file's own doc comment) exactly, so client and relay agree on who may write such
+ *     content without either needing the other's cooperation to enforce it.
  *   `volatileStorage` - see this file's own "PERSISTENCE TIERS" doc comment: the mirror for any Kind whose Kind-Schema declares `persistence: 'volatile'` (e.g. `@qu/space-core`'s `presenceKind`), regardless of what `storage` above is. Defaults to a private `@qu/space-storage` `createMemoryStore()` - a fresh one per `createRelayForwarder()` call, never shared across relay instances by accident.
  */
-export function createRelayForwarder({ hub, members, resolveKindSchema, storage = null, volatileStorage = createMemoryStore(), bus = null, presence = new PresenceTracker() }) {
+export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKindSchema, storage = null, volatileStorage = createMemoryStore(), bus = null, presence = new PresenceTracker() }) {
   /** See this file's own "PERSISTENCE TIERS" doc comment. */
   function storageFor(kindSchema) {
     return kindSchema?.persistence === 'volatile' ? volatileStorage : storage;
@@ -246,6 +251,8 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
   const memberList = [...members];
   const memberPubs = new Set(memberList.map((m) => QuCrypto.toBase64(m.pub)));
   const isSpaceMember = (pubB64) => memberPubs.has(pubB64);
+  /** 'relay-admins'-mode write-ACL state - a flat, static Set, independent of `memberPubs`/`memberList` above (see this function's own "relayAdmins" param doc comment, and kind-schema.js's own doc comment on the mode). */
+  const relayAdminPubs = new Set(relayAdmins.map((pub) => QuCrypto.toBase64(pub)));
 
   /** @type {Map<string, Set<string>>} nodeId -> Set<base64 Ed25519 pubkey> - 'named'-mode write-ACL state, 100% derived from verified `grant` messages (see grant.js) - see this file's own "GRANTS" doc comment below. */
   const grants = new Map();
@@ -363,7 +370,7 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
     // Kind (or an unresolvable nodeId - e.g. relay-server.js's own `resolveKindSchema: () => true`)
     // keeps the original membership gate exactly as before.
     const kindSchema = resolveKindSchema(nodeId);
-    const contentAclModes = new Set(['owner', 'named', 'content']);
+    const contentAclModes = new Set(['owner', 'named', 'content', 'relay-admins']);
     const requiresMembership = !contentAclModes.has(kindSchema?.acl?.write);
     if (requiresMembership && !isSpaceMember(pubB64)) {
       bus?.emit('debug.relay.subscribe.rejected', { nodeId, reason: 'not-member' });
@@ -459,13 +466,18 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
   /**
    * Builds this Node's write-ACL check for `verifyEnvelope()` - mirrors
    * `@qu/space-core`'s own `Space._isAuthorizedWriter()` exactly (same
-   * three `acl.write` modes, see kind-schema.js), just relay-side: a
+   * `acl.write` modes, see kind-schema.js), just relay-side: a
    * `'members'` Kind is still gated on this relay's flat `memberList` (the
    * PoC's only mode for that kind), while `'owner'`/`'named'` is 100%
    * self-certifying/grant-derived - notably NOT gated on `memberList` at
    * all, so an owner never needs to be registered as a "member" anywhere
    * to write their own Node (see kind-schema.js's own doc comment on why
-   * that's the whole point of `deriveOwnerNodeId()`). A known, accepted
+   * that's the whole point of `deriveOwnerNodeId()`). `'relay-admins'` is a
+   * THIRD, separate flat list (`relayAdminPubs`, this function's own
+   * closure variable, built from this file's own `relayAdmins` param) -
+   * never `memberList` - checked FIRST, before the owner/named/content
+   * dispatch below, since it needs no `nodeId`-derived reasoning at all
+   * (kind-schema.js's own doc comment on the mode). A known, accepted
    * scope boundary for now: such a not-otherwise-a-member owner's `hello`
    * still gates on `isSpaceMember` below (it carries no `nodeId`, so there
    * is no per-Kind ACL mode to consult the way `handleSubscribe()` does),
@@ -473,15 +485,15 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
    * federation task, which has to rethink this gate anyway.
    *
    * `kindSchema?.acl?.write` anything OTHER than exactly `'owner'`/
-   * `'named'`/`'content'` (including a relay like `relay-server.js`'s own
-   * that deliberately never resolves a real Kind-Schema at all, see that
-   * file's own doc comment) is treated as `'members'` - the flat,
-   * always-available fallback ACL every relay can enforce with zero
-   * Kind-Schema knowledge, matching this relay's exact behavior before
-   * this Task existed. `'content'` (many-per-owner, e.g. `@qu/app-core`'s
-   * `qu-page`/`qu-template`/`qu-style`) is PURELY grant-derived - unlike
-   * `'named'`, there is no owner-pubkey shortcut (a `nodeId` alone cannot
-   * be inverted back to the `path` a verifier would need to recompute it -
+   * `'named'`/`'content'`/`'relay-admins'` (including a relay like
+   * `relay-server.js`'s own that deliberately never resolves a real
+   * Kind-Schema at all, see that file's own doc comment) is treated as
+   * `'members'` - the flat, always-available fallback ACL every relay can
+   * enforce with zero Kind-Schema knowledge, matching this relay's exact
+   * behavior before this Task existed. `'content'` (many-per-owner, e.g.
+   * `@qu/app-core`'s `qu-page`/`qu-template`/`qu-style`) is PURELY
+   * grant-derived - unlike `'named'`, there is no owner-pubkey shortcut (a
+   * `nodeId` alone cannot be inverted back to the `path` a verifier would need to recompute it -
    * see `@qu/space-core`'s kind-schema.js) - `Space.createNode()` issues
    * the creating owner a transparent SELF-grant instead (see that file's
    * own doc comment), which arrives here as an ordinary signed `grant`
@@ -489,6 +501,7 @@ export function createRelayForwarder({ hub, members, resolveKindSchema, storage 
    */
   function buildWriteAcl(kindSchema, nodeId) {
     const mode = kindSchema?.acl?.write;
+    if (mode === 'relay-admins') return (pubB64) => relayAdminPubs.has(pubB64);
     if (mode !== 'owner' && mode !== 'named' && mode !== 'content') return isSpaceMember;
     if (mode === 'content') return (pubB64) => grants.get(nodeId)?.has(pubB64) ?? false;
     return async (pubB64) => {
