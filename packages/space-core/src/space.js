@@ -166,16 +166,23 @@ function createInMemoryVolatileStore() {
 
 export class Space {
   /**
-   * @param {{identity: object, members: Array<{pub: Uint8Array, xPub: Uint8Array}>, transport: object, storage?: object, volatileStorage?: object, bus?: import('@qu/events').EventBus}} params
+   * @param {{identity: object, members: Array<{pub: Uint8Array, xPub: Uint8Array}>, relayAdmins?: Array<Uint8Array>, transport: object, storage?: object, volatileStorage?: object, bus?: import('@qu/events').EventBus}} params
    *   `identity` = `{signingKey, signingPub, xPrivateKey, xPublicKey}` (Ed25519 + X25519 pairs, e.g. from QuCrypto.generateKeypair()).
    *   `members` = every space member's public keys (encryption recipients + write-ACL, kept simple for the PoC - see kind-schema.js).
+   *   `relayAdmins` = optional, default `[]` - signing pubkeys authorized to write an `acl.write:
+   *     'relay-admins'` Kind (kind-schema.js's own doc comment on that mode), checked completely
+   *     independently of `members`/self-join. Unlike `members`, these are never encryption
+   *     recipients (a `Uint8Array` list, not `{pub, xPub}` pairs) - `'relay-admins'`-ACL content is
+   *     expected to be `'public'`-visibility (an open-join Space's readers have no membership to
+   *     encrypt for in the first place), same posture `'owner'`/`'named'` identity Nodes already take.
    *   `storage` = optional; omitting it is the "flüchtig/memory-only" tier (see docs/v5-space-core-guide.md) - a Node still syncs live, nothing survives a reload. Used for every Kind EXCEPT a `persistence: 'volatile'` one (see `_storageFor()` below).
    *   `volatileStorage` = optional; the storage used for a `persistence: 'volatile'` Kind (e.g. `presenceKind`, see `presence.js`) regardless of what `storage` above is - defaults to a private in-memory adapter if omitted. Pass your own (e.g. a `sessionStorage`-backed one in a browser) to control exactly how/where "ephemeral" data lives, same swappable-adapter idea `storage` already offers for durable data.
    *   `bus` = optional - see this file's own doc comment for what gets emitted on it.
    */
-  constructor({ identity, members, transport, storage = null, volatileStorage = createInMemoryVolatileStore(), bus = null }) {
+  constructor({ identity, members, relayAdmins = [], transport, storage = null, volatileStorage = createInMemoryVolatileStore(), bus = null }) {
     this._identity = identity;
     this._members = [...members]; // own copy - addMember() (see below) must never mutate the caller's own array out from under them.
+    this._relayAdmins = new Set(relayAdmins.map((pub) => QuCrypto.toBase64(pub)));
     this._transport = transport;
     this._storage = storage;
     this._volatileStorage = volatileStorage;
@@ -276,11 +283,18 @@ export class Space {
    *     - see kind-schema.js's own doc comment) - `this._grants.get(nodeId)`
    *     only, populated by `createNode()`'s own transparent self-grant for
    *     the creating owner, or by an explicit `grantWriter(..., {path})`.
+   *   - `'relay-admins'` - a flat Set lookup against `this._relayAdmins`
+   *     (the constructor's own `relayAdmins` param), completely independent
+   *     of `this._members` - see kind-schema.js's own doc comment on this
+   *     mode and this file's own constructor doc comment.
    * @param {object} kindSchema
    * @param {string} nodeId
    */
   _isAuthorizedWriter(kindSchema, nodeId) {
     const mode = kindSchema?.acl?.write;
+    if (mode === 'relay-admins') {
+      return (pubB64) => this._relayAdmins.has(pubB64);
+    }
     if (mode !== 'owner' && mode !== 'named' && mode !== 'content') {
       const writerPubs = new Set(this._members.map((m) => QuCrypto.toBase64(m.pub)));
       return (pubB64) => writerPubs.has(pubB64);
@@ -342,7 +356,11 @@ export class Space {
    *   this._identity.signingPub, {path})`) BEFORE attaching/writing anything, so the creating
    *   identity is immediately an authorized writer without any extra call of its own (see
    *   grant.js's own "WRITE-BEFORE-GRANT IS A TRAP" - this ordering is what avoids it). For
-   *   `'members'`-ACL kinds, omitting `id` picks a random one, same as before.
+   *   `'members'`/`'relay-admins'`-ACL kinds, `id` is used exactly as given (a random one if
+   *   omitted) - NEITHER mode derives an id from the caller's own identity, since authorization
+   *   under both is a flat list lookup, never self-certification (see kind-schema.js's own doc
+   *   comment) - `'relay-admins'` content typically passes a fixed, precomputed anchor id instead
+   *   (e.g. `@qu/app-core`'s `platformAppsKind`, always created at the same well-known id).
    * @returns {Promise<SpaceNode>}
    */
   async createNode(kindSchema, initialFields = {}, { id = crypto.randomUUID(), path } = {}) {
@@ -350,7 +368,7 @@ export class Space {
       if (!path) throw new Error(`createNode: kind "${kindSchema.kind}" is 'content'-ACL - "path" is required`);
       id = await deriveContentNodeId(this._identity.signingPub, kindSchema.kind, path);
       await this.grantWriter(id, kindSchema.kind, this._identity.signingPub, { path });
-    } else if (kindSchema.acl.write !== 'members') {
+    } else if (kindSchema.acl.write !== 'members' && kindSchema.acl.write !== 'relay-admins') {
       id = await deriveOwnerNodeId(this._identity.signingPub, kindSchema.kind);
     }
     // _attach() FIRST, so the update listener is already registered before

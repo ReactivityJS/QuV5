@@ -9,10 +9,14 @@
  *
  * ONE of two attributes decides what gets booted, never both - the ONE
  * thing that tells an otherwise-generic App Shell what to load (docs §5):
- *   - `app-admin-pub` - a SINGLE app, `startApp()` (docs §5-18).
- *   - `relay-admin-pub` - a PLATFORM of however many apps that identity's
- *     `qu-platform-apps` registry lists, path-prefix-routed,
- *     `startPlatform()` (docs §19-21) - takes priority if both are set.
+ *   - `app-admin-pub="<base64 pubkey>"` - a SINGLE app, `startApp()` (docs §5-18).
+ *   - `relay-admin-pub` - a bare, boolean-style marker (its VALUE carries no
+ *     meaning - `qu-platform-apps` is `'relay-admins'`-ACL, checked against
+ *     the relay's own boot-time `QU_RELAY_ADMINS` list, never against one
+ *     pubkey embedded in this markup, see `@qu/app-core`'s `kinds.js` own
+ *     doc comment) - a PLATFORM of however many apps that registry lists,
+ *     path-prefix-routed, `startPlatform()` (docs §19-21) - takes priority
+ *     if both are present.
  * A real deployment sets whichever one in the `index.html` a Relay serves,
  * alongside this script - see `public/index.html` in this package for the
  * reference markup, and this package's own README/docs pointer for how a
@@ -48,19 +52,29 @@ import { startApp, startPlatform } from './boot.js';
 export class QuAppShell extends HTMLElement {
   async connectedCallback() {
     try {
-      const relayAdminPubB64 = this.getAttribute('relay-admin-pub');
+      // A bare boolean-style attribute (no value carries meaning any more - `platformAppsKind` is
+      // `'relay-admins'`-ACL, checked against the relay's own boot-time QU_RELAY_ADMINS list, never
+      // against one pubkey embedded in this markup - see build.mjs's own doc comment) - PRESENCE is
+      // what decides `startPlatform()` vs `startApp()` below, so `hasAttribute()`, not truthiness of
+      // a (possibly empty-string) value.
+      const isPlatformMode = this.hasAttribute('relay-admin-pub');
       const appAdminPubB64 = this.getAttribute('app-admin-pub');
       const relayUrl = this.getAttribute('relay-url') ?? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
       const name = this.getAttribute('display-name') ?? `visitor-${Math.random().toString(36).slice(2, 8)}`;
 
       const identity = await loadOrCreateIdentity(localStorage, IDENTITY_STORAGE_KEY);
       const members = await joinSpace({ name, identity });
+      // Only fetched in PLATFORM mode - a single-app deployment never touches `qu-platform-apps`
+      // at all, so there is nothing here for it to independently verify (see `Space`'s own
+      // `relayAdmins` constructor doc comment, and `relay-server.js`'s own "ADMIN REALM"-adjacent
+      // `GET /relay-admins.json` doc comment for the server side of this public, unauthenticated read).
+      const relayAdmins = isPlatformMode ? (await fetchMembers({ path: '/relay-admins.json' }).catch(() => [])).map((m) => m.pub) : [];
 
       const transport = new WsClientTransport(relayUrl);
       await transport.connect();
-      const space = new Space({ identity, members, transport });
+      const space = new Space({ identity, members, relayAdmins, transport });
 
-      if (relayAdminPubB64) {
+      if (isPlatformMode) {
         // The admin realm's own transport/Space - see relay-server.js's own "ADMIN REALM" doc
         // comment for the server side of this `/admin-ws` convention. Built lazily (boot.js only
         // calls this the first time a route actually resolves into `realm: 'admin'`) - the SAME
@@ -87,7 +101,7 @@ export class QuAppShell extends HTMLElement {
           autoCompactOnJoin(adminSpace, adminBus, [manifestId, templateId, pageId]);
           return adminSpace;
         };
-        startPlatform({ space, relayAdminPub: QuCrypto.fromBase64(relayAdminPubB64), connectAdminSpace, mountEl: this, window });
+        startPlatform({ space, connectAdminSpace, mountEl: this, window });
       } else {
         startApp({ space, appAdminPub: QuCrypto.fromBase64(appAdminPubB64), mountEl: this, window });
       }

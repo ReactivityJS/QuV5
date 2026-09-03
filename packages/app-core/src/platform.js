@@ -25,13 +25,15 @@
  * Sonderfall zu normalen Spaces"):
  *
  *   1. A REGISTERED alias (`qu-platform-apps`, prettier, opt-in, relay-
- *      admin-curated) - `{realm: 'main', appAdminPub, ...}` as above, or
- *      `{realm: 'admin', ...}` (no `appAdminPub` - the confidential admin
- *      realm has no single owner, see kinds.js's own "THE ADMIN REALM" doc
- *      comment) when the relay-admin registered that prefix with
- *      `registerApp(..., {realm: 'admin'})` - conventionally `"admin"`,
- *      but that is a NAMING convention the bootstrap installer picks, not
- *      something this class special-cases.
+ *      admin-curated - any of the configured relay-admins, see kinds.js's
+ *      own doc comment on `platformAppsKind`'s `'relay-admins'` ACL) -
+ *      `{realm: 'main', appAdminPub, ...}` as above, or `{realm: 'admin',
+ *      ...}` (no `appAdminPub` - the confidential admin realm has no single
+ *      owner, see kinds.js's own "THE ADMIN REALM" doc comment) when a
+ *      relay-admin registered that prefix with `registerApp(..., {realm:
+ *      'admin'})` - conventionally `"admin"`, but that is a NAMING
+ *      convention the bootstrap installer picks, not something this class
+ *      special-cases.
  *   2. UNREGISTERED, the DEFAULT: every app is self-certifyingly reachable
  *      at its OWN owner id with zero relay-admin involvement - the prefix
  *      is tried as a literal base64url-encoded owner pubkey
@@ -42,7 +44,13 @@
  */
 import { QuCrypto } from '@qu/core';
 import { deriveOwnerNodeId } from '@qu/space-core';
-import { platformAppsKind } from './kinds.js';
+import { platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from './kinds.js';
+
+/** The registry's own id never changes (one global, `'relay-admins'`-ACL registry per relay - see kinds.js's own doc comment) - computed once, lazily, and cached rather than re-derived (an async sha256) on every `resolveApps()` call. */
+let platformRegistryIdPromise = null;
+function platformRegistryId() {
+  return (platformRegistryIdPromise ??= deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind));
+}
 
 /** Polls `checkFn` until it returns a non-null/non-undefined value, or `timeout` elapses (then returns `null`) - same shape as `resolver.js`'s own `waitFor()`, local here to avoid a needless cross-file dependency for one small helper. */
 async function waitFor(checkFn, { timeout = 4000, interval = 20 } = {}) {
@@ -64,15 +72,20 @@ function splitPath(fullPath) {
 }
 
 export class PlatformRuntime {
-  /** @param {import('@qu/space-core').Space} space @param {{relayAdminPub: Uint8Array|string}} params */
-  constructor(space, { relayAdminPub }) {
+  /**
+   * @param {import('@qu/space-core').Space} space - MUST have been constructed with a `relayAdmins`
+   *   list including every identity allowed to write `qu-platform-apps` (see `Space`'s own
+   *   constructor doc comment) - otherwise every relay-admin's registration write is silently
+   *   rejected by this Space's own independent ACL check (never just the relay's), and
+   *   `resolveApps()` always returns an empty list.
+   */
+  constructor(space) {
     this._space = space;
-    this._relayAdminPub = typeof relayAdminPub === 'string' ? QuCrypto.fromBase64(relayAdminPub) : relayAdminPub;
   }
 
-  /** @returns {Promise<Array<{prefix: string, appAdminPub: Uint8Array|null, name: string, realm: 'main'|'admin'}>>} Every app/alias the relay-admin has registered - empty if none (yet). */
+  /** @returns {Promise<Array<{prefix: string, appAdminPub: Uint8Array|null, name: string, realm: 'main'|'admin'}>>} Every app/alias any configured relay-admin has registered - empty if none (yet). */
   async resolveApps({ timeout } = {}) {
-    const id = await deriveOwnerNodeId(this._relayAdminPub, platformAppsKind.kind);
+    const id = await platformRegistryId();
     const { node, release } = await this._space.useNode(id, platformAppsKind);
     await waitFor(() => (node.field('apps').length > 0 ? true : null), { timeout: timeout ?? 500 });
     const apps = await node.field('apps').toArray();

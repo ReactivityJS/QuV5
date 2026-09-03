@@ -132,13 +132,15 @@ container**, and it never touches your deployment config at all: it
 generates a `relay-admin` and a `demo-app-admin` identity locally, then
 either
 
-- the relay isn't configured with them yet → **prints the exact
-  `QU_RELAY_ADMIN_PUB`/`QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_MEMBERS_JSON`
-  values** (public keys only) for YOU to paste into however you manage
-  your deployment's environment - `docker-compose.space-relay.yml`
-  directly, your own `docker stack` file, a Kubernetes manifest, systemd,
-  whatever - then redeploy however you already do (`docker compose up -d`,
-  `docker stack deploy`, ...) and run the SAME command again; or
+- the relay isn't configured yet → **prints the exact `QU_RELAY_ADMINS`
+  value** (public keys only, one JSON array - the ONE static list a
+  platform deployment needs; a brand-new app-admin like `demo-app-admin`
+  needs no separate config at all, `registerApp()` discovers it live) for
+  YOU to paste into however you manage your deployment's environment -
+  `docker-compose.space-relay.yml` directly, your own `docker stack` file,
+  a Kubernetes manifest, systemd, whatever - then redeploy however you
+  already do (`docker compose up -d`, `docker stack deploy`, ...) and run
+  the SAME command again; or
 - the relay already has them (this second run, or any later one) →
   installs the admin console, creates a demo shell-app with its own CMS
   editor installed, registers both under `#/admin` and `#/demo`, and
@@ -153,7 +155,7 @@ if the relay acks it). Safe to re-run any time afterward too - every step
 checks first, never re-creates content that already exists.
 
 For a single, fixed app instead of a platform, set `QU_APP_ADMIN_PUB`
-directly (ignored once `QU_RELAY_ADMIN_PUB` - platform mode - is also
+directly (ignored once `QU_RELAY_ADMINS` - platform mode - is also
 set) - see the guide's own walkthrough.
 
 **Docker Swarm / `docker stack`:** `docker stack deploy` doesn't build

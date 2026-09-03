@@ -7,6 +7,7 @@ export {
   templateKind,
   styleKind,
   platformAppsKind,
+  PLATFORM_REGISTRY_ANCHOR,
   adminAppManifestKind,
   adminPageKind,
   adminTemplateKind,

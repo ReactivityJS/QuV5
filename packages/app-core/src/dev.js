@@ -27,12 +27,19 @@ import {
   templateKind,
   styleKind,
   platformAppsKind,
+  PLATFORM_REGISTRY_ANCHOR,
   adminAppManifestKind,
   adminPageKind,
   adminTemplateKind,
   adminStyleKind,
   ADMIN_REALM_ANCHOR,
 } from './kinds.js';
+
+/** The registry's own id never changes - see `platform.js`'s identically-reasoned `platformRegistryId()`, duplicated here (not imported) to keep this file's own dependency surface unchanged; both derive the SAME id from the SAME fixed anchor + Kind, so they always agree. */
+let platformRegistryIdPromise = null;
+function platformRegistryId() {
+  return (platformRegistryIdPromise ??= deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind));
+}
 
 /** Polls `checkFn` (may itself be async - `'atomic'`-shape fields' own `.get()` is a Promise, `'text'`-shape's is not, see field.js) until it returns truthy or `timeout` elapses - local here (not imported from resolver.js) so this file stays independent of that one; same shape as its own `waitFor()`. Used only by the `edit*()` functions below, to make sure a Node this Space hasn't seen before has actually finished syncing (its founding grant included - see kind-schema.js's own "THE 'content' ACL mode" doc comment) before writing to it. */
 async function waitForSync(checkFn, { timeout = 3000, interval = 20 } = {}) {
@@ -290,10 +297,14 @@ export async function installAppBundle(space, bundle) {
 }
 
 /**
- * Mounts an already-installed app under a URL path prefix, on THIS
- * identity's own platform registry (see kinds.js's `platformAppsKind`) -
- * writes as the RELAY-ADMIN, a role separate from any app's own app-admin
- * (docs §19-20): registering an app here grants it a routing slot only,
+ * Mounts an already-installed app under a URL path prefix, on the ONE
+ * global platform registry (see kinds.js's `platformAppsKind`) - writes as
+ * WHICHEVER relay-admin `space`'s own identity is (its `acl.write:
+ * 'relay-admins'` ACL accepts any identity `space` was itself constructed
+ * with in its own `relayAdmins` list - see `Space`'s own constructor doc
+ * comment - and, independently, that the RELAY was booted with the same
+ * identity in ITS `relayAdmins` list too; both must agree, same as any
+ * other ACL mode). Registering an app here grants it a routing slot only,
  * never write access to anything - the app's own content stays governed
  * entirely by its own `acl.write`/`grantWriter()`. See `platform.js`'s
  * `PlatformRuntime` for how a route gets resolved back through this. This
@@ -301,7 +312,7 @@ export async function installAppBundle(space, bundle) {
  * unregistered app is still reachable at its own owner id (see
  * `platform.js`'s own doc comment on the default, registration-free
  * routing fallback).
- * @param {import('@qu/space-core').Space} space - the relay-admin's own Space (the `qu-platform-apps` owner - the alias registry's writer, NOT necessarily an admin-realm member; see this file's own admin-realm functions below for that separate, confidential realm).
+ * @param {import('@qu/space-core').Space} space - a relay-admin's own Space (see this function's own doc comment above - NOT necessarily an admin-realm member; see this file's own admin-realm functions below for that separate, confidential realm).
  * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'admin'}} params
  *   `prefix` is matched against a route's FIRST path segment (no
  *   leading/trailing slash, e.g. `"forum"` for `#/forum/...`).
@@ -311,7 +322,7 @@ export async function installAppBundle(space, bundle) {
  *   own "THE ADMIN REALM" doc comment).
  */
 export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main' }) {
-  const id = await deriveOwnerNodeId(space.identity.signingPub, platformAppsKind.kind);
+  const id = await platformRegistryId();
   const node = space.getNode(id) ?? (await space.createNode(platformAppsKind, {}, { id }));
   await node.field('apps').push({ prefix, appAdminPub: appAdminPub ? QuCrypto.toBase64(appAdminPub) : null, name, realm });
   return node;

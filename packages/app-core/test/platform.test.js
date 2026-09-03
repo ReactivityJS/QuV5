@@ -34,17 +34,17 @@ test('a visitor resolves TWO independent apps mounted at different prefixes, thr
     { pub: visitor.signingPub, xPub: visitor.xPublicKey },
   ];
 
+  const relayAdmins = [relayAdmin.signingPub];
   const hub = createInProcessHub();
   const resolveKindSchema = await createAppResolveKindSchema({
     appAdminPubs: [forumAdmin.signingPub, calendarAdmin.signingPub],
-    relayAdminPub: relayAdmin.signingPub,
   });
-  createRelayForwarder({ hub, members, resolveKindSchema, storage: createMemoryStore() });
+  createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema, storage: createMemoryStore() });
 
   async function connect(identity, peerId) {
     const transport = new InProcessTransport(hub, peerId);
     await transport.connect();
-    return new Space({ identity, members, transport });
+    return new Space({ identity, members, relayAdmins, transport });
   }
 
   const relayAdminSpace = await connect(relayAdmin, 'relay-admin');
@@ -63,7 +63,7 @@ test('a visitor resolves TWO independent apps mounted at different prefixes, thr
   await registerApp(relayAdminSpace, { prefix: 'forum', appAdminPub: forumAdmin.signingPub, name: 'Forum' });
   await registerApp(relayAdminSpace, { prefix: 'calendar', appAdminPub: calendarAdmin.signingPub, name: 'Kalender' });
 
-  const platform = new PlatformRuntime(visitorSpace, { relayAdminPub: relayAdmin.signingPub });
+  const platform = new PlatformRuntime(visitorSpace);
 
   const forumMatch = await platform.resolveForPath('/forum/');
   assert.equal(forumMatch.name, 'Forum');
@@ -91,19 +91,20 @@ test('resolveForPath() splits a nested route into (prefix, subPath) correctly', 
     { pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey },
     { pub: visitor.signingPub, xPub: visitor.xPublicKey },
   ];
+  const relayAdmins = [relayAdmin.signingPub];
   const hub = createInProcessHub();
-  const resolveKindSchema = await createAppResolveKindSchema({ relayAdminPub: relayAdmin.signingPub });
-  createRelayForwarder({ hub, members, resolveKindSchema, storage: createMemoryStore() });
+  const resolveKindSchema = await createAppResolveKindSchema();
+  createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema, storage: createMemoryStore() });
 
   const relayAdminTransport = new InProcessTransport(hub, 'relay-admin');
   await relayAdminTransport.connect();
-  const relayAdminSpace = new Space({ identity: relayAdmin, members, transport: relayAdminTransport });
+  const relayAdminSpace = new Space({ identity: relayAdmin, members, relayAdmins, transport: relayAdminTransport });
   await registerApp(relayAdminSpace, { prefix: 'forum', appAdminPub: appAdmin.signingPub, name: 'Forum' });
 
   const visitorTransport = new InProcessTransport(hub, 'visitor');
   await visitorTransport.connect();
-  const visitorSpace = new Space({ identity: visitor, members, transport: visitorTransport });
-  const platform = new PlatformRuntime(visitorSpace, { relayAdminPub: relayAdmin.signingPub });
+  const visitorSpace = new Space({ identity: visitor, members, relayAdmins, transport: visitorTransport });
+  const platform = new PlatformRuntime(visitorSpace);
 
   const match = await platform.resolveForPath('/forum/topic/123');
   assert.equal(match.prefix, 'forum');

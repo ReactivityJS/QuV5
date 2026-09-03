@@ -61,7 +61,7 @@
  *   QU_APP_ADMIN_PUB  - Base64 Ed25519 pubkey of the app-admin identity
  *                        whose `qu-app` Manifest this Shell loads (see
  *                        `@qu/app-core`'s `kinds.js`) - SINGLE-APP mode.
- *                        Ignored if `QU_RELAY_ADMIN_PUB` is also set (see
+ *                        Ignored if `QU_RELAY_ADMINS` is also set (see
  *                        below). Without either, the relay still starts
  *                        (never a hard failure - an operator should be able
  *                        to stand up the relay FIRST, decide/generate the
@@ -69,32 +69,38 @@
  *                        `relay-server.js` takes with `QU_MEMBERS_JSON`) but
  *                        serves a plain setup page instead of booting any
  *                        app - see `build.mjs`'s `renderIndexHtml()`.
- *   QU_RELAY_ADMIN_PUB - Base64 Ed25519 pubkey of the identity that OWNS
- *                        the `qu-platform-apps` alias registry (docs
- *                        §19-21) - PLATFORM mode: takes priority over
- *                        `QU_APP_ADMIN_PUB`. This identity can register
- *                        path-prefix aliases for any already-installed app
- *                        (`registerApp()`), including the built-in admin
- *                        realm's own console under whatever prefix the
- *                        bootstrap installer chose (conventionally
- *                        `"admin"` - see "ADMIN REALM" below). Each
- *                        ORDINARY (non-admin-realm) app-admin's OWN pubkey
- *                        separately needs to be added to `QU_APP_ADMIN_PUBS`
- *                        below and the relay restarted - registering the
- *                        app-admin PUBKEY there is what grants their
- *                        write-ACL; a `qu-platform-apps` registration here
- *                        only maps a path prefix to a pubkey the relay is
- *                        already willing to trust.
- *   QU_APP_ADMIN_PUBS - OPTIONAL, PLATFORM mode only. JSON array of base64
- *                        Ed25519 pubkeys - every ORDINARY app-admin identity
- *                        this relay should accept `qu-app`/
- *                        `qu-route-registry`/content writes from (see
- *                        `@qu/app-core`'s `createAppResolveKindSchema()`
- *                        doc comment on why this has to be a STATIC,
- *                        boot-time list rather than live-discovered from
- *                        the relay-admin's own `qu-platform-apps`
- *                        registry). Irrelevant to the admin realm itself
- *                        (see `QU_RELAY_ADMIN_MEMBERS_JSON` below).
+ *   QU_RELAY_ADMINS   - JSON array of `{pub, xPub}` (base64) - PLATFORM
+ *                        mode (takes priority over `QU_APP_ADMIN_PUB`): the
+ *                        ONE static, boot-time-configured list this whole
+ *                        deployment needs. Every listed identity, equally
+ *                        and symmetrically (no single distinguished
+ *                        "owner"), may:
+ *                          (a) write `qu-platform-apps` - register/manage
+ *                              path-prefix aliases for any already-
+ *                              installed app (`registerApp()`), including
+ *                              the built-in admin realm's own console
+ *                              under whatever prefix the bootstrap
+ *                              installer chose (conventionally `"admin"` -
+ *                              see "ADMIN REALM" below) - see
+ *                              `@qu/app-core`'s `kinds.js` own doc comment
+ *                              on `platformAppsKind`'s `'relay-admins'`
+ *                              ACL mode, and
+ *                          (b) read/write the confidential admin realm's
+ *                              own content (`acl.write: 'members'` there,
+ *                              checked against exactly this SAME list -
+ *                              see "ADMIN REALM" below) - `xPub` matters
+ *                              for THIS half only (encryption recipients),
+ *                              (a) only ever needs the signing `pub`.
+ *                        Registering an ORDINARY (non-relay-admin)
+ *                        app-admin needs NO separate static list and NO
+ *                        relay restart any more: any configured relay-admin
+ *                        simply calls `registerApp()` (e.g. through the
+ *                        built-in admin console) with that app-admin's
+ *                        pubkey - this relay watches `qu-platform-apps`
+ *                        itself (`@qu/app-shell`'s own
+ *                        `live-app-resolver.js`) and reclassifies their
+ *                        `qu-app`/registry Nodes automatically, typically
+ *                        within the time one ordinary write takes to sync.
  *   QU_MEMBERS_JSON   - OPTIONAL. Same shape as `relay-server.js`'s own -
  *                        pre-authorize `'members'`-mode writers on the
  *                        MAIN, public Space. The app-admin identity itself
@@ -116,8 +122,9 @@
  * ADMIN REALM (architecture.md §7's "The Platform layer", revised - a
  * genuinely CONFIDENTIAL counterpart to the ordinary, `QU_ALLOW_JOIN`-
  * open MAIN Space above, not just a UI-gated view of it): a wholly SEPARATE
- * relay-forwarder instance, its own flat `members` list, multiplexed onto
- * this SAME HTTP server/port at a distinct WebSocket path (`/admin-ws`, via
+ * relay-forwarder instance, its own flat `members` list (the SAME
+ * `QU_RELAY_ADMINS` list above), multiplexed onto this SAME HTTP
+ * server/port at a distinct WebSocket path (`/admin-ws`, via
  * `WebSocketServer({noServer:true})` + manual `httpServer.on('upgrade', …)`
  * routing by `req.url` - `@qu/space-transport`'s `createWsServerHub()`
  * itself needs no change, it only ever needed an already-constructed
@@ -129,21 +136,22 @@
  * relay never holds an X25519 private key - see `@qu/space-core`'s
  * envelope.js). No `QU_ALLOW_JOIN`-equivalent exists for it - admin
  * membership is ALWAYS a static, boot-time list, the same operational
- * posture `QU_MEMBERS_JSON`/`QU_APP_ADMIN_PUBS` above already take, just
- * with no opt-in self-registration path at all (an admin realm that let
- * anyone self-join would defeat its entire point).
+ * posture `QU_MEMBERS_JSON` above already takes, just with no opt-in
+ * self-registration path at all (an admin realm that let anyone self-join
+ * would defeat its entire point). Empty/unset `QU_RELAY_ADMINS` means the
+ * admin realm still starts (so it CAN be bootstrapped - see
+ * `bin/install-admin-console.mjs`) but nobody can decrypt anything written
+ * to it yet, and nobody can write `qu-platform-apps` either.
  *
- *   QU_RELAY_ADMIN_MEMBERS_JSON - OPTIONAL. JSON array of
- *                        `{pub, xPub}` (base64) - every identity trusted as
- *                        an admin (able to read/write the admin realm's own
- *                        content - `acl.write: 'members'` there means ANY
- *                        member manages it, there is no single "owner",
- *                        see kinds.js's own doc comment). Empty/unset means
- *                        the admin realm still starts (so it CAN be
- *                        bootstrapped - see `bin/install-admin-console.mjs`)
- *                        but nobody can decrypt anything written to it yet;
- *                        add the bootstrapping identity's `{pub, xPub}`
- *                        here before running that installer.
+ * `GET /relay-admins.json` (unauthenticated, like `/members.json`) serves
+ * the SAME list's `pub`s only (never `xPub` - the MAIN Space's own content
+ * here is `'public'`-visibility, so no encryption recipient is needed) -
+ * `@qu/app-shell`'s `shell.js` fetches it in PLATFORM mode to construct its
+ * own `Space` with a matching `relayAdmins` list, so an ordinary visitor's
+ * client can independently verify `qu-platform-apps` writes itself, never
+ * just trusting this relay's own say-so (see `Space`'s own `relayAdmins`
+ * constructor doc comment - the same "never trust the relay" posture
+ * `members`/`/members.json` already establish).
  */
 import { createServer } from 'node:http';
 import { writeFile } from 'node:fs/promises';
@@ -155,6 +163,7 @@ import { EventBus } from '@qu/events';
 import { createFileStore } from '@qu/space-storage';
 import { createWsServerHub, createRelayForwarder, createAppRequestHandler } from '@qu/space-transport';
 import { createAppResolveKindSchema, createAdminResolveKindSchema } from '@qu/app-core';
+import { createLiveAppResolveKindSchema } from './src/live-app-resolver.js';
 import { buildAppShellBundle, renderIndexHtml } from './build.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -162,9 +171,7 @@ const PORT = Number(process.env.QU_RELAY_PORT || 8081);
 const DATA_DIR = process.env.QU_RELAY_DATA_DIR ?? '/data';
 const ALLOW_JOIN = process.env.QU_ALLOW_JOIN !== 'false';
 const APP_ADMIN_PUB_B64 = process.env.QU_APP_ADMIN_PUB || null;
-const RELAY_ADMIN_PUB_B64 = process.env.QU_RELAY_ADMIN_PUB || null;
-const APP_ADMIN_PUBS_JSON = process.env.QU_APP_ADMIN_PUBS || null;
-const RELAY_ADMIN_MEMBERS_JSON = process.env.QU_RELAY_ADMIN_MEMBERS_JSON || null;
+const RELAY_ADMINS_JSON = process.env.QU_RELAY_ADMINS || null;
 const WEB_DIR = join(HERE, 'dist-web');
 const ADMIN_WS_PATH = '/admin-ws';
 
@@ -180,8 +187,12 @@ function parseMembersJson(label, json) {
 let members = [];
 if (process.env.QU_MEMBERS_JSON) members = parseMembersJson('QU_MEMBERS_JSON', process.env.QU_MEMBERS_JSON);
 
-let adminMembers = [];
-if (RELAY_ADMIN_MEMBERS_JSON) adminMembers = parseMembersJson('QU_RELAY_ADMIN_MEMBERS_JSON', RELAY_ADMIN_MEMBERS_JSON);
+// The ONE static list this deployment needs beyond QU_MEMBERS_JSON/QU_APP_ADMIN_PUB - doubles as the
+// admin realm's own `members` (encryption + 'members'-ACL) AND the main Space's `relay-admins`
+// write-ACL list (signing pubkeys only - see this file's own top doc comment).
+let relayAdmins = [];
+if (RELAY_ADMINS_JSON) relayAdmins = parseMembersJson('QU_RELAY_ADMINS', RELAY_ADMINS_JSON);
+const relayAdminPubs = relayAdmins.map((m) => m.pub);
 
 function parsePub(label, b64) {
   try {
@@ -196,54 +207,55 @@ function parsePub(label, b64) {
 
 async function main() {
   const appAdminPub = APP_ADMIN_PUB_B64 ? parsePub('QU_APP_ADMIN_PUB', APP_ADMIN_PUB_B64) : null;
-  const relayAdminPub = RELAY_ADMIN_PUB_B64 ? parsePub('QU_RELAY_ADMIN_PUB', RELAY_ADMIN_PUB_B64) : null;
-
-  let appAdminPubs = [];
-  if (APP_ADMIN_PUBS_JSON) {
-    try {
-      appAdminPubs = JSON.parse(APP_ADMIN_PUBS_JSON).map((b64) => parsePub('QU_APP_ADMIN_PUBS', b64));
-    } catch (err) {
-      console.error('[qu-app-shell-relay] QU_APP_ADMIN_PUBS is not valid JSON:', err.message);
-      process.exit(1);
-    }
-  }
+  const platformMode = relayAdminPubs.length > 0; // priority over QU_APP_ADMIN_PUB - see build.mjs's own doc comment.
 
   console.log('[qu-app-shell-relay] bundling @qu/app-shell…');
   // createAppRequestHandler()'s STATIC_FILES map (@qu/space-transport's relay-app-server.js) always
   // serves /bundle.js from "<webDir>/dist/bundle.js" - the SAME convention demo/web/'s own build
   // uses - so the bundle goes under WEB_DIR/dist, not WEB_DIR itself.
   const { outfile } = await buildAppShellBundle({ outDir: join(WEB_DIR, 'dist') });
-  await writeFile(join(WEB_DIR, 'index.html'), renderIndexHtml({ appAdminPub, relayAdminPub }), 'utf8');
+  await writeFile(join(WEB_DIR, 'index.html'), renderIndexHtml({ appAdminPub, platformMode }), 'utf8');
   console.log(`[qu-app-shell-relay] bundled -> ${outfile}`);
-  if (!appAdminPub && !relayAdminPub) {
+  if (!appAdminPub && !platformMode) {
     console.warn(
-      '[qu-app-shell-relay] neither QU_APP_ADMIN_PUB nor QU_RELAY_ADMIN_PUB is set - serving a setup page instead of an app. See this file\'s own doc comment.'
+      '[qu-app-shell-relay] neither QU_APP_ADMIN_PUB nor QU_RELAY_ADMINS is set - serving a setup page instead of an app. See this file\'s own doc comment.'
     );
   }
 
   const storage = DATA_DIR ? createFileStore(DATA_DIR) : null;
   const bus = new EventBus();
-  const resolveKindSchema =
-    appAdminPub || relayAdminPub || appAdminPubs.length > 0
-      ? await createAppResolveKindSchema({ appAdminPub, appAdminPubs, relayAdminPub })
-      : () => true;
 
   const httpServer = createServer((req, res) => handleRequest(req, res));
 
   // MAIN hub - the ordinary, open-join Space (unchanged from before the admin realm existed).
   const mainWss = new WebSocketServer({ noServer: true, perMessageDeflate: true });
   const mainHub = createWsServerHub(mainWss);
-  const relay = createRelayForwarder({ hub: mainHub, members, resolveKindSchema, storage, bus });
+
+  // In PLATFORM mode, `qu-platform-apps` (now a 'relay-admins'-ACL registry - kinds.js's own doc
+  // comment) is watched LIVE by this relay itself (@qu/app-shell's own live-app-resolver.js) - a
+  // relay-admin registering a brand-new app-admin (registerApp()) is enough, no separate STATIC
+  // app-admin list, no restart. In single-app mode, the ordinary static resolver is enough - there
+  // is exactly one app-admin, known from boot, nothing to watch.
+  const liveResolver = platformMode ? createLiveAppResolveKindSchema() : null;
+  const resolveKindSchema = platformMode
+    ? liveResolver.resolveKindSchema
+    : appAdminPub
+      ? await createAppResolveKindSchema({ appAdminPub })
+      : () => true;
+
+  const relay = createRelayForwarder({ hub: mainHub, members, relayAdmins: relayAdminPubs, resolveKindSchema, storage, bus });
+  if (liveResolver) await liveResolver.start({ hub: mainHub, relayAdmins: relayAdminPubs }); // AFTER createRelayForwarder() - see live-app-resolver.js's own "ORDERING" doc comment.
   const handleAppRequest = createAppRequestHandler({ webDir: WEB_DIR, members, relay, allowJoin: ALLOW_JOIN, log: console.log });
 
-  // ADMIN hub - a wholly separate Space/relay-forwarder, its OWN flat `adminMembers` list, never
-  // open-join (no /admin-join endpoint - see this file's own "ADMIN REALM" doc comment), reached at
-  // a distinct WS path on the SAME port via manual upgrade routing below.
+  // ADMIN hub - a wholly separate Space/relay-forwarder, its OWN flat `relayAdmins` list (the SAME
+  // QU_RELAY_ADMINS list above), never open-join (no /admin-join endpoint - see this file's own
+  // "ADMIN REALM" doc comment), reached at a distinct WS path on the SAME port via manual upgrade
+  // routing below.
   const adminWss = new WebSocketServer({ noServer: true, perMessageDeflate: true });
   const adminHub = createWsServerHub(adminWss);
   const adminStorage = DATA_DIR ? createFileStore(join(DATA_DIR, 'admin-realm')) : null;
   const adminResolveKindSchema = await createAdminResolveKindSchema();
-  createRelayForwarder({ hub: adminHub, members: adminMembers, resolveKindSchema: adminResolveKindSchema, storage: adminStorage, bus: new EventBus() });
+  createRelayForwarder({ hub: adminHub, members: relayAdmins, resolveKindSchema: adminResolveKindSchema, storage: adminStorage, bus: new EventBus() });
 
   httpServer.on('upgrade', (req, socket, head) => {
     const wss = req.url === ADMIN_WS_PATH ? adminWss : mainWss;
@@ -257,7 +269,15 @@ async function main() {
       return;
     }
     if (req.method === 'GET' && req.url === '/admin-members.json') {
-      const list = adminMembers.map((m) => ({ pub: QuCrypto.toBase64(m.pub), xPub: QuCrypto.toBase64(m.xPub) }));
+      const list = relayAdmins.map((m) => ({ pub: QuCrypto.toBase64(m.pub), xPub: QuCrypto.toBase64(m.xPub) }));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(list));
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/relay-admins.json') {
+      // Signing pubkeys only, never xPub - see this file's own top doc comment on why the MAIN
+      // Space's own `relayAdmins` write-ACL check never needs an encryption recipient.
+      const list = relayAdminPubs.map((pub) => QuCrypto.toBase64(pub));
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(list));
       return;
@@ -269,14 +289,14 @@ async function main() {
 
   httpServer.listen(PORT, () => {
     const mirrorNote = storage ? `mirroring to ${DATA_DIR}` : 'NO mirroring (live-only, QU_RELAY_DATA_DIR is empty)';
-    const appNote = relayAdminPub
-      ? `PLATFORM mode, relay-admin ${RELAY_ADMIN_PUB_B64}, ${appAdminPubs.length} known app-admin(s), ${adminMembers.length} admin-realm member(s)`
+    const appNote = platformMode
+      ? `PLATFORM mode, ${relayAdmins.length} relay-admin(s)`
       : appAdminPub
         ? `serving app-admin ${APP_ADMIN_PUB_B64}`
-        : 'NO app configured (QU_APP_ADMIN_PUB / QU_RELAY_ADMIN_PUB unset - see /)';
+        : 'NO app configured (QU_APP_ADMIN_PUB / QU_RELAY_ADMINS unset - see /)';
     console.log(`[qu-app-shell-relay] listening on :${PORT} - ${appNote}, ${mirrorNote}`);
     console.log(`[qu-app-shell-relay] open http://localhost:${PORT}/ in a browser - join is ${ALLOW_JOIN ? 'OPEN to anyone (QU_ALLOW_JOIN=false to lock it down)' : 'DISABLED (QU_ALLOW_JOIN=false)'}`);
-    console.log(`[qu-app-shell-relay] admin realm WS at ${ADMIN_WS_PATH} - membership is static (QU_RELAY_ADMIN_MEMBERS_JSON), no self-join.`);
+    console.log(`[qu-app-shell-relay] admin realm WS at ${ADMIN_WS_PATH} - membership is static (QU_RELAY_ADMINS), no self-join.`);
   });
 }
 

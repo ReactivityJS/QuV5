@@ -591,11 +591,12 @@ so however that config reaches your relay and gets it recreated with it
 is entirely up to you). It generates a `relay-admin` and a
 `demo-app-admin` identity locally (once, reused on every later run), then:
 
-- relay not yet configured with them → **prints the exact
-  `QU_RELAY_ADMIN_PUB`/`QU_APP_ADMIN_PUBS`/`QU_RELAY_ADMIN_MEMBERS_JSON`
-  values** — paste them into `docker-compose.space-relay.yml` (or your own
-  `docker stack`/Kubernetes/systemd config) yourself, redeploy, then run
-  the exact same command again;
+- relay not yet configured → **prints the exact `QU_RELAY_ADMINS` value**
+  (the ONE static list a platform deployment needs — `demo-app-admin`
+  needs no separate config at all, `registerApp()` alone makes it
+  discoverable live) — paste it into `docker-compose.space-relay.yml` (or
+  your own `docker stack`/Kubernetes/systemd config) yourself, redeploy,
+  then run the exact same command again;
 - relay already configured with them (this second run, or any later one)
   → installs the admin console, creates a demo shell-app with its own CMS
   editor installed, registers both `#/admin` and `#/demo`, and prints the
@@ -690,26 +691,27 @@ how it's wired.
 NOW THE DEFAULT)** — `bootstrap:platform` above already does everything
 below in one command; read on if you want to do it by hand or understand
 what it's actually doing. Instead of one fixed `QU_APP_ADMIN_PUB`, set
-`QU_RELAY_ADMIN_PUB` (takes priority when both are set) — see
-architecture.md §7's "The Platform layer" for the full model. An app-admin
-the relay should accept ORDINARY content writes from still needs a
-STATIC, boot-time `QU_APP_ADMIN_PUBS` entry (a JSON array); an identity
-trusted to manage the built-in admin console needs a
-`QU_RELAY_ADMIN_MEMBERS_JSON` entry instead (a SEPARATE, genuinely
-confidential Space — its own `{pub, xPub}` list, never just a write-ACL
-grant):
+`QU_RELAY_ADMINS` (takes priority when both are set) — see
+architecture.md §7's "The Platform layer" for the full model, and
+`@qu/space-core`'s kind-schema.js own doc comment for the `'relay-admins'`
+ACL mode this rests on. `QU_RELAY_ADMINS` is a JSON array of `{pub, xPub}`
+(base64) — every relay-admin identity, all equally and symmetrically (no
+single "owner"), authorized to (a) write `qu-platform-apps` (register/
+manage apps under path prefixes) and (b) read/write the confidential admin
+realm's own content. This is the ONE static list PLATFORM mode needs — an
+ORDINARY app-admin needs NO separate static entry any more: any configured
+relay-admin simply `registerApp()`s their pubkey, and this relay discovers
+them live (`@qu/app-shell`'s own `live-app-resolver.js`), no restart:
 
 ```sh
 docker run -d -p 8081:8081 \
-  -e QU_RELAY_ADMIN_PUB='<base64 relay-admin pubkey>' \
-  -e QU_APP_ADMIN_PUBS='["<base64 app-admin pubkey 1>","<base64 app-admin pubkey 2>"]' \
-  -e QU_RELAY_ADMIN_MEMBERS_JSON='[{"pub":"<base64>","xPub":"<base64>"}]' \
+  -e QU_RELAY_ADMINS='[{"pub":"<base64 relay-admin pubkey>","xPub":"<base64 relay-admin xPub>"}]' \
   -v qu-app-shell-relay-data:/data \
   qu-app-shell-relay
 ```
 
 Bootstrap the built-in admin console ONCE (a real, separate process, run by
-whoever holds the identity listed in `QU_RELAY_ADMIN_MEMBERS_JSON` above —
+whoever holds an identity listed in `QU_RELAY_ADMINS` above —
 its private key never touches the relay):
 
 ```sh
@@ -728,7 +730,7 @@ app's own content still needs to be installed separately by whoever holds
 that app-admin's private key, e.g. via `installAppBundle()` (`@qu/app-core`'s
 Dev API) from your own script, the same way `demo/install-app-shell-demo.mjs`
 seeds a single app today. A visitor who is NOT in
-`QU_RELAY_ADMIN_MEMBERS_JSON` sees only a plain "not found" at `#/admin` —
+`QU_RELAY_ADMINS` sees only a plain "not found" at `#/admin` —
 the admin realm's content is genuinely `'encrypted'`-visibility, sealed for
 that member list alone, not merely hidden by the console's own UI.
 

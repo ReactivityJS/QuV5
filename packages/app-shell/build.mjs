@@ -8,17 +8,23 @@
  *     `demo/web/build.mjs` bundles the chat demo's `main.js` - see that
  *     file's own doc comment on why that avoids needing a bundler in the
  *     runtime image).
- *   - `renderIndexHtml({appAdminPub, relayAdminPub})` — a pure string
+ *   - `renderIndexHtml({appAdminPub, platformMode})` — a pure string
  *     template, no I/O. THIS piece is inherently PER-DEPLOYMENT (it embeds
  *     one specific identity's pubkey into `<qu-app-shell app-admin-pub="...">`
- *     or `<qu-app-shell relay-admin-pub="...">`, docs §5/§19-21) - it has to
- *     run at BOOT time from whatever pubkey THIS deployment is configured
- *     with, never baked into a shared image ahead of time. `relayAdminPub`
- *     takes priority over `appAdminPub` when both are set (a platform
- *     deployment, `startPlatform()`, serves however many apps its
- *     `qu-platform-apps` registry lists - see `shell.js`'s own doc comment
- *     on the same priority). Neither set renders a plain SETUP page instead
- *     - "an empty App Shell" (docs §3/§32) needs to say so on the page, not
+ *     or a bare `<qu-app-shell relay-admin-pub>` platform marker, docs
+ *     §5/§19-21) - it has to run at BOOT time from whatever THIS deployment
+ *     is configured with, never baked into a shared image ahead of time.
+ *     `platformMode` takes priority over `appAdminPub` when both are given
+ *     (a platform deployment, `startPlatform()`, serves however many apps
+ *     its `qu-platform-apps` registry lists - see `shell.js`'s own doc
+ *     comment on the same priority). `relay-admin-pub`'s VALUE carries no
+ *     meaning any more (`platformAppsKind` is now `'relay-admins'`-ACL,
+ *     checked against the boot-time `QU_RELAY_ADMINS` list, never against
+ *     one distinguished pubkey embedded in this markup - see
+ *     `@qu/app-core`'s `kinds.js` own doc comment) - the attribute's mere
+ *     PRESENCE is what `shell.js` reads, to decide `startPlatform()` vs
+ *     `startApp()`. Neither set renders a plain SETUP page instead - "an
+ *     empty App Shell" (docs §3/§32) needs to say so on the page, not
  *     silently serve a shell that can never resolve a manifest.
  *
  * Used by two callers: `demo/app-shell-web/build.mjs` (the in-repo demo,
@@ -49,9 +55,9 @@ export async function buildAppShellBundle({ outDir = join(here, 'dist') } = {}) 
   return { outfile };
 }
 
-/** @param {{appAdminPub?: Uint8Array|null, relayAdminPub?: Uint8Array|null}} params @returns {string} full `index.html` markup. */
-export function renderIndexHtml({ appAdminPub = null, relayAdminPub = null } = {}) {
-  if (!appAdminPub && !relayAdminPub) {
+/** @param {{appAdminPub?: Uint8Array|null, platformMode?: boolean}} params @returns {string} full `index.html` markup. */
+export function renderIndexHtml({ appAdminPub = null, platformMode = false } = {}) {
+  if (!appAdminPub && !platformMode) {
     return `<!doctype html>
 <html lang="de">
   <head>
@@ -62,7 +68,7 @@ export function renderIndexHtml({ appAdminPub = null, relayAdminPub = null } = {
     <h1>Qu App Shell</h1>
     <p>Dieser Relay liefert die App Shell aus, aber es ist noch keine Anwendung
       und kein Relay-Admin zugeordnet (weder <code>QU_APP_ADMIN_PUB</code> noch
-      <code>QU_RELAY_ADMIN_PUB</code> ist gesetzt).</p>
+      <code>QU_RELAY_ADMINS</code> ist gesetzt).</p>
 
     <h2>Deine Browser-Identity</h2>
     <p>Diese Seite lädt bereits die App-Shell-Bundle (<code>/bundle.js</code>) und
@@ -71,9 +77,8 @@ export function renderIndexHtml({ appAdminPub = null, relayAdminPub = null } = {
       späterer Besuch als Visitor sowieso schon nutzt. Der private Schlüssel bleibt
       ausschließlich in <code>localStorage</code> dieses Browsers - dieser Relay
       bekommt ihn nie zu sehen.</p>
-    <p>Signing-Pubkey (für <code>QU_APP_ADMIN_PUB</code> / <code>QU_RELAY_ADMIN_PUB</code> /
-      <code>QU_APP_ADMIN_PUBS</code>): <code data-qu-pub>lädt…</code></p>
-    <p>X25519-Pubkey (für <code>QU_MEMBERS_JSON</code> / <code>QU_RELAY_ADMIN_MEMBERS_JSON</code>,
+    <p>Signing-Pubkey (für <code>QU_APP_ADMIN_PUB</code>): <code data-qu-pub>lädt…</code></p>
+    <p>X25519-Pubkey (für <code>QU_MEMBERS_JSON</code>/<code>QU_RELAY_ADMINS</code>,
       jeweils als <code>{"pub":"…","xPub":"…"}</code>): <code data-qu-xpub>lädt…</code></p>
     <p>Für Skripte/die Konsole steht <code>window.Qu</code> bereit -
       <code>Qu.pub</code>/<code>Qu.xPub</code> (bereits oben angezeigt),
@@ -85,19 +90,21 @@ export function renderIndexHtml({ appAdminPub = null, relayAdminPub = null } = {
     <h2>Nächste Schritte</h2>
     <ol>
       <li>Am schnellsten: <pre>npm run bootstrap:platform</pre> - erzeugt eine EIGENE
-        (server-seitige) Identity und gibt beim ersten Lauf die nötigen
-        <code>QU_RELAY_ADMIN_PUB</code>/<code>QU_APP_ADMIN_PUBS</code>/
-        <code>QU_RELAY_ADMIN_MEMBERS_JSON</code>-Werte zum Einfügen in DEINE
+        (server-seitige) Identity und gibt beim ersten Lauf den nötigen
+        <code>QU_RELAY_ADMINS</code>-Wert zum Einfügen in DEINE
         Deployment-Config aus (egal ob Compose, <code>docker stack</code>,
         Kubernetes, ...) - schreibt selbst nichts. Nach dem Neu-Deployen mit
-        diesen Werten installiert ein zweiter Lauf Admin-Konsole + eine
+        diesem Wert installiert ein zweiter Lauf Admin-Konsole + eine
         CMS-verwaltete Demo-Shell-App. Siehe
         <code>packages/app-shell/bin/bootstrap-platform.mjs</code>.</li>
       <li>Von Hand, mit DEINER Browser-Identity von oben: für EINE einzelne App setze
         deren Pubkey als <code>QU_APP_ADMIN_PUB</code>. Für eine PLATTFORM aus mehreren
-        Apps unter Pfad-Präfixen: setze stattdessen <code>QU_RELAY_ADMIN_PUB</code>
-        (und ggf. <code>QU_APP_ADMIN_PUBS</code>/<code>QU_RELAY_ADMIN_MEMBERS_JSON</code>) -
-        siehe <code>architecture.md</code> §7. Danach den Relay neu starten.</li>
+        Apps unter Pfad-Präfixen: setze stattdessen <code>QU_RELAY_ADMINS</code> (ein
+        JSON-Array von <code>{"pub":"…","xPub":"…"}</code>, ein Eintrag pro Relay-Admin) -
+        siehe <code>architecture.md</code> §7. Jeder gelistete Relay-Admin kann anschließend
+        (z.B. über die eingebaute <code>#/admin</code>-Konsole) weitere Apps registrieren,
+        ganz ohne weiteren Relay-Neustart. Danach den Relay neu starten (nur für diesen
+        allerersten <code>QU_RELAY_ADMINS</code>-Wert nötig).</li>
       <li>EINZELNE App: installiere sie aus einem separaten Prozess, der den
         privaten Schlüssel hält:
         <pre>node demo/install-app-shell-demo.mjs --relay wss://&lt;dieser-host&gt; --dir &lt;pfad-zu-deiner-app-admin-identity&gt;</pre>
@@ -115,9 +122,7 @@ export function renderIndexHtml({ appAdminPub = null, relayAdminPub = null } = {
 </html>
 `;
   }
-  const rootAttr = relayAdminPub
-    ? `relay-admin-pub="${QuCrypto.toBase64(relayAdminPub)}"`
-    : `app-admin-pub="${QuCrypto.toBase64(appAdminPub)}"`;
+  const rootAttr = platformMode ? 'relay-admin-pub' : `app-admin-pub="${QuCrypto.toBase64(appAdminPub)}"`;
   return `<!doctype html>
 <html lang="de">
   <head>

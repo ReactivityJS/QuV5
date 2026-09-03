@@ -26,6 +26,7 @@ import {
   createAppResolveKindSchema,
   createAdminResolveKindSchema,
   platformAppsKind,
+  PLATFORM_REGISTRY_ANCHOR,
 } from '@qu/app-core';
 import { startPlatform } from '../src/boot.js';
 import { adminConsoleBundle } from '../admin-console-bundle.js';
@@ -56,17 +57,17 @@ test('startPlatform() resolves a REGISTERED app by alias, an UNREGISTERED app by
     { pub: visitor.signingPub, xPub: visitor.xPublicKey },
   ];
 
+  const relayAdmins = [relayAdmin.signingPub];
   const hub = createInProcessHub();
   const resolveKindSchema = await createAppResolveKindSchema({
     appAdminPubs: [forumAdmin.signingPub, soloAdmin.signingPub],
-    relayAdminPub: relayAdmin.signingPub,
   });
-  createRelayForwarder({ hub, members, resolveKindSchema, storage: createMemoryStore() });
+  createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema, storage: createMemoryStore() });
 
   async function connect(identity, peerId) {
     const transport = new InProcessTransport(hub, peerId);
     await transport.connect();
-    return new Space({ identity, members, transport });
+    return new Space({ identity, members, relayAdmins, transport });
   }
 
   const relayAdminSpace = await connect(relayAdmin, 'relay-admin');
@@ -85,7 +86,7 @@ test('startPlatform() resolves a REGISTERED app by alias, an UNREGISTERED app by
 
   const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/' });
   const mountEl = window.document.querySelector('qu-app-shell');
-  const { router } = startPlatform({ space: visitorSpace, relayAdminPub: relayAdmin.signingPub, mountEl, window, resolveTimeout: 500 });
+  const { router } = startPlatform({ space: visitorSpace, mountEl, window, resolveTimeout: 500 });
 
   router.navigate('/forum/');
   await waitUntil(() => mountEl.innerHTML.includes('Willkommen im Forum'));
@@ -112,9 +113,10 @@ test('the built-in admin console is genuine installed content in a separate, con
   ];
   const adminMembers = [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }]; // outsider is NOT an admin-realm member.
 
+  const relayAdmins = [relayAdmin.signingPub];
   const mainHub = createInProcessHub();
-  const mainResolveKindSchema = await createAppResolveKindSchema({ relayAdminPub: relayAdmin.signingPub });
-  createRelayForwarder({ hub: mainHub, members: mainMembers, resolveKindSchema: mainResolveKindSchema, storage: createMemoryStore() });
+  const mainResolveKindSchema = await createAppResolveKindSchema();
+  createRelayForwarder({ hub: mainHub, members: mainMembers, relayAdmins, resolveKindSchema: mainResolveKindSchema, storage: createMemoryStore() });
 
   const adminHub = createInProcessHub();
   const adminResolveKindSchema = await createAdminResolveKindSchema();
@@ -123,7 +125,7 @@ test('the built-in admin console is genuine installed content in a separate, con
   async function connectMain(identity, peerId) {
     const transport = new InProcessTransport(mainHub, peerId);
     await transport.connect();
-    return new Space({ identity, members: mainMembers, transport });
+    return new Space({ identity, members: mainMembers, relayAdmins, transport });
   }
   async function connectAdmin(identity, peerId) {
     const transport = new InProcessTransport(adminHub, peerId);
@@ -148,7 +150,6 @@ test('the built-in admin console is genuine installed content in a separate, con
     const mainSpace = await connectMain(relayAdmin, 'relay-admin-visit');
     const { router } = startPlatform({
       space: mainSpace,
-      relayAdminPub: relayAdmin.signingPub,
       connectAdminSpace: () => connectAdmin(relayAdmin, 'relay-admin-visit-admin'),
       mountEl,
       window,
@@ -166,7 +167,7 @@ test('the built-in admin console is genuine installed content in a separate, con
 
     await new Promise((resolve) => setTimeout(resolve, 300)); // let the write actually leave and land.
 
-    const platformNodeId = await deriveOwnerNodeId(relayAdmin.signingPub, platformAppsKind.kind);
+    const platformNodeId = await deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind);
     const apps = await relayAdminMainSpace.getNode(platformNodeId).field('apps').toArray();
     assert.ok(apps.some((a) => a.prefix === 'calendar' && a.name === 'Kalender'), 'submitting the content-driven form actually registered the app');
 
@@ -184,7 +185,6 @@ test('the built-in admin console is genuine installed content in a separate, con
     const mainSpace = await connectMain(outsider, 'outsider-main');
     const { router } = startPlatform({
       space: mainSpace,
-      relayAdminPub: relayAdmin.signingPub,
       connectAdminSpace: () => connectAdmin(outsider, 'outsider-admin'),
       mountEl,
       window,

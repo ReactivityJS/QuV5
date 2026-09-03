@@ -27,19 +27,21 @@
  * reason to expect it'd need one.
  *
  * MULTIPLE APPS (a platform, docs §19-21): pass every app-admin pubkey the
- * relay should recognize as `appAdminPubs` - a STATIC, operator-decided
- * list at relay startup, the SAME posture `relay-server.js`'s own
- * `QU_MEMBERS_JSON` already takes (see that file's own doc comment).
- * Deliberately NOT auto-discovered from `relayAdminPub`'s own
- * `qu-platform-apps` registry at runtime: a relay that trusted whatever
- * pubkeys happen to be written there would need to re-verify write-ACL for
- * a BRAND NEW app-admin's Nodes the instant `qu-platform-apps` changes,
- * which - since `resolveKindSchema` is a plain synchronous function
- * (`relay.js` never awaits it) - would need this relay to itself run a
- * live, subscribed `Space` watching that registry, real, separate work.
- * Registering a genuinely new app-admin therefore still needs a relay
- * restart with an updated `appAdminPubs` list, exactly like adding a new
- * `'members'`-mode member already does today.
+ * relay should recognize as `appAdminPubs`. This function alone always
+ * takes a STATIC, caller-supplied list - see this file's own
+ * `createLiveAppResolveKindSchema()`-style callers (e.g.
+ * `@qu/app-shell`'s `live-app-resolver.js`) for a REACTIVE wrapper that
+ * keeps calling this function again as `qu-platform-apps` (now a
+ * `'relay-admins'`-ACL registry ANY configured relay-admin may write, see
+ * kinds.js's own doc comment) changes at runtime, with no relay restart
+ * needed to onboard a new app-admin - this function itself stays a small,
+ * pure, synchronous-result builder either way.
+ *
+ * `qu-platform-apps` itself needs NO caller-supplied pubkey to classify
+ * any more (a real, deliberate change from an earlier revision that took a
+ * `relayAdminPub` here): its id is now `PLATFORM_REGISTRY_ANCHOR`-derived,
+ * a FIXED constant every deployment shares (kinds.js's own doc comment) -
+ * `platformId` below is therefore always computed, never conditional.
  *
  * COLLECTIONS (`kinds.js`'s `defineCollectionKind()`): an item Kind needs
  * NO entry here at all - it shares `pageKind`'s exact `acl`/`persistence`
@@ -61,19 +63,20 @@ import {
   styleRegistryKind,
   pageKind,
   platformAppsKind,
+  PLATFORM_REGISTRY_ANCHOR,
   adminAppManifestKind,
   adminPageKind,
   ADMIN_REALM_ANCHOR,
 } from './kinds.js';
 
-/** @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], relayAdminPub?: Uint8Array, collectionRegistryKinds?: object[]}} params - `appAdminPub` (singular) is a convenience alias for `appAdminPubs: [appAdminPub]`. `collectionRegistryKinds` - every Collection's `registryKind` this relay should recognize (see this file's own top doc comment on "COLLECTIONS") - each is checked against every configured owner. @returns {Promise<(nodeId: string) => object>} */
-export async function createAppResolveKindSchema({ appAdminPub, appAdminPubs, relayAdminPub, collectionRegistryKinds = [] } = {}) {
+/** @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], collectionRegistryKinds?: object[]}} params - `appAdminPub` (singular) is a convenience alias for `appAdminPubs: [appAdminPub]`. `collectionRegistryKinds` - every Collection's `registryKind` this relay should recognize (see this file's own top doc comment on "COLLECTIONS") - each is checked against every configured owner. @returns {Promise<(nodeId: string) => object>} */
+export async function createAppResolveKindSchema({ appAdminPub, appAdminPubs, collectionRegistryKinds = [] } = {}) {
   const owners = [...(appAdminPubs ?? []), ...(appAdminPub ? [appAdminPub] : [])];
   const manifestIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, appManifestKind.kind))));
   const registryIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, routeRegistryKind.kind))));
   const templateRegistryIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, templateRegistryKind.kind))));
   const styleRegistryIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, styleRegistryKind.kind))));
-  const platformId = relayAdminPub ? await deriveOwnerNodeId(relayAdminPub, platformAppsKind.kind) : null;
+  const platformId = await deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind);
 
   const collectionRegistryById = new Map();
   for (const registryKind of collectionRegistryKinds) {
