@@ -121,3 +121,60 @@ test('addMember() is idempotent - calling it twice for the same pubkey does not 
   // No assertion beyond "still works" - addMember() has no visible list to inspect from here;
   // the point is this doesn't throw or corrupt membership, proven by the write still succeeding.
 });
+
+test('removeMember() - the exact inverse of addMember() - stops a relay from accepting further writes from that identity, without restarting', async () => {
+  const alice = await actor();
+  const bob = await actor();
+  const hub = createInProcessHub();
+  const relay = createRelayForwarder({
+    hub,
+    members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }, { pub: bob.signingPub, xPub: bob.xPublicKey }],
+    resolveKindSchema: () => noteKind,
+  });
+
+  const bobTransport = new InProcessTransport(hub, 'bob');
+  await bobTransport.connect();
+  const bobSpace = new Space({
+    identity: bob,
+    members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }, { pub: bob.signingPub, xPub: bob.xPublicKey }],
+    transport: bobTransport,
+  });
+  await bobSpace.createNode(noteKind, { title: 'before removal' }, { id: 'note-4' });
+  await waitUntil(() => relay.seen.some((e) => e.nodeId === 'note-4'));
+
+  const removed = relay.removeMember(bob.signingPub);
+  assert.equal(removed, true);
+
+  await bobSpace.createNode(noteKind, { title: 'after removal' }, { id: 'note-5' });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(relay.seen.some((e) => e.nodeId === 'note-5'), false, 'a write from a removed member is rejected exactly like one from a never-added identity');
+
+  // Idempotent - removing an already-removed (or never-a-member) identity is a no-op, not an error.
+  assert.equal(relay.removeMember(bob.signingPub), false);
+});
+
+test('removeMember() reactively broadcasts to an ALREADY-CONNECTED peer\'s Space, which stops treating the removed identity as a member too', async () => {
+  const alice = await actor();
+  const bob = await actor();
+  const hub = createInProcessHub();
+  const relay = createRelayForwarder({
+    hub,
+    members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }, { pub: bob.signingPub, xPub: bob.xPublicKey }],
+    resolveKindSchema: () => noteKind,
+  });
+
+  const aliceTransport = new InProcessTransport(hub, 'alice');
+  await aliceTransport.connect();
+  const aliceBusCalls = [];
+  const aliceBus = { emit: async (topic, payload) => aliceBusCalls.push({ topic, payload }) };
+  const aliceSpace = new Space({
+    identity: alice,
+    members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }, { pub: bob.signingPub, xPub: bob.xPublicKey }],
+    transport: aliceTransport,
+    bus: aliceBus,
+  });
+
+  relay.removeMember(bob.signingPub);
+  await waitUntil(() => aliceBusCalls.some((c) => c.topic === 'space.member.left'));
+  assert.equal(aliceBusCalls.find((c) => c.topic === 'space.member.left').payload.pub, QuCrypto.toBase64(bob.signingPub));
+});

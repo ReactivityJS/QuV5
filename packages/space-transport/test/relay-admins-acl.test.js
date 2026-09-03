@@ -97,3 +97,50 @@ test("relay: 'relay-admins'-ACL - subscribing/reading needs no Space membership 
   const outsiderNode = outsiderSpace.subscribeNode(FIXED_ID, registryKind);
   await waitUntil(async () => (await outsiderNode.field('entries').toArray()).length === 1);
 });
+
+test("relay: 'relay-admins'-ACL - addRelayAdmin() lets a relay accept writes from a newly authorized identity, without restarting (the same 'no restart' idea addMember() already gives 'members'-ACL)", async () => {
+  const founder = await actor();
+  const newAdmin = await actor();
+  const members = [{ pub: founder.signingPub, xPub: founder.xPublicKey }, { pub: newAdmin.signingPub, xPub: newAdmin.xPublicKey }];
+  const relayAdmins = [founder.signingPub];
+  const hub = createInProcessHub();
+  const relay = createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema: () => registryKind, storage: createMemoryStore() });
+
+  relay.addRelayAdmin(newAdmin.signingPub);
+
+  const transport = new InProcessTransport(hub, 'new-admin');
+  await transport.connect();
+  const newAdminSpace = new Space({ identity: newAdmin, members, relayAdmins: [founder.signingPub, newAdmin.signingPub], transport });
+  const node = await newAdminSpace.createNode(registryKind, {}, { id: FIXED_ID });
+  await node.field('entries').push({ from: 'new-admin' });
+
+  await waitUntil(() => relay.seen.some((e) => e.nodeId === FIXED_ID));
+});
+
+test("relay: 'relay-admins'-ACL - removeRelayAdmin() revokes future write access immediately, but never touches content already written", async () => {
+  const relayAdmin = await actor();
+  const members = [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }];
+  const relayAdmins = [relayAdmin.signingPub];
+  const hub = createInProcessHub();
+  const relay = createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema: () => registryKind, storage: createMemoryStore() });
+
+  const transport = new InProcessTransport(hub, 'relay-admin');
+  await transport.connect();
+  const adminSpace = new Space({ identity: relayAdmin, members, relayAdmins, transport });
+  const node = await adminSpace.createNode(registryKind, {}, { id: FIXED_ID });
+  await node.field('entries').push({ from: 'relay-admin' });
+  await waitUntil(() => relay.seen.some((e) => e.nodeId === FIXED_ID));
+
+  const removed = relay.removeRelayAdmin(relayAdmin.signingPub);
+  assert.equal(removed, true);
+  assert.equal(relay.removeRelayAdmin(relayAdmin.signingPub), false, 'idempotent - removing an already-removed identity is a no-op');
+
+  const seenBeforeSecondPush = relay.seen.filter((e) => e.nodeId === FIXED_ID).length;
+  // A LOCAL push always lands on the writer's OWN Y.Doc immediately, regardless of what the relay
+  // does with the resulting envelope (Space._handleLocalUpdate() never checks _isAuthorizedWriter()
+  // for local writes, only the RECEIVING end does) - so the real proof that revocation took effect
+  // is that the RELAY never mirrors this second write, not that `node`'s own local field is unchanged.
+  await node.field('entries').push({ from: 'relay-admin, after removal' });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(relay.seen.filter((e) => e.nodeId === FIXED_ID).length, seenBeforeSecondPush, 'the write after revocation never reaches the relay\'s own mirror - the earlier entry stays exactly as it was for every OTHER peer');
+});

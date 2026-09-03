@@ -669,5 +669,80 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
     bus?.emit('debug.relay.member.joined', { pub: pubB64, name: member.name });
   }
 
-  return { seen, presence, addMember, ingestFederated };
+  /**
+   * The exact INVERSE of `addMember()` above - the piece that was genuinely
+   * missing before (membership could only ever GROW on an already-running
+   * relay, never shrink, which is exactly the asymmetry that made "remove a
+   * relay-admin" only take effect on the NEXT full process restart). Future
+   * writes/subscribes/`hello` from `pub` are rejected exactly as if it had
+   * never been a member - `isSpaceMember`/`buildWriteAcl` read `memberPubs`
+   * fresh on every call, so removing it here is enough, no other internal
+   * state needs touching (mirrors `addMember()`'s own reasoning exactly).
+   *
+   * NOT RETROACTIVE, same as `addMember()` never retroactively grants
+   * decryption of history sealed before a member joined: `'encrypted'`-
+   * visibility content already sealed FOR this pubkey (before removal)
+   * stays exactly as readable to it as any ciphertext already delivered
+   * always was - this narrows who NEW writes are sealed for/who MAY WRITE
+   * going forward, it cannot un-deliver bytes already sent. The same,
+   * already-documented limitation `docs/v5-space-core-guide.md`'s own
+   * "known gaps" section describes for member/key rotation generally. Does
+   * NOT forcibly disconnect an already-open connection either - that
+   * connection's OWN next write/subscribe simply starts failing.
+   *
+   * REACTIVE, NOT POLLED, same shape as `addMember()`'s own `'member-
+   * joined'` broadcast: `{type: 'member-left', pub}` reaches every
+   * currently connected peer immediately - a `Space` on the receiving end
+   * calls its own `removeMember()` (see `@qu/space-core`'s space.js) and
+   * emits `space.member.left`, so an already-open Space's own write-ACL/
+   * encryption-recipient view updates without needing to reconnect.
+   * @param {Uint8Array} pub
+   * @returns {boolean} whether `pub` was actually a member (`false` = no-op, idempotent).
+   */
+  function removeMember(pub) {
+    const pubB64 = QuCrypto.toBase64(pub);
+    if (!memberPubs.has(pubB64)) return false;
+    memberPubs.delete(pubB64);
+    const idx = memberList.findIndex((m) => QuCrypto.toBase64(m.pub) === pubB64);
+    if (idx !== -1) memberList.splice(idx, 1);
+    for (const peerId of hub.peerIds()) hub.deliverTo(peerId, 'relay', { type: 'member-left', pub });
+    bus?.emit('debug.relay.member.left', { pub: pubB64 });
+    return true;
+  }
+
+  /**
+   * DYNAMIC 'relay-admins' MEMBERSHIP - the exact same "no restart needed"
+   * idea `addMember()`/`removeMember()` above already establish for
+   * `'members'`-ACL, applied to the SEPARATE `relayAdminPubs` list
+   * (`@qu/space-core`'s kind-schema.js own doc comment on the
+   * `'relay-admins'` mode) - deliberately the SAME reactive-broadcast
+   * SHAPE, just a bare pubkey (never `xPub` - see this function's own top
+   * "relayAdmins" param doc comment on why encryption never applies here)
+   * and its own wire-message pair so a receiving `Space` updates the RIGHT
+   * internal Set (`_relayAdmins`, never `_members`). This is what makes
+   * "treat relay-admins and ordinary members with the SAME mechanism" true
+   * in practice, not just in name: one add/remove/broadcast shape, reused
+   * for both lists, differing only in which Set/message pair it touches.
+   * @param {Uint8Array} pub
+   */
+  function addRelayAdmin(pub) {
+    const pubB64 = QuCrypto.toBase64(pub);
+    if (relayAdminPubs.has(pubB64)) return false;
+    relayAdminPubs.add(pubB64);
+    for (const peerId of hub.peerIds()) hub.deliverTo(peerId, 'relay', { type: 'relay-admin-added', pub });
+    bus?.emit('debug.relay.relay-admin.added', { pub: pubB64 });
+    return true;
+  }
+
+  /** Inverse of `addRelayAdmin()` - see that function's and `removeMember()`'s own doc comments for the shared reasoning (not retroactive, reactive broadcast, idempotent). @param {Uint8Array} pub */
+  function removeRelayAdmin(pub) {
+    const pubB64 = QuCrypto.toBase64(pub);
+    if (!relayAdminPubs.has(pubB64)) return false;
+    relayAdminPubs.delete(pubB64);
+    for (const peerId of hub.peerIds()) hub.deliverTo(peerId, 'relay', { type: 'relay-admin-removed', pub });
+    bus?.emit('debug.relay.relay-admin.removed', { pub: pubB64 });
+    return true;
+  }
+
+  return { seen, presence, addMember, removeMember, addRelayAdmin, removeRelayAdmin, ingestFederated };
 }

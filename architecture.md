@@ -480,7 +480,8 @@ notice.
 |---|---|---|
 | `space.node.<nodeId>.changed` | Space | `{nodeId, kind, origin}` |
 | `notification.<kind>.<topic>` | Space | `{nodeId, kind, topic, to, authorPub, origin}` |
-| `space.member.joined` | Space | `{pub, xPub, name}` |
+| `space.member.joined` / `.left` | Space | `{pub, xPub, name}` / `{pub}` |
+| `space.relay-admin.added` / `.removed` | Space | `{pub}` — see §7's "A fourth ACL mode" |
 | `space.status.changed` | Space | `{status}` — from the transport's own `onStatusChange()`, §3.4 |
 | `space.node.<nodeId>.write-ack` | Space | `{nodeId, seq}` — see §3.5's WRITE-ACK |
 | `debug.space.write.local` / `.remote.accepted` / `.remote.rejected` / `.remote.ignored` / `.remote.undecryptable` | Space | write lifecycle — `.undecryptable`: authentic + ACL-ok, but this identity isn't a decryption recipient (e.g. history from before it joined) |
@@ -495,7 +496,8 @@ notice.
 | `debug.relay.hello.received` / `.rejected` | Relay | presence handshake |
 | `debug.relay.presence.online` / `.offline` | Relay | `{pub}` |
 | `debug.relay.grant.received` / `.rejected` | Relay | `{nodeId, granteePub}` / `{nodeId}` |
-| `debug.relay.member.joined` | Relay | `{pub, name}` |
+| `debug.relay.member.joined` / `.left` | Relay | `{pub, name}` / `{pub}` |
+| `debug.relay.relay-admin.added` / `.removed` | Relay | `{pub}` |
 
 See each source file's own doc comment (§4's table) for the exhaustive,
 authoritative version of this list — this table is a summary, not the
@@ -1012,10 +1014,54 @@ own doc comment). Two changes close this:
   not `@qu/app-core` - `@qu/app-core`'s own `src/` has no real dependency
   on `@qu/space-transport` (only a devDependency, used by its tests), so it
   stays transport-agnostic; `@qu/app-shell` already composes both.
-- **Revocation remains open**: `qu-platform-apps`'s `apps` field is a
-  `ListField` with no removal primitive (unchanged from before), so there
-  is still no `unregisterApp()` - real, separate work if "revoke a
-  relay-admin's registration" is ever needed, same as before this change.
+- **Revocation remains open** for `qu-platform-apps`'s CONTENT: its `apps`
+  field is a `ListField` with no removal primitive, so there is still no
+  `unregisterApp()` - real, separate work if "revoke a registered app's
+  alias" is ever needed. This is UNRELATED to admin/member revocation
+  (below), which the underlying identity list already supports fine.
+
+**`addMember()`/`removeMember()` and `addRelayAdmin()`/`removeRelayAdmin()`
+- ONE shared mechanism for both lists, not two:** removing a relay-admin
+(or an ordinary `'members'`-mode member) from `QU_RELAY_ADMINS`/
+`QU_MEMBERS_JSON` and RESTARTING the relay process already revokes their
+rights completely and correctly - a fresh process builds `memberPubs`/
+`relayAdminPubs` directly from the CURRENT config, so a removed identity is
+simply absent, with no stale state to reconcile. This does NOT affect
+already-installed apps/pages/templates at all (those are separate,
+self-certifying `'content'`-ACL Nodes an app-admin owns independently -
+revoking a RELAY-admin never touches them) - only future `qu-platform-apps`
+writes and admin-realm access by the removed identity stop working.
+
+What a plain restart canNOT do is update an ALREADY-CONNECTED client
+mid-session (its own `Space` object keeps whatever `members`/`relayAdmins`
+it was constructed with until it reconnects) - `@qu/space-transport`'s
+relay.js now has the genuinely missing, symmetric primitive for this:
+`removeMember(pub)` (the exact inverse of the pre-existing `addMember()`)
+and, for the SAME reason, `addRelayAdmin(pub)`/`removeRelayAdmin(pub)` for
+the separate `relayAdminPubs` list - deliberately the SAME shape (a Set
+mutation + a reactive `{type: '...'}` broadcast to every connected peer) for
+BOTH lists, so "relay-admins and ordinary members are handled with one
+concept" is true of the MECHANISM, not just the vocabulary; they stay two
+named lists only because their trust boundaries differ (`'members'` lives
+inside a Kind's own visibility/Space; `'relay-admins'` is checked
+independently of Space membership entirely - see this document's own
+opening paragraph on the mode for why that split can't collapse into one
+list without re-opening `qu-platform-apps` to any self-joined visitor).
+`@qu/space-core`'s `Space` gained the exact mirror-image client methods
+(`removeMember()`/`addRelayAdmin()`/`removeRelayAdmin()`) plus incoming-
+message handling for `'member-left'`/`'relay-admin-added'`/
+`'relay-admin-removed'`, so an already-open browser tab's own view updates
+reactively the instant the relay calls these - no reconnect needed.
+
+**Not yet wired to `QU_RELAY_ADMINS`/`QU_MEMBERS_JSON` changing without a
+restart** - `relay-server.js`'s `main()` still only ever reads these env
+vars ONCE, at process start, and calls neither `addMember`/`removeMember`
+nor `addRelayAdmin`/`removeRelayAdmin` itself. The primitives above make a
+FUTURE "reconfigure a running relay without dropping connections" trigger
+(a diff of old vs. new config calling `add*`/`remove*` for exactly the
+identities that changed, from e.g. a SIGHUP handler or an admin-UI action)
+straightforward to build - deliberately not built in this pass, since it
+needs its own trigger-mechanism decision first.
 
 **Reading this as a CMS, not just a router:** the admin console proves the
 general shape - "UI legt sich selbst innerhalb des Storage an und hat
