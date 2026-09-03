@@ -53,6 +53,16 @@
  *     connection this arrives on is already open for every other message
  *     type, so a new member is learned about exactly as promptly as a
  *     Node update is.
+ *   - `space.member.left` - the exact inverse, on a relay's `{type:
+ *     'member-left', pub}` broadcast (see relay.js's own `removeMember()`)
+ *     - `{pub}` (base64). `removeMember()` has ALREADY run by the time this
+ *     fires, same ordering as `space.member.joined` above.
+ *   - `space.relay-admin.added` / `.removed` - the SAME reactive shape as
+ *     `space.member.joined`/`.left`, for the SEPARATE `acl.write:
+ *     'relay-admins'` list instead (kind-schema.js's own doc comment on the
+ *     mode) - `{pub}` (base64, no `xPub` - this list is never an encryption
+ *     recipient set, see this file's own constructor doc comment on
+ *     `relayAdmins`).
  *   - `space.status.changed` - `{status}`, straight from the transport's
  *     own `onStatusChange()` if it has one (see e.g. `@qu/space-transport`'s
  *     `WsClientTransport` - `InProcessTransport` has none, so this never
@@ -260,6 +270,44 @@ export class Space {
     const pubB64 = QuCrypto.toBase64(member.pub);
     if (this._members.some((m) => QuCrypto.toBase64(m.pub) === pubB64)) return;
     this._members.push(member);
+  }
+
+  /**
+   * The exact inverse of `addMember()` above - see `@qu/space-transport`'s
+   * relay.js own `removeMember()` doc comment for the full "why" (dynamic
+   * membership shrinking, not just growing) and its one real, accepted
+   * limitation (not retroactive - already-delivered ciphertext stays
+   * exactly as readable to a removed member as it always was; this only
+   * narrows who NEW writes are sealed for/accepted from going forward).
+   * Idempotent - removing an unknown pubkey is a no-op.
+   * @param {Uint8Array} pub
+   */
+  removeMember(pub) {
+    const pubB64 = QuCrypto.toBase64(pub);
+    const idx = this._members.findIndex((m) => QuCrypto.toBase64(m.pub) === pubB64);
+    if (idx !== -1) this._members.splice(idx, 1);
+  }
+
+  /**
+   * The client-side counterpart to `@qu/space-transport`'s relay.js own
+   * `addRelayAdmin()`/`removeRelayAdmin()` - updates THIS Space's own
+   * independent view of `acl.write: 'relay-admins'` authorization (see
+   * `_isAuthorizedWriter()` below and kind-schema.js's own doc comment on
+   * the mode), same "never trust the relay, verify independently" posture
+   * `addMember()`/`removeMember()` already take for ordinary membership.
+   * Deliberately a bare pubkey, never `{pub, xPub}` - `'relay-admins'`-ACL
+   * content is expected to be `'public'`-visibility (see this file's own
+   * constructor doc comment on `relayAdmins`), so there is no encryption
+   * recipient to track here the way `_members` needs one.
+   * @param {Uint8Array} pub
+   */
+  addRelayAdmin(pub) {
+    this._relayAdmins.add(QuCrypto.toBase64(pub));
+  }
+
+  /** Inverse of `addRelayAdmin()` - see that method's own doc comment. Idempotent. @param {Uint8Array} pub */
+  removeRelayAdmin(pub) {
+    this._relayAdmins.delete(QuCrypto.toBase64(pub));
   }
 
   /**
@@ -705,6 +753,23 @@ export class Space {
       // connection, same as any other incoming message.
       this.addMember({ pub, xPub });
       this._bus?.emit('space.member.joined', { pub: QuCrypto.toBase64(pub), xPub: QuCrypto.toBase64(xPub), name });
+      return;
+    }
+    if (type === 'member-left') {
+      // REACTIVE membership shrinking - the exact inverse of 'member-joined' above, see
+      // @qu/space-transport's relay.js own `removeMember()` doc comment for the full "why" and its
+      // one real limitation (not retroactive).
+      this.removeMember(pub);
+      this._bus?.emit('space.member.left', { pub: QuCrypto.toBase64(pub) });
+      return;
+    }
+    if (type === 'relay-admin-added' || type === 'relay-admin-removed') {
+      // Same reactive shape as 'member-joined'/'member-left', for the SEPARATE `_relayAdmins` list
+      // instead (kind-schema.js's own doc comment on the `'relay-admins'` ACL mode) - see
+      // relay.js's own `addRelayAdmin()`/`removeRelayAdmin()` doc comments.
+      if (type === 'relay-admin-added') this.addRelayAdmin(pub);
+      else this.removeRelayAdmin(pub);
+      this._bus?.emit(`space.relay-admin.${type === 'relay-admin-added' ? 'added' : 'removed'}`, { pub: QuCrypto.toBase64(pub) });
       return;
     }
     if (!envelope) return;
