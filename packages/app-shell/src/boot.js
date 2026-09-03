@@ -61,6 +61,11 @@ async function renderLandingPage({ mountEl, doc, platform }) {
  */
 export function startApp({ space, appAdminPub, mountEl, window, styleId, resolveTimeout }) {
   const runtime = new AppRuntime(space, { appAdminPub });
+  // Exposed for @qu/space-components' <qu-view>/<qu-bind>/<qu-list> - see that package's
+  // context.js's own doc comment: any Component rendered inside `mountEl` (every page/template's
+  // content ends up there via renderPage()'s `mountEl.innerHTML = ...`) resolves its Space by
+  // walking up the DOM for the nearest ancestor's `.quSpace` - `mountEl` itself always qualifies.
+  mountEl.quSpace = space;
   const router = new HashRouter({
     window,
     onChange: async (route) => {
@@ -122,11 +127,13 @@ export function startPlatform({ space, relayAdminPub, connectAdminSpace, mountEl
         await renderLandingPage({ mountEl, doc: window.document, platform });
         return;
       }
-      const runtime =
-        match.realm === 'admin'
-          ? new AppRuntime(await getAdminSpace(), { appAdminPub: ADMIN_REALM_ANCHOR, kinds: ADMIN_KINDS })
-          : new AppRuntime(space, { appAdminPub: match.appAdminPub });
+      const routeSpace = match.realm === 'admin' ? await getAdminSpace() : space;
+      const runtime = match.realm === 'admin' ? new AppRuntime(routeSpace, { appAdminPub: ADMIN_REALM_ANCHOR, kinds: ADMIN_KINDS }) : new AppRuntime(routeSpace, { appAdminPub: match.appAdminPub });
       const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
+      // See startApp()'s own comment on `.quSpace` - the ADMIN realm genuinely is a different
+      // Space (kinds.js's own "THE ADMIN REALM" doc comment), so this has to be re-set on every
+      // navigation, not just once like startApp()'s single-Space case.
+      mountEl.quSpace = routeSpace;
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
       if (match.realm === 'admin') wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
       else await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });

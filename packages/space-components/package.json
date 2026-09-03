@@ -1,0 +1,19 @@
+{
+  "name": "@qu/space-components",
+  "version": "0.1.0",
+  "description": "Qu V5: the declarative reactive Component layer over @qu/space-ui's imperative bind()/bindList() primitives - <qu-view>/<qu-bind>/<qu-list>, Custom Elements a CMS-authored template can write directly as markup to live-bind Space data, no JS glue code required (architecture.md's corrected \"Phase 2\" - a visitor's own data is an ORDINARY binding, not a special case; this package is what was actually missing). index.js (this package's main entry) is plain-Node-importable (context.js/resolve.js's ancestor-DOM-resolution helpers only, no HTMLElement); the Custom Elements themselves live behind the separate \"./elements\" entry (src/elements.js) since `class extends HTMLElement` throws under plain Node with no DOM/jsdom shim - see @qu/app-shell's shell.js for the identical, already-established split.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./elements": "./src/elements.js"
+  },
+  "dependencies": {
+    "@qu/space-core": "^0.1.0",
+    "@qu/space-ui": "^0.1.0"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  },
+  "license": "MIT"
+}
