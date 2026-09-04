@@ -36,12 +36,6 @@ import {
   globalAppAnchor,
 } from './kinds.js';
 
-/** The registry's own id never changes - see `platform.js`'s identically-reasoned `platformRegistryId()`, duplicated here (not imported) to keep this file's own dependency surface unchanged; both derive the SAME id from the SAME fixed anchor + Kind, so they always agree. */
-let platformRegistryIdPromise = null;
-function platformRegistryId() {
-  return (platformRegistryIdPromise ??= deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind));
-}
-
 /** Memoized per-prefix - `globalAppAnchor()` (kinds.js) hashes on every call, cheap but pointless to redo for the SAME prefix within one process. */
 const globalAppAnchorCache = new Map();
 function cachedGlobalAppAnchor(prefix) {
@@ -382,8 +376,18 @@ export async function installAppBundle(space, bundle) {
  *   to change it later for an app already registered.
  */
 export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode }) {
-  const id = await platformRegistryId();
-  const node = space.getNode(id) ?? (await space.createNode(platformAppsKind, {}, { id }));
+  // getOrSyncRegistryNode(), not a blind `space.getNode(id) ?? createNode()` - the SAME "never
+  // re-createNode() over a Node that already exists, just torn down locally between two calls"
+  // reasoning that function's own doc comment already documents for an app's per-owner registries -
+  // this ONE global registry is no different: any caller in between (a mode-toggle UI's own
+  // `PlatformRuntime.resolveApps()` refresh, another relay-admin's read, ...) may have already
+  // useNode()+release()d it, tearing the local Y.Doc back down (`createNode()` never refcounts its
+  // own creation - see `boot.js`'s `ensureSelfProvisioned()` doc comment for the general shape of
+  // this bug). Blindly `createNode()`ing again in that window would silently wipe every OTHER
+  // relay-admin's already-registered app out of THIS write's local view of `apps` until a resync
+  // caught up - a real, observed failure (reproduced via the admin console's own mode-toggle
+  // buttons calling `setAppMode()` right after a `resolveApps()` refresh).
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
   const entry = { prefix, appAdminPub: appAdminPub ? QuCrypto.toBase64(appAdminPub) : null, name, realm };
   if (realm === 'global' && mode) entry.mode = mode;
   await node.field('apps').push(entry);
@@ -404,8 +408,7 @@ export async function registerApp(space, { prefix, appAdminPub, name, realm = 'm
  * @param {{prefix: string, mode: 'off'|'global'|'multiuser'}} params
  */
 export async function setAppMode(space, { prefix, mode }) {
-  const id = await platformRegistryId();
-  const node = space.getNode(id) ?? (await space.createNode(platformAppsKind, {}, { id }));
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR); // see registerApp()'s own doc comment on why never a blind getNode() ?? createNode() here.
   const apps = (await node.field('apps').toArray()).filter(Boolean);
   const current = [...apps].reverse().find((a) => a.prefix === prefix);
   if (!current) throw new Error(`setAppMode: "${prefix}" is not a registered app - registerApp() it first.`);

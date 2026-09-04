@@ -3,8 +3,8 @@
  * PLATFORM BOOTSTRAP — `npm run bootstrap:platform`. Two independent jobs,
  * always run in this order but decoupled from HOW you deploy:
  *
- *   1. Generate (or load) a `relay-admin` + `demo-app-admin` identity and
- *      print the exact `environment:` block your deployment needs -
+ *   1. Generate (or load) a `relay-admin` identity and print the exact
+ *      `environment:` block your deployment needs -
  *      `docker-compose.space-relay.yml`, a `docker stack deploy` stack
  *      file, a Kubernetes manifest, systemd env vars, whatever you
  *      actually use. This script NEVER writes that config for you and
@@ -15,53 +15,69 @@
  *      - see `relay-server.js`'s own doc comment on why), so YOU decide how
  *      that config reaches your relay and gets it (re)started with it -
  *      this script only ever talks to the relay over its public URL
- *      (`--relay`), exactly like `bin/install-admin-console.mjs`/
- *      `demo/install-app-shell-demo.mjs` already do, so it works
- *      identically regardless of whether that relay lives in a Compose
- *      service, a Swarm/`docker stack` service, a Kubernetes Pod, or bare
- *      metal. Unlike an app-admin (`demo-app-admin` below), which needs NO
- *      static config at all any more - `registerApp()` alone (this script's
- *      own step 2) is enough, the relay discovers it live (see
- *      `@qu/app-shell`'s own `live-app-resolver.js`) - `QU_RELAY_ADMINS` is
- *      genuinely the ONLY static list this whole deployment needs.
+ *      (`--relay`), exactly like `bin/install-admin-console.mjs` already
+ *      does, so it works identically regardless of whether that relay lives
+ *      in a Compose service, a Swarm/`docker stack` service, a Kubernetes
+ *      Pod, or bare metal. `relay-admin` is the ONLY identity this script
+ *      needs any static config for at all - see "WHY THERE IS NO
+ *      SECOND/APP-ADMIN IDENTITY ANY MORE" below.
  *   2. Once the relay is actually reachable AND configured with that
  *      exact list (verified by attempting a real write and checking it
  *      gets acked - a relay still running the OLD config accepts the
  *      connection fine but silently drops the write), installs the admin
- *      console, creates a demo shell-app with its own CMS editor
- *      installed, and registers both `#/admin` and `#/demo` - replacing
- *      what used to be several separate manual steps with one, idempotent,
- *      safe-to-re-run command.
+ *      console AND registers the built-in "cms" app as a `realm: 'global'`,
+ *      `mode: 'multiuser'` app (kinds.js's own doc comment on the three
+ *      administrable states) - replacing what used to be several separate
+ *      manual steps with one, idempotent, safe-to-re-run command.
+ *
+ * WHY THERE IS NO SECOND/APP-ADMIN IDENTITY ANY MORE: earlier revisions of
+ * this script also generated a `demo-app-admin` identity and seeded an
+ * ordinary, SINGLE-OWNER "demo" shell-app under it - which meant anyone who
+ * actually wanted to WRITE content there (not just read it, content here
+ * was always public) had to somehow get hold of that one identity's private
+ * key (`grant-app-access.mjs` softened this - a co-editor grant instead of
+ * the raw key - but there was still exactly ONE owner to grant from). A
+ * `mode: 'multiuser'` global app has no such bottleneck: EVERY visitor's own
+ * regular, already-existing identity gets its own self-owned CMS space the
+ * first time they reach it, with ZERO cooperation from this script, a
+ * relay-admin, or anyone else (see `@qu/app-shell`'s `boot.js`'s own
+ * `ensureSelfProvisioned()`/`renderMultiUserRoute()` doc comments and
+ * `test/multiuser-app.test.js`). "cms" itself, as a `realm: 'global'` app,
+ * still has ONE thing this script seeds as the relay-admin: its own GLOBAL
+ * shell (a landing page plus its own `#/admin/cms/cms` editor) - but that
+ * shell is relay-admin-COLLECTIVE property (any configured relay-admin can
+ * edit it, kinds.js's own "GLOBAL APP CONTENT" doc comment), never a single
+ * app-admin's private key to lose or share, so no second identity is needed
+ * for it either.
  *
  * TWO RUNS ARE NORMAL ON A FRESH SETUP, NOT A BUG: run it once to get the
  * config block, paste it into your OWN deployment config, redeploy
  * however you redeploy, then run it again (same command, same `--dir`) to
- * actually install content - it reuses the SAME already-generated
- * identities the second time, never regenerating them. Every write here
- * is idempotent or dedup-checked (see inline comments), so a THIRD, later
- * run (e.g. to re-install a newer admin console) is a harmless no-op too -
- * PROVIDED `--dir`/`QU_BOOTSTRAP_DIR` points at storage that actually
- * SURVIVES a redeploy (see "PERSISTING THE IDENTITY DIRECTORY" below) -
- * otherwise every run looks like a totally fresh setup, forever.
+ * actually install content - it reuses the SAME already-generated identity
+ * the second time, never regenerating it. Every write here is idempotent or
+ * dedup-checked (see inline comments), so a THIRD, later run (e.g. to
+ * re-install a newer admin console) is a harmless no-op too - PROVIDED
+ * `--dir`/`QU_BOOTSTRAP_DIR` points at storage that actually SURVIVES a
+ * redeploy (see "PERSISTING THE IDENTITY DIRECTORY" below) - otherwise
+ * every run looks like a totally fresh setup, forever.
  *
  * PERSISTING THE IDENTITY DIRECTORY - A REAL FOOTGUN, NOT HYPOTHETICAL:
  * this script's whole "run it, paste the printed config, redeploy, run it
- * again" flow only works if the SAME `relay-admin`/`demo-app-admin`
- * keypairs are found on the SECOND run - `ensureIdentity()` below only
- * generates a fresh keypair when NOTHING is found at `<dir>/<name>.json`.
- * The default `--dir` (next to this script, inside the npm package/image)
- * lives on the CONTAINER's own ephemeral filesystem - fine for `docker
- * exec`ing into an ALREADY-RUNNING container repeatedly (the same
- * container, same filesystem), but GONE the instant that container is
- * recreated (any redeploy: `docker compose up` after a pull, `docker
- * stack deploy`, a Kubernetes rollout, ...), because nothing mounts that
- * path as a volume. The symptom is exactly "a brand-new relay-admin/
- * demo-app-admin pubkey on every redeploy, `QU_RELAY_ADMINS` printed
- * again from scratch, the OLD relay-admin's already-installed admin
- * console content becomes un-writable by the NEW one" - not a bug in the
- * ACL/live-resolver machinery itself (architecture.md's own "A fifth ACL
- * mode" section), a deployment footgun in how this ONE script is invoked.
- * Two ways to avoid it:
+ * again" flow only works if the SAME `relay-admin` keypair is found on the
+ * SECOND run - `ensureIdentity()` below only generates a fresh keypair when
+ * NOTHING is found at `<dir>/relay-admin.json`. The default `--dir` (next
+ * to this script, inside the npm package/image) lives on the CONTAINER's
+ * own ephemeral filesystem - fine for `docker exec`ing into an
+ * ALREADY-RUNNING container repeatedly (the same container, same
+ * filesystem), but GONE the instant that container is recreated (any
+ * redeploy: `docker compose up` after a pull, `docker stack deploy`, a
+ * Kubernetes rollout, ...), because nothing mounts that path as a volume.
+ * The symptom is exactly "a brand-new relay-admin pubkey on every redeploy,
+ * `QU_RELAY_ADMINS` printed again from scratch, the OLD relay-admin's
+ * already-installed admin console/cms content becomes un-writable by the
+ * NEW one" - not a bug in the ACL/live-resolver machinery itself
+ * (architecture.md's own "A fifth ACL mode" section), a deployment footgun
+ * in how this ONE script is invoked. Two ways to avoid it:
  *   1. Run this script from OUTSIDE the relay's own container lifecycle
  *      entirely (your own laptop, a CI runner, a separate small utility
  *      container) - `--dir` then naturally persists on THAT machine,
@@ -80,14 +96,14 @@
  *
  * MEMBERSHIP: `QU_RELAY_ADMINS` is the ONE static list this script needs
  * printed - it is the ONLY way to become a relay-admin (write-ACL for both
- * `qu-platform-apps` and the admin console's own content, see
- * `@qu/app-core`'s kinds.js own doc comment on the `'relay-admins'` mode).
- * Ordinary `'members'`-ACL Kinds, by contrast, already support self-join
- * (`QU_ALLOW_JOIN`, default true) - this script uses exactly that (a plain
- * `POST /join`, the SAME mechanism a real browser visitor's `shell.js`
- * uses) for both identities, so it never needs `QU_MEMBERS_JSON` printed
- * or configured at all. Note that being a relay-admin is NOT tied to any
- * particular generated identity - ANY pubkey works the moment it is
+ * `qu-platform-apps` and the admin console's/"cms"'s own GLOBAL content,
+ * see `@qu/app-core`'s kinds.js own doc comment on the `'relay-admins'`
+ * mode). Ordinary `'members'`-ACL Kinds, by contrast, already support
+ * self-join (`QU_ALLOW_JOIN`, default true) - this script uses exactly
+ * that (a plain `POST /join`, the SAME mechanism a real browser visitor's
+ * `shell.js` uses) for `relay-admin`, so it never needs `QU_MEMBERS_JSON`
+ * printed or configured at all. Note that being a relay-admin is NOT tied
+ * to any particular generated identity - ANY pubkey works the moment it is
  * listed, including a real operator's own already-existing browser
  * identity (visible on the relay's unconfigured setup page) instead of
  * the `relay-admin` identity this script generates for non-interactive
@@ -96,7 +112,7 @@
  * Usage:
  *   node packages/app-shell/bin/bootstrap-platform.mjs \
  *     [--relay ws://localhost:8081] [--dir packages/app-shell/.platform-identities] \
- *     [--prefix demo]
+ *     [--prefix cms]
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
@@ -106,22 +122,9 @@ import { QuCrypto } from '@qu/core';
 import { Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport';
 import { EventBus } from '@qu/events';
-import {
-  installGlobalAppBundle,
-  registerApp,
-  publishGlobalRoute,
-  createApp,
-  createTemplate,
-  createStyle,
-  createPage,
-  publishRoute,
-  PlatformRuntime,
-  ContentResolver,
-  adminAppManifestKind,
-  globalAppAnchor,
-} from '@qu/app-core';
+import { installGlobalAppBundle, registerApp, publishGlobalRoute, createGlobalApp, createGlobalPage, PlatformRuntime, ContentResolver, adminAppManifestKind, globalAppAnchor } from '@qu/app-core';
 import { adminConsoleBundle } from '../admin-console-bundle.js';
-import { installCms } from '../cms-bundle.js';
+import { cmsBundle, installGlobalCms } from '../cms-bundle.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DIR = join(HERE, '..', '.platform-identities');
@@ -131,7 +134,7 @@ function parseArgs(argv) {
   // deployment can point this at an actually-persistent volume (see this file's own top doc
   // comment, "PERSISTING THE IDENTITY DIRECTORY") without every invocation needing an explicit
   // --dir flag. --dir (if given) still wins over it.
-  const opts = { relay: 'ws://localhost:8081', dir: process.env.QU_BOOTSTRAP_DIR || DEFAULT_DIR, prefix: 'demo' };
+  const opts = { relay: 'ws://localhost:8081', dir: process.env.QU_BOOTSTRAP_DIR || DEFAULT_DIR, prefix: 'cms' };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--relay') opts.relay = argv[++i];
     else if (argv[i] === '--dir') opts.dir = argv[++i];
@@ -179,9 +182,7 @@ async function ensureIdentity(name, dir) {
  * whatever `environment:`/env-var mechanism your deployment actually uses
  * (Compose, a `docker stack deploy` stack file, Kubernetes, systemd, ...) -
  * see this file's own top doc comment on why this script never tries to
- * write that config for you. `demo-app-admin` needs NO entry here at all -
- * it becomes reachable purely through `registerApp()` (this script's own
- * step 2), discovered live by the relay itself.
+ * write that config for you.
  */
 function printConfigBlock({ relayAdmin }) {
   const relayAdmins = JSON.stringify([QuCrypto.toBase64(relayAdmin.signingPub)]);
@@ -258,10 +259,8 @@ async function main() {
   }
 
   const relayAdmin = await ensureIdentity('relay-admin', dir);
-  const demoAppAdmin = await ensureIdentity('demo-app-admin', dir);
-  console.log(`  relay-admin     pub: ${QuCrypto.toBase64(relayAdmin.signingPub)}`);
-  console.log(`  demo-app-admin  pub: ${QuCrypto.toBase64(demoAppAdmin.signingPub)}`);
-  console.log(`  (private keys stay local, under ${dir})\n`);
+  console.log(`  relay-admin  pub: ${QuCrypto.toBase64(relayAdmin.signingPub)}`);
+  console.log(`  (private key stays local, under ${dir})\n`);
 
   console.log(`Checking ${httpBase}/healthz ...`);
   const healthy = await waitForHealthy(httpBase, { attempts: 5, interval: 800 });
@@ -280,7 +279,7 @@ async function main() {
   const mainTransport = new WsClientTransport(relay, { WebSocketImpl: WebSocket });
   await mainTransport.connect();
   const mainBus = new EventBus();
-  const relayAdmins = [relayAdmin.signingPub]; // qu-platform-apps AND the admin console's own content are both 'relay-admins'-ACL - this Space needs the list to write/read either, see kinds.js's own doc comment.
+  const relayAdmins = [relayAdmin.signingPub]; // qu-platform-apps AND every global app's own content are all 'relay-admins'-ACL - this Space needs the list to write/read either, see kinds.js's own doc comment.
   const mainSpace = new Space({ identity: relayAdmin, members: [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }], relayAdmins, transport: mainTransport, bus: mainBus });
   const mainWrites = trackWrites(mainBus);
 
@@ -290,9 +289,7 @@ async function main() {
   // global app's PAGE writes correctly (`adminPageKind`, 'relay-admins'-ACL) once it has observed
   // BOTH the registerApp() write (to start watching that app's own route registry) AND a
   // publishGlobalRoute() write for the specific route - out of that order, the write is silently
-  // misclassified against the generic 'content'-ACL fallback and rejected outright (the exact same
-  // "register/publish before seeding" reasoning this file's own comment already documents for a
-  // brand-new APP-ADMIN below, just one level up for a GLOBAL APP's own alias/route). The admin
+  // misclassified against the generic 'content'-ACL fallback and rejected outright. The admin
   // console's own "main" TEMPLATE has no such registry yet (kinds.js's own "GLOBAL APP CONTENT" doc
   // comment - templates/styles are a deliberate, separate scope cut for global apps) - it stays
   // correctly classified only because live-app-resolver.js hardcodes it for prefix "admin"
@@ -326,74 +323,51 @@ async function main() {
     await installGlobalAppBundle(mainSpace, 'admin', adminConsoleBundle);
   }
 
-  // REGISTER FIRST, THEN SEED CONTENT - order matters now, unlike under the old static
-  // QU_APP_ADMIN_PUBS model: a relay in PLATFORM mode discovers a brand-new app-admin's pubkey
-  // LIVE, purely from THIS registerApp() write to qu-platform-apps (@qu/app-shell's own
-  // live-app-resolver.js - no restart, no separate static list). Until that write has actually
-  // reached the relay and its live resolver has rebuilt its classification, demo-app-admin's OWN
-  // Nodes (qu-app, qu-route-registry, ...) are still 'named'-ACL client-side but get misclassified
-  // relay-side as the ordinary 'content'-ACL fallback (kinds.js's own doc comment) - which needs a
-  // grant nothing here ever sends, so the write would be silently rejected. Doing this BEFORE
-  // connecting demo-app-admin at all (not just before its first write) removes the race entirely.
-  const demoRegistered = existingApps.some((a) => a.prefix === prefix);
-  if (!demoRegistered) {
-    console.log(`  registering "#/${prefix}" (before seeding its content, so the relay's live resolver already knows this app-admin)...`);
-    await registerApp(mainSpace, { prefix, appAdminPub: demoAppAdmin.signingPub, name: 'Demo Shell-App' });
-    // mainWrites tracks EVERY write this Space makes (both aliases above); wait for all of them to
-    // be relay-acked, THEN a short settle for the relay's own internal live-resolver Space (a
-    // SEPARATE connection, watching the same registry) to receive the forwarded update and finish
-    // rebuilding - see live-app-resolver.js's own doc comment on why this is a real, if brief, race.
+  // THE BUILT-IN "cms" APP - realm:'global', mode:'multiuser' (kinds.js's own doc comment on the
+  // three administrable states): every visitor gets their OWN self-owned CMS space the moment they
+  // reach #/<prefix>/ (no /u/me/ needed, boot.js's own default-flip doc comment) with zero
+  // cooperation from this script or any relay-admin - "registering" the app is enough, nothing more
+  // to seed per-user. What THIS script still seeds, as the relay-admin, is "cms"'s own GLOBAL shell
+  // (a small landing page pointing visitors at their own space, plus its own #/admin/<prefix>/cms
+  // editor for that landing page) - collectively relay-admin-owned content, same as the admin
+  // console's own, never a single app-admin's private key to lose or share.
+  const prefixRegistered = existingApps.some((a) => a.prefix === prefix);
+  if (!prefixRegistered) {
+    console.log(`  registering "#/${prefix}" (realm: 'global', mode: 'multiuser')...`);
+    await registerApp(mainSpace, { prefix, name: 'CMS', realm: 'global', mode: 'multiuser' });
     await waitUntilAllWritesAcked(mainWrites);
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 300)); // let the relay's live resolver start watching this app's own route registry.
   } else {
-    console.log(`  "#/${prefix}" already registered.`);
+    console.log(`  "#/${prefix}" already registered - not touching its current mode (use bin/set-app-mode.mjs to change it).`);
   }
 
-  console.log(`Connecting to the main space as demo-app-admin (to seed the "${prefix}" shell-app)...`);
-  await joinMainSpace(httpBase, demoAppAdmin, 'demo-app-admin');
-  const demoTransport = new WsClientTransport(relay, { WebSocketImpl: WebSocket });
-  await demoTransport.connect();
-  const demoBus = new EventBus();
-  const demoSpace = new Space({ identity: demoAppAdmin, members: [{ pub: demoAppAdmin.signingPub, xPub: demoAppAdmin.xPublicKey }], transport: demoTransport, bus: demoBus });
-  const demoWrites = trackWrites(demoBus);
-
-  // Same "check first, never re-createNode() over existing content" reasoning as the admin console
-  // above - createTemplate()/createPage()/installCms() are exactly right for a Node that doesn't
-  // exist yet, but calling them again for one that DOES would duplicate its Y.Text fields, not
-  // update them. Once seeded, the demo app's own #/<prefix>/cms editor (just installed) is the
-  // right tool for further changes - not re-running this script.
-  const demoResolver = new ContentResolver(demoSpace, { appAdminPub: demoAppAdmin.signingPub });
-  const demoAlreadySeeded = (await demoResolver.resolveManifest({ timeout: 800 })) !== null;
-  if (demoAlreadySeeded) {
-    console.log(`  demo shell-app already seeded - skipping (edit it live at #/${prefix}/cms once bootstrapped).`);
+  const cmsResolver = new ContentResolver(mainSpace, { appAdminPub: await globalAppAnchor(prefix), kinds: { appManifestKind: adminAppManifestKind } });
+  const cmsGlobalAlreadyInstalled = (await cmsResolver.resolveManifest({ timeout: 800 })) !== null;
+  if (cmsGlobalAlreadyInstalled) {
+    console.log(`  "#/${prefix}"'s global shell already installed - skipping (edit it live at #/admin/${prefix}/cms once bootstrapped).`);
   } else {
-    console.log('  creating the demo shell-app (manifest, template, style, page) + installing its CMS editor...');
-    await createApp(demoSpace, { name: 'Demo Shell-App', rootTemplate: 'main', defaultRoute: '/', theme: 'global' });
-    await createTemplate(demoSpace, {
-      name: 'main',
-      html: '<header><h1>Demo Shell-App</h1><p>Gebaut aus Qu-Content, gepflegt über die eingebaute CMS-Konsole - siehe <a href="#/' + prefix + '/cms">#/' + prefix + '/cms</a>.</p></header><main><qu-slot name="content"></qu-slot></main>',
-    });
-    await createStyle(demoSpace, { name: 'global', css: 'body { font-family: sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; } header{opacity:.85; margin-bottom:2rem}' });
-    await createPage(demoSpace, {
+    console.log(`  publishing "#/${prefix}"'s global route(s)...`);
+    await publishGlobalRoute(mainSpace, prefix, { route: '/', title: 'CMS' });
+    await publishGlobalRoute(mainSpace, prefix, { route: cmsBundle.page.route, title: cmsBundle.page.title });
+    await waitUntilAllWritesAcked(mainWrites);
+    await new Promise((resolve) => setTimeout(resolve, 300)); // let the relay observe both new routes before the page content writes follow.
+    console.log(`  installing "#/${prefix}"'s global landing page + CMS editor...`);
+    await createGlobalApp(mainSpace, prefix, { name: 'CMS', rootTemplate: cmsBundle.template.name, defaultRoute: '/' });
+    await installGlobalCms(mainSpace, prefix); // writes the __cms__ template + its own /cms editor page.
+    await createGlobalPage(mainSpace, prefix, {
       route: '/',
-      title: 'Demo Shell-App',
-      template: 'main',
-      content: '<p>Willkommen! Diese Seite kommt komplett aus Qu-Content - bearbeite sie live unter <a href="#/' + prefix + '/cms">#/' + prefix + '/cms</a> (als die demo-app-admin Identity, siehe unten).</p>',
+      title: 'CMS',
+      template: cmsBundle.template.name,
+      content: `<h1>CMS</h1>
+<p>Jeder angemeldete Besucher hat hier seinen EIGENEN CMS-Bereich - einfach besuchen, keine Registrierung, kein Freigabeschritt nötig: <a href="#/${prefix}/u/me/">#/${prefix}/u/me/</a> (oder einfach <a href="#/${prefix}/">#/${prefix}/</a>, sobald du angemeldet bist - das IST bereits dein eigener Bereich).</p>
+<p>Diese Seite hier ist der GLOBALE, von allen Relay-Admins gemeinsam verwaltete Bereich dieser App - bearbeitbar unter <a href="#/admin/${prefix}/cms">#/admin/${prefix}/cms</a>.</p>`,
     });
-    // createPage() deliberately does NOT auto-register into the route registry (dev.js's own doc
-    // comment - backward-compat with pre-CMS callers) - without this, the page above would render
-    // fine when visited directly, but never show up in the CMS's OWN "Seiten" list (wirePages()'s
-    // refreshList() enumerates via resolveRoutes(), not by guessing at Nodes that might exist).
-    await publishRoute(demoSpace, { route: '/', title: 'Demo Shell-App' });
-    await installCms(demoSpace);
   }
 
   const mainOk = await waitUntilAllWritesAcked(mainWrites);
-  const demoOk = await waitUntilAllWritesAcked(demoWrites);
   mainTransport.close();
-  demoTransport.close();
 
-  if (!mainOk || !demoOk) {
+  if (!mainOk) {
     console.log('\n⚠ Some writes were never write-acked by the relay - it is reachable, but NOT (yet) running');
     console.log('  with this identity\'s config (a relay ignores QU_RELAY_ADMINS changes until it is');
     console.log('  actually (re)started with it - a plain restart of an already-running process/container');
@@ -401,41 +375,36 @@ async function main() {
     console.log('  the new config).\n');
     printConfigBlock({ relayAdmin });
     console.log('Update your deployment with that config and redeploy/recreate it (however you deploy),');
-    console.log('then re-run this exact command - it reuses the same identities and finishes from here.');
+    console.log('then re-run this exact command - it reuses the same identity and finishes from here.');
     process.exitCode = 1;
     return;
   }
 
   console.log('\n✅ Platform bootstrapped.\n');
   console.log('Open in a browser:');
-  console.log(`  Admin-UI:        ${httpBase}/#/admin`);
-  console.log(`  Demo shell-app:  ${httpBase}/#/${prefix}/`);
-  console.log(`  Its CMS editor:  ${httpBase}/#/${prefix}/cms\n`);
-  console.log('Both consoles gate WRITES by real relay-enforced ACL, not by the UI - visiting as an ordinary,');
-  console.log('freshly-generated browser identity renders everything fine (all content here is public), but a');
-  console.log('save attempt is silently rejected unless you are actually signed in as the right identity.');
-  console.log('For #/admin specifically, you do NOT have to import the generated relay-admin identity below -');
-  console.log('ANY pubkey works there the moment it is listed in QU_RELAY_ADMINS, including your own browser\'s');
-  console.log('already-existing identity (visit this relay once unconfigured to see its pubkey, or `window.Qu.pub`');
-  console.log('in any already-configured page\'s devtools console) - just add IT to QU_RELAY_ADMINS instead/as well.');
-  console.log('To act as one of the two identities below in your browser\'s devtools console (same origin as the');
-  console.log('relay) instead, paste:\n');
-  for (const [label, identity] of [
-    ['relay-admin (for #/admin)', relayAdmin],
-    ['demo-app-admin (for #/' + prefix + '/cms)', demoAppAdmin],
-  ]) {
-    console.log(`  // ${label}`);
-    console.log(
-      `  localStorage.setItem('qu-identity', JSON.stringify(${JSON.stringify({
-        signingKey: QuCrypto.toBase64(identity.signingKey),
-        signingPub: QuCrypto.toBase64(identity.signingPub),
-        xPrivateKey: QuCrypto.toBase64(identity.xPrivateKey),
-        xPublicKey: QuCrypto.toBase64(identity.xPublicKey),
-      })})); location.reload();\n`
-    );
-  }
-  console.log('(This copies a real private key into that browser tab\'s localStorage - fine for a local demo,');
-  console.log('never do this with a production identity on a machine/browser profile you don\'t fully trust.)');
+  console.log(`  Admin-UI:              ${httpBase}/#/admin`);
+  console.log(`  Dein eigener CMS-Space: ${httpBase}/#/${prefix}/  (als deine eigene, ganz normale Browser-Identität - erstellt sich selbst beim ersten Besuch)`);
+  console.log(`  CMS, global verwaltet:  ${httpBase}/#/admin/${prefix}/  (nur für Relay-Admins)\n`);
+  console.log('Beide Konsolen gaten SCHREIBEN über echte, relay-durchgesetzte ACLs, nicht über die UI - jede');
+  console.log('frisch generierte Browser-Identität sieht denselben Inhalt (alles hier ist öffentlich lesbar),');
+  console.log('aber ein Speicherversuch wird lautlos abgelehnt, sofern die Identität nicht dazu berechtigt ist.');
+  console.log('Für #/admin (und damit auch #/admin/' + prefix + '/) musst du NICHT die unten generierte relay-admin-');
+  console.log('Identität importieren - JEDER Pubkey funktioniert dort, sobald er in QU_RELAY_ADMINS steht,');
+  console.log('auch deine eigene, bereits existierende Browser-Identität (im devtools-Console `window.Qu.pub`).');
+  console.log('Um stattdessen die unten generierte relay-admin-Identität in deinem Browser (selber Origin wie');
+  console.log('das Relay) zu verwenden, füge sie in die devtools-Console ein:\n');
+  console.log('  // relay-admin (für #/admin)');
+  console.log(
+    `  localStorage.setItem('qu-identity', JSON.stringify(${JSON.stringify({
+      signingKey: QuCrypto.toBase64(relayAdmin.signingKey),
+      signingPub: QuCrypto.toBase64(relayAdmin.signingPub),
+      xPrivateKey: QuCrypto.toBase64(relayAdmin.xPrivateKey),
+      xPublicKey: QuCrypto.toBase64(relayAdmin.xPublicKey),
+    })})); location.reload();\n`
+  );
+  console.log('(Das kopiert einen echten privaten Schlüssel in den localStorage dieses Browser-Tabs - für ein');
+  console.log('lokales Demo unbedenklich, niemals mit einer Produktions-Identität auf einer Maschine/einem');
+  console.log('Browser-Profil tun, dem du nicht vollständig vertraust.)');
 
   process.exit(0);
 }

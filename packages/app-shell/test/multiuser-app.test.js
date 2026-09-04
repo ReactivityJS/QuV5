@@ -2,18 +2,23 @@
  * MULTIUSER GLOBAL APPS — `kinds.js`'s own doc comment on
  * `platformAppsKind`'s three administrable states (`'off'`/`'global'`/
  * `'multiuser'`), `dev.js`'s `setAppMode()`, and `boot.js`'s
- * `parseMultiUserSubPath()`/`renderMultiUserRoute()`: a relay-admin
- * registers ONE global app ("cms") in `multiuser` mode, and TWO completely
- * independent, ordinary visitors each get their own, self-owned CMS-managed
- * page under it - `#/cms/u/me/...` - with ZERO relay-admin cooperation
- * beyond the app's OWN existence (no per-user registration, no grant, no
- * shared identity) - proving the actual point of this mode: self-owned
- * `'content'`-ACL Kinds need only an agreed-upon URL shape, never a
- * gatekeeper, to become usable by anyone. Also proves `mode: 'off'` makes
- * a REGISTERED app unreachable (falls to the landing page, indistinguishable
- * from never having existed), and that a later `setAppMode()` call is a
- * genuine state UPDATE (last entry for a prefix wins), not a second,
- * competing registration.
+ * `parseMultiUserSubPath()`/`renderMultiUserRoute()`/`parseAdminSubPath()`/
+ * `renderGlobalShell()`: a relay-admin registers ONE global app ("cms") in
+ * `multiuser` mode, and TWO completely independent, ordinary visitors each
+ * get their own, self-owned CMS-managed page at the BARE prefix -
+ * `#/cms/...`, no `/u/me/` needed, that default flip is the whole point of
+ * this test - with ZERO relay-admin cooperation beyond the app's OWN
+ * existence (no per-user registration, no grant, no shared identity) -
+ * proving the actual point of this mode: self-owned `'content'`-ACL Kinds
+ * need only an agreed-upon URL shape, never a gatekeeper, to become usable
+ * by anyone. Also proves the explicit `/u/me/` form still works
+ * side-by-side with the bare default, that `#/admin/cms/...` (not the bare
+ * prefix any more) is where the app's own GLOBAL shell now lives and stays
+ * relay-admin-gated even there, that `mode: 'off'` makes a REGISTERED app
+ * unreachable (falls to the landing page, indistinguishable from never
+ * having existed), and that a later `setAppMode()` call is a genuine state
+ * UPDATE (last entry for a prefix wins), not a second, competing
+ * registration.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -64,11 +69,14 @@ test('a relay-admin registers "cms" as a multiuser global app; two independent v
   }
 
   const relayAdminSpace = await connect(relayAdmin, 'relay-admin');
+  await registerApp(relayAdminSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'global' }); // needed below for the "#/admin/cms/..." delegation coverage - "admin" itself must be a registered realm:'global' app for match.prefix === 'admin' to ever be reached at all.
   await registerApp(relayAdminSpace, { prefix: 'cms', name: 'CMS', realm: 'global', mode: 'multiuser' });
 
-  // --- Alice visits her OWN "/u/me/" for the very first time - self-provisioned on the spot. ---
+  // --- Alice visits her OWN space for the very first time, at the BARE prefix - no "/u/me/"
+  // needed any more, that default flip is exactly what this test is for - self-provisioned on
+  // the spot. ---
   const aliceSpace = await connect(alice, 'alice-visit');
-  const { window: aliceWindow } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/cms/u/me/' });
+  const { window: aliceWindow } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/cms/' });
   const aliceMount = aliceWindow.document.querySelector('qu-app-shell');
   const { router: aliceRouter } = startPlatform({ space: aliceSpace, mountEl: aliceMount, window: aliceWindow, resolveTimeout: 500 });
 
@@ -77,9 +85,9 @@ test('a relay-admin registers "cms" as a multiuser global app; two independent v
   // complete (proving the self-provisioning createApp()/installCms() calls ran) before navigating.
   await waitUntil(() => aliceMount.innerHTML.length > 0, { timeout: 5000 });
 
-  // Navigate to her own CMS editor and create a page through the rendered form - never calling
-  // the Dev API directly, proving the write path end to end.
-  aliceRouter.navigate('/cms/u/me/cms');
+  // Navigate to her own CMS editor (bare prefix, still no "/u/me/") and create a page through the
+  // rendered form - never calling the Dev API directly, proving the write path end to end.
+  aliceRouter.navigate('/cms/cms');
   await waitUntil(() => aliceMount.querySelector('form[data-qu-action="cms-page-form"]'), { timeout: 4000 });
 
   const alicePageForm = aliceMount.querySelector('form[data-qu-action="cms-page-form"]');
@@ -91,8 +99,10 @@ test('a relay-admin registers "cms" as a multiuser global app; two independent v
 
   aliceRouter.stop();
 
-  // --- Bob, a COMPLETELY different, uninvolved identity, does the exact same at HIS OWN "/u/me/" -
-  // no cooperation from Alice, the relay-admin, or anyone else beyond "cms" existing at all. ---
+  // --- Bob, a COMPLETELY different, uninvolved identity, does the exact same at HIS OWN space -
+  // using the EXPLICIT "/u/me/" form this time, proving it still works side-by-side with the bare
+  // default Alice just used - no cooperation from Alice, the relay-admin, or anyone else beyond
+  // "cms" existing at all. ---
   const bobSpace = await connect(bob, 'bob-visit');
   const { window: bobWindow } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/cms/u/me/' });
   const bobMount = bobWindow.document.querySelector('qu-app-shell');
@@ -122,6 +132,25 @@ test('a relay-admin registers "cms" as a multiuser global app; two independent v
   const bobPage = await bobResolver.resolvePage('/', { timeout: 2000 });
   assert.equal(bobPage?.title, "Bob's Seite");
   assert.notEqual(alicePage.content, bobPage.content, "each user's own content is genuinely isolated, not shared global state");
+
+  // --- #/admin/cms/... - not the bare prefix any more - is now where "cms"'s own GLOBAL shell
+  // lives, and it stays relay-admin-gated even though it's reached through delegation, not the
+  // admin console's own root. A non-admin visitor gets the exact same "Kein Zugriff" the admin
+  // console's own root already gives. ---
+  const { window: bobAdminWindow } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/admin/cms/' });
+  const bobAdminMount = bobAdminWindow.document.querySelector('qu-app-shell');
+  const { router: bobAdminRouter } = startPlatform({ space: bobSpace, mountEl: bobAdminMount, window: bobAdminWindow, resolveTimeout: 500 });
+  await waitUntil(() => bobAdminMount.textContent.includes('Kein Zugriff'), { timeout: 4000 });
+  bobAdminRouter.stop();
+
+  // The relay-admin, by contrast, reaches "cms"'s global shell there - delegation actually ran
+  // (never fell through to rendering the admin console's own register-app UI instead).
+  const { window: adminGlobalWindow } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/admin/cms/' });
+  const adminGlobalMount = adminGlobalWindow.document.querySelector('qu-app-shell');
+  const { router: adminGlobalRouter } = startPlatform({ space: relayAdminSpace, mountEl: adminGlobalMount, window: adminGlobalWindow, resolveTimeout: 500 });
+  await waitUntil(() => adminGlobalMount.innerHTML.length > 0, { timeout: 4000 });
+  assert.ok(!adminGlobalMount.querySelector('form[data-qu-action="register-app"]'), '#/admin/cms/ must delegate to "cms"\'s own global shell, not fall through to the admin console\'s own UI');
+  adminGlobalRouter.stop();
 
   // --- The relay-admin now turns "cms" OFF - it must become unreachable, indistinguishable from
   // never having been registered at all, for a BRAND NEW visitor (not relying on anything cached). ---
