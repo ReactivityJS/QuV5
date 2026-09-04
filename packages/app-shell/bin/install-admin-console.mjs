@@ -45,11 +45,46 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket from 'ws';
+import { EventBus } from '@qu/events';
 import { QuCrypto } from '@qu/core';
 import { Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport';
 import { installGlobalAppBundle, registerApp, publishGlobalRoute } from '@qu/app-core';
 import { adminConsoleBundle } from '../admin-console-bundle.js';
+
+/**
+ * Tracks every LOCAL write this Space issues and whether the relay actually
+ * write-acked it - the EXACT same helper `bootstrap-platform.mjs` uses (see
+ * that file's own doc comment on why this matters: sealing is async, `await
+ * write()` alone only proves the LOCAL Y.Doc mutation happened, never that
+ * the relay accepted it). A real, observed failure mode this exists to
+ * catch: if this identity isn't (yet) actually listed in the RUNNING
+ * relay's `QU_RELAY_ADMINS` (redeployed with a config that doesn't match
+ * this `--dir`'s identity, or not redeployed with the new config at all -
+ * a plain process restart does NOT re-read env vars), every `relay-admins`-
+ * ACL write here is silently REJECTED - this script used to just print
+ * "✅ Installiert." regardless, the exact "stillschweigend... die Seite ist
+ * anschließend nicht verfügbar" failure mode this whole engagement started
+ * from, just one level up (this SCRIPT silently lying about success,
+ * instead of the relay silently dropping a write the script correctly
+ * reported).
+ */
+function trackWrites(bus) {
+  const state = { expected: 0, acked: 0 };
+  bus.on('debug.space.write.local', () => state.expected++);
+  bus.on('space.node.*.write-ack', () => state.acked++);
+  return state;
+}
+
+async function waitUntilAllWritesAcked(state, { timeout = 5000, settle = 300, interval = 20 } = {}) {
+  await new Promise((resolve) => setTimeout(resolve, settle));
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (state.acked >= state.expected) return true;
+    await new Promise((resolve) => setTimeout(resolve, interval));
+  }
+  return false;
+}
 
 function parseArgs(argv) {
   const opts = { relay: 'ws://localhost:8081', prefix: 'admin', dir: './admin-identity', name: 'Relay-Admin' };
@@ -105,7 +140,9 @@ async function main() {
   console.log(`\nConnecting to the main Space at ${relay} …`);
   const transport = new WsClientTransport(relay, { WebSocketImpl: WebSocket });
   await transport.connect();
-  const space = new Space({ identity, members: [{ pub: identity.signingPub, xPub: identity.xPublicKey }], relayAdmins: [identity.signingPub], transport });
+  const bus = new EventBus();
+  const space = new Space({ identity, members: [{ pub: identity.signingPub, xPub: identity.xPublicKey }], relayAdmins: [identity.signingPub], transport, bus });
+  const writes = trackWrites(bus);
 
   console.log(`Registering the "${prefix}" alias…`);
   await registerApp(space, { prefix, name, realm: 'global' });
@@ -117,8 +154,22 @@ async function main() {
 
   console.log('Installing the built-in admin console content…');
   await installGlobalAppBundle(space, prefix, adminConsoleBundle);
-  await new Promise((resolve) => setTimeout(resolve, 300)); // let the writes actually leave before closing.
+
+  const ok = await waitUntilAllWritesAcked(writes);
   transport.close();
+
+  if (!ok) {
+    console.log('\n⚠ Some writes were never write-acked by the relay - it is reachable, but this identity is NOT');
+    console.log('  (yet) actually configured as a relay-admin there (a relay ignores QU_RELAY_ADMINS changes');
+    console.log('  until it is actually (re)started with it - a plain restart of an already-running process/');
+    console.log('  container does NOT re-read it by itself, the process/container needs to be RECREATED with');
+    console.log('  the new config). The console will look "installed" above but #/' + prefix + ' will 404 or show');
+    console.log('  stale/partial content, since some or all of its writes above never actually reached the relay.');
+    console.log(`\nAdd this identity to QU_RELAY_ADMINS as "${QuCrypto.toBase64(identity.signingPub)}", redeploy the`);
+    console.log('relay with that config, then re-run this exact command - it reuses this same identity and finishes.');
+    process.exitCode = 1;
+    return;
+  }
 
   console.log(`\n✅ Installiert. Öffne #/${prefix} als diese Identity, um die Konsole zu sehen.`);
   process.exit(0);
