@@ -31,8 +31,14 @@
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN --mount=type=cache,target=/root/.npm npm ci
-RUN npm prune --omit=dev
+# --omit=dev straight away, not "npm ci then npm prune --omit=dev" - nothing in this build (or the
+# runtime image) ever needs a devDependency (jsdom, declared by five workspace packages purely for
+# their own test files - see this repo's own architecture.md on the "in-process Space + jsdom" test
+# pattern - is the heavy one), so installing its whole tree just to delete it again wastes real
+# `npm ci` time for no benefit; a slow/rate-limited registry connection can turn that into minutes
+# of apparently-stuck build output (only npm's own deprecation warnings print, no per-package
+# progress) - a real, observed symptom this avoids entirely, not just a tidiness fix.
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev
 
 FROM node:22-alpine AS runtime
 WORKDIR /app
