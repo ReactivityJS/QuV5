@@ -16,13 +16,14 @@
  * owner has explicitly `grantContentWriter()`ed) can ever write to an
  * ALREADY-EXISTING page/template/style. There is no way around this that
  * doesn't involve the owner's private key at least ONCE - either by
- * importing it directly into a browser (`bootstrap-platform.mjs`'s own
- * printed devtools snippet, fine for a quick test, a real anti-pattern for
- * ongoing use - sharing a private key at all is a smell), or by running
- * THIS script once, connecting AS that identity (`--dir`, the SAME
- * identity directory `bootstrap-platform.mjs`/`install-admin-console.mjs`
- * already use - never generates a new one, see `loadIdentity()` below),
- * to grant a DIFFERENT identity (`--to`, that identity's OWN pubkey - they
+ * importing it directly into a browser (fine for a quick test, a real
+ * anti-pattern for ongoing use - sharing a private key at all is a smell),
+ * or by running THIS script once, connecting AS that identity (`--dir`,
+ * wherever your own install script persisted it - the SAME single-
+ * file-per-identity directory convention `bootstrap-platform.mjs`/
+ * `install-admin-console.mjs` use for THEIR identities, never generates a
+ * new one, see `loadIdentity()` below), to grant a DIFFERENT identity
+ * (`--to`, that identity's OWN pubkey - they
  * never need to touch the app-admin's private key at all) write access to
  * every currently-published page/template/style. After this runs once,
  * `--to`'s own identity can use `#/<prefix>/cms` with its OWN key, forever
@@ -39,11 +40,17 @@
  * existing content - re-run this script after adding new pages/templates/
  * styles if the same grantee should also maintain those.
  *
+ * Only applies to an ORDINARY (`realm: 'main'`) app - a `realm: 'global'`
+ * app has no single owner to grant FROM at all, every relay-admin already
+ * has full write access by design (see README's "Writing and installing
+ * your own app").
+ *
  * Usage (both `--dir` and the app-admin's identity inside it must already
- * exist - run `bootstrap-platform.mjs`/whatever installed this app first):
+ * exist - run whatever installed this app first, e.g. your own install
+ * script following README's "Ordinary app" recipe):
  *   node packages/app-shell/bin/grant-app-access.mjs \
  *     --relay wss://your-host --dir ./bootstrap-identity \
- *     --identity demo-app-admin --to <base64 pubkey to grant>
+ *     --identity app-admin --to <base64 pubkey to grant>
  */
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -55,7 +62,7 @@ import { WsClientTransport } from '@qu/space-transport';
 import { ContentResolver, grantContentWriter, pageKind, templateKind, styleKind } from '@qu/app-core';
 
 function parseArgs(argv) {
-  const opts = { relay: 'ws://localhost:8081', dir: './bootstrap-identity', identity: 'demo-app-admin', to: null };
+  const opts = { relay: 'ws://localhost:8081', dir: './bootstrap-identity', identity: 'app-admin', to: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--relay') opts.relay = argv[++i];
     else if (argv[i] === '--dir') opts.dir = argv[++i];
@@ -106,7 +113,7 @@ async function waitUntilAllWritesAcked(state, { timeout = 5000, settle = 300, in
 async function main() {
   const { relay, dir, identity: identityName, to } = parseArgs(process.argv.slice(2));
   if (!to) {
-    console.error('Usage: node grant-app-access.mjs --relay wss://your-host --dir ./bootstrap-identity --identity demo-app-admin --to <base64 pubkey>');
+    console.error('Usage: node grant-app-access.mjs --relay wss://your-host --dir ./bootstrap-identity --identity app-admin --to <base64 pubkey>');
     process.exitCode = 1;
     return;
   }

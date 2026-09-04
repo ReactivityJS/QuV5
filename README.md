@@ -128,20 +128,20 @@ npm run bootstrap:platform
 
 **Run this from ANYWHERE with network access to your relay's URL - your
 own laptop, a CI runner, wherever is easiest** (never touches your
-deployment config either way): it generates a `relay-admin` and a
-`demo-app-admin` identity locally, then either
+deployment config either way): it generates a single `relay-admin`
+identity locally, then either
 
 **A REAL FOOTGUN if you run it via `docker exec` into the SAME container
 you'll later redeploy** (common on managed platforms like Rancher/
 Kubernetes where a separate machine/toolchain is inconvenient): the
 identity it generates defaults to a path INSIDE the container's own
 filesystem, which does NOT survive a redeploy - the symptom is a
-brand-new `relay-admin`/`demo-app-admin` pubkey printed every time you
-run it, and the OLD relay-admin loses write access to everything it
-previously administered once its identity is gone. If you must run
-it this way, set `QU_BOOTSTRAP_DIR` (or pass `--dir`) to a path backed by
-a volume that actually survives redeploys - `docker-compose.space-relay.yml`'s
-own `qu-app-shell-relay-admin-identity` volume (mounted at `/admin-identity`,
+brand-new `relay-admin` pubkey printed every time you run it, and the OLD
+relay-admin loses write access to everything it previously administered
+once its identity is gone. If you must run it this way, set
+`QU_BOOTSTRAP_DIR` (or pass `--dir`) to a path backed by a volume that
+actually survives redeploys - `docker-compose.space-relay.yml`'s own
+`qu-app-shell-relay-admin-identity` volume (mounted at `/admin-identity`,
 `QU_BOOTSTRAP_DIR` already defaults to it there) is the reference setup;
 back that volume up like you would any other private key. The script
 itself warns loudly when `--dir`/`QU_BOOTSTRAP_DIR` isn't set, for exactly
@@ -149,18 +149,21 @@ this reason.
 
 - the relay isn't configured yet → **prints the exact `QU_RELAY_ADMINS`
   value** (a plain JSON array of base64 pubkeys, public keys only - the ONE
-  static list a platform deployment needs; a brand-new app-admin like
-  `demo-app-admin` needs no separate config at all, `registerApp()`
-  discovers it live) for YOU to paste into however you manage your
-  deployment's environment - `docker-compose.space-relay.yml` directly,
-  your own `docker stack` file, a Kubernetes manifest, systemd, whatever -
-  then redeploy however you already do (`docker compose up -d`, `docker
-  stack deploy`, ...) and run the SAME command again; or
+  static list a platform deployment needs) for YOU to paste into however
+  you manage your deployment's environment - `docker-compose.space-relay.yml`
+  directly, your own `docker stack` file, a Kubernetes manifest, systemd,
+  whatever - then redeploy however you already do (`docker compose up -d`,
+  `docker stack deploy`, ...) and run the SAME command again; or
 - the relay already has them (this second run, or any later one) →
-  installs the admin console, creates a demo shell-app with its own CMS
-  editor installed, registers both under `#/admin` and `#/demo`, and
-  prints the exact URLs plus ready-to-paste browser devtools snippets so
-  you can actually act as either identity.
+  installs the admin console AND registers the built-in **"cms"** app as
+  `realm: 'global'`, `mode: 'multiuser'` (see "Three administrable states"
+  below) under `#/admin` and `#/cms` respectively, and prints the exact
+  URLs plus a ready-to-paste browser devtools snippet for the relay-admin
+  identity. There is no second "app-admin" identity any more - see
+  "WHY THERE IS NO SECOND/APP-ADMIN IDENTITY ANY MORE" in
+  `bin/bootstrap-platform.mjs`'s own doc comment for the full reasoning:
+  every visitor gets their own self-owned CMS space at `#/cms/` the moment
+  they visit it, with zero cooperation from this script or any relay-admin.
 
 **You don't have to use the generated `relay-admin` identity at all** -
 `#/admin` is ordinary content in the SAME main Space, gated only by
@@ -174,8 +177,8 @@ identity to generate or import into the browser.
 **"Does the relay itself need an entry in `QU_RELAY_ADMINS`?" - no.** Every
 entry is a HUMAN/OPERATOR identity - an Ed25519 keypair someone actually
 holds the private half of and signs writes with (a browser's `localStorage`
-identity, `relay-admin`/`demo-app-admin`'s files under `--dir`, or any
-other client identity) - never the relay PROCESS's own. `packages/app-shell/
+identity, `relay-admin`'s files under `--dir`, or any other client
+identity) - never the relay PROCESS's own. `packages/app-shell/
 relay-server.js` has no identity of its own at all; it only ever CHECKS
 signatures against the pubkeys you list, it never signs anything itself.
 (`@qu/space-transport`'s plain `relay-server.js` - the legacy chat relay,
@@ -185,6 +188,16 @@ exclusively for relay-to-relay FEDERATION trust, unrelated to
 So the only identities that ever belong in `QU_RELAY_ADMINS` are whichever
 people (or CI/automation identities acting on their behalf) you want to be
 able to administer this platform's global apps.
+
+**"How do I know if the admin/cms content actually deployed?" - it needs
+`QU_RELAY_ADMINS` set BEFORE either exists.** `#/admin` and `#/cms` are
+both `realm: 'global'` content, `acl.write: 'relay-admins'` - the very
+FIRST `bootstrap:platform` run (before you've pasted `QU_RELAY_ADMINS`
+anywhere) can connect to an unconfigured relay fine, but every one of its
+writes is silently rejected, so nothing is actually installed yet. That's
+what the "two runs" flow above is for: run once to get the relay-admin
+pubkey, configure+redeploy your relay with it, THEN run again to actually
+install content - the script itself tells you which state you're in.
 
 Two runs on a totally fresh setup is normal, not a bug - see
 `packages/app-shell/bin/bootstrap-platform.mjs`'s own doc comment for the
@@ -225,40 +238,51 @@ platform` (above) fixes both at once.
 
 **The Admin-UI (`#/admin`) and a CMS editor (`#/<prefix>/cms`) are TWO
 DIFFERENT things, at two different levels** - a common point of confusion:
-- **`#/admin`** (platform/relay-admin level, ONE per platform) only
-  registers apps under path prefixes (`registerApp()`) - it has no
-  content editor of its own. `bootstrap:platform` installs it for you;
-  by hand, see `packages/app-shell/bin/install-admin-console.mjs`.
-- **`#/<prefix>/cms`** (per-app, one per REGISTERED app, `#/demo/cms` for
-  `bootstrap:platform`'s own demo app) is where that app's OWN
-  templates/styles/pages are actually created and edited - see
-  architecture.md §7's "The built-in CMS editor." Every app-admin installs
-  this into their OWN app's Space (`installCms(space)`,
-  `@qu/app-shell`'s `cms-bundle.js`) - `bootstrap:platform` does this for
-  its demo app automatically; for your OWN app, call `installCms()` from
-  your own install script (see `demo/install-app-shell-demo.mjs` for the
-  connect-as-app-admin pattern) or add it to your own bundle install flow.
+- **`#/admin`** (platform/relay-admin level, ONE per platform) registers
+  apps under path prefixes (`registerApp()`), flips a `realm: 'global'`
+  app's mode (`setAppMode()` - the buttons next to each app in its own
+  "Installierte Apps" list), and links to each `realm: 'global'` app's own
+  "Verwalten" page (`#/admin/<prefix>/`, see the next bullet and "Three
+  administrable states" below) - it has no generic content editor of its
+  own. `bootstrap:platform` installs it for you; by hand, see
+  `packages/app-shell/bin/install-admin-console.mjs`.
+- **`#/<prefix>/cms`** (per-app) is where that app's OWN templates/styles/
+  pages are actually created and edited - see architecture.md §7's "The
+  built-in CMS editor." For an ordinary (`realm: 'main'`) app this is the
+  app-admin's own `#/<prefix>/cms`, installed via `installCms(space)`
+  (`@qu/app-shell`'s `cms-bundle.js`) into their OWN app's Space. For the
+  built-in **"cms"** app itself (`realm: 'global'`, `mode: 'multiuser'`) it
+  works differently - see the next section.
 
-There is currently no SINGLE, platform-wide CMS shared across every app -
-each ordinary app gets its OWN independent CMS editor, installed once per
-app - and no CMS for `#/admin`'s own content specifically either (its
-`qu-admin-*` Kinds have no `edit*()` counterparts wired into that console's
-UI - `bin/install-admin-console.mjs` remains the only way to update it).
+There is no CMS for `#/admin`'s own content specifically (its `qu-admin-*`
+Kinds have no `edit*()` counterparts wired into that console's UI -
+`bin/install-admin-console.mjs` remains the only way to update it).
 
 **Any OTHER `realm: 'global'` app DOES get a page editor for free, though**
-(a later addition than the paragraph above) - relay-admins collectively
-administer every global app's content, not just register it (see
-architecture.md §7's "Global apps, not just one admin console"), and
-`#/<prefix>/cms` for such an app wires the exact same CMS editor UI against
+- relay-admins collectively administer every global app's content, not
+just register it (see architecture.md §7's "Global apps, not just one
+admin console"), via the exact same CMS editor UI wired against
 `createGlobalPage()`/`editGlobalPage()`/`publishGlobalRoute()` instead of
 an independently-owned app's own `create*()`/`edit*()` - ANY currently-
-configured relay-admin can then edit ANY page under that prefix, not just
-whoever created it first. Templates/styles are a deliberate, separate scope
-cut for global apps (no dynamic registry for them yet - see the same
+configured relay-admin can then edit ANY page there, not just whoever
+created it first. Templates/styles are a deliberate, separate scope cut for
+global apps (no dynamic registry for them yet - see the same
 architecture.md section) - only the pages section of the CMS editor is
-wired in global mode. See "Writing and installing your own app" below for
-the two shapes an app can take (ordinary vs. global) and which one this is
-right for.
+wired in global mode.
+
+**Where that editor actually LIVES depends on the app's `mode`** (see
+"Three administrable states" below):
+- `mode: 'global'` (the default) - it's at the bare `#/<prefix>/cms`,
+  exactly like an ordinary app's.
+- `mode: 'multiuser'` - the bare `#/<prefix>/...` now means EACH VISITOR's
+  own space instead (see below), so the app's own GLOBAL shell (and its
+  editor) moves to `#/admin/<prefix>/...` - e.g. the built-in "cms" app's
+  own global landing page's editor is at `#/admin/cms/cms`. The admin
+  console's own "Installierte Apps" list links straight there
+  ("Verwalten"), so you never have to remember or type this path by hand.
+
+See "Writing and installing your own app" below for the two shapes an app
+can take (ordinary vs. global) and which one this is right for.
 
 ## Writing and installing your own app
 
@@ -272,8 +296,8 @@ separate deploy/build step per app and no app registry beyond
 **Ordinary app (`realm: 'main'`, the common case)** - owned by exactly ONE
 app-admin identity, reachable at its own owner pubkey with zero relay-admin
 involvement, `registerApp()` only ever adding a prettier `#/<prefix>` alias
-on top. `packages/app-shell/bin/bootstrap-platform.mjs`'s own "demo"
-section is the reference recipe, generalized:
+on top. `packages/app-shell/bin/grant-app-access.mjs`'s own doc comment
+walks through connecting as such an identity; the shape is:
 
 1. Generate/persist an app-admin identity (`ensureIdentity()`-style: load
    from disk if it exists, generate + save a fresh Ed25519+X25519 keypair
@@ -325,18 +349,53 @@ feature-gate** (`mode`, `registerApp()`/`setAppMode()`,
 architecture.md §7's own "Three administrable states" section for the
 full design reasoning) - `'off'` (unreachable, same as never registered),
 `'global'` (the default - only relay-admins may write, exactly the
-paragraph above), or `'multiuser'` - the global shell stays exactly as in
-`'global'` mode, PLUS every visitor (relay-admins included, no special
-role needed) may ALSO maintain their OWN content at
-`#/<prefix>/u/<ref>/...` (`ref` = `"me"`, or another identity's own
-base64url pubkey to read theirs) - an ordinary, self-owned `'content'`-ACL
-namespace, no registration or grant required, a first-ever visit to
-`/u/me/` self-provisioning a minimal personal app + CMS editor on the
-spot. `setAppMode(space, {prefix, mode})` changes an ALREADY-registered
-app's mode later (a relay-admin call, same as `registerApp()` itself) -
-see `packages/app-shell/test/multiuser-app.test.js` for the reference
-example (registers `"cms"` this way, two independent visitors each
-maintain their own page with zero further cooperation).
+paragraph above), or `'multiuser'`.
+
+**`mode: 'multiuser'` flips what the BARE `#/<prefix>/...` prefix means**:
+instead of the app's global shell, it now resolves to the CURRENTLY
+signed-in identity's own space by default - no `/u/me/` to type, no pubkey
+to know or paste (that was the actual, reported UX problem this flip
+fixes: a first-time visitor has no reason to know their own pubkey just to
+reach their own content). A brand-new visitor's first-ever visit
+self-provisions a minimal personal app + CMS editor on the spot, entirely
+in their own, self-owned `'content'`-ACL namespace - zero registration,
+zero grant, zero relay-admin cooperation beyond the app existing at all.
+`#/<prefix>/u/<ref>/...` still works, explicitly, for the one thing a bare
+prefix can't express - addressing "me" explicitly or another identity's
+space on purpose (`ref` = `"me"`, or that identity's own base64url pubkey,
+read-only unless they've granted you write access). The app's own GLOBAL
+shell - what the bare prefix meant before this flip - moves to
+`#/admin/<prefix>/...` instead, reachable only by a relay-admin (see
+"Where that editor actually LIVES" above).
+
+`setAppMode(space, {prefix, mode})` changes an ALREADY-registered app's
+mode later (a relay-admin call, same as `registerApp()` itself) - see
+`packages/app-shell/test/multiuser-app.test.js` for the reference example
+(registers `"cms"` this way, two independent visitors each maintain their
+own page with zero further cooperation, then a relay-admin turns it off).
+
+**Exact example - deploying/re-registering an app as `multiuser`:**
+`bin/set-app-mode.mjs` is the scriptable version of the admin console's own
+mode buttons - and answers "how do I find the right prefix?" directly,
+since there is no separate per-app "space" to look up (this whole platform
+lives in ONE relay Space; `qu-platform-apps` is the one registry naming
+every app in it):
+
+```sh
+# 1. List every registered app in this relay's ONE Space - this IS "finding the right prefix":
+node packages/app-shell/bin/set-app-mode.mjs \
+  --relay wss://your-host --dir ./bootstrap-identity
+#   -> #/cms       realm=global  mode=multiuser  (CMS)
+#   -> #/admin     realm=global  mode=global     (Relay-Admin)
+
+# 2. Flip (or re-confirm) "cms" as multiuser - same relay-admin identity bootstrap-platform.mjs
+#    already created under --dir, no separate identity to generate:
+node packages/app-shell/bin/set-app-mode.mjs \
+  --relay wss://your-host --dir ./bootstrap-identity --prefix cms --mode multiuser
+```
+
+Works identically for any OTHER `realm: 'global'` app you've registered
+yourself under a different prefix - swap `cms` for that prefix.
 
 **Verifying an install actually worked, not just that it ran**: a script
 that only `await`s each write and prints "done" can be lying - a write to
@@ -369,7 +428,7 @@ private key at all is a smell), or, the actual self-service fix:
 ```sh
 node packages/app-shell/bin/grant-app-access.mjs \
   --relay wss://your-host --dir ./bootstrap-identity \
-  --identity demo-app-admin --to <base64 pubkey of YOUR OWN identity>
+  --identity <your-app-admin-identity-name> --to <base64 pubkey of YOUR OWN identity>
 ```
 
 Connects ONCE as the app-admin (`--dir`/`--identity`, the SAME identity

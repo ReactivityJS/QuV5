@@ -1188,6 +1188,16 @@ own doc comment). Two changes close this:
   `unregisterApp()` - real, separate work if "revoke a registered app's
   alias" is ever needed. This is UNRELATED to admin/member revocation
   (below), which the underlying identity list already supports fine.
+- **`demo-app-admin` no longer exists (a later revision):** everything
+  above describing it is history, not current behavior -
+  `bootstrap-platform.mjs` dropped the single-owner "demo" shell-app and
+  its separate app-admin identity entirely once `mode: 'multiuser'`
+  shipped (see "Three administrable states" below), registering the
+  built-in `"cms"` app as `realm: 'global', mode: 'multiuser'` instead.
+  `relay-admin` is now the ONLY identity that script generates - every
+  visitor gets their own self-owned CMS space at `#/cms/` on first visit,
+  with zero cooperation from this script or any relay-admin, closing the
+  exact bottleneck a single app-admin identity always was.
 
 **`addMember()`/`removeMember()` and `addRelayAdmin()`/`removeRelayAdmin()`
 - ONE shared mechanism for both lists, not two:** removing a relay-admin
@@ -1460,6 +1470,60 @@ closer to `renderAdminUnauthorized()`'s own "purely cosmetic front-end
 decision, the real boundary is elsewhere" posture than to anything
 `buildWriteAcl()` needs to know about. Not implemented in this pass -
 real, separate work if a concrete need for it ever materializes.
+
+**The `/u/me/` discoverability problem, and flipping the default (a later
+revision):** shipping `mode: 'multiuser'` surfaced a real UX gap -
+`#/cms/u/me/` requires a visitor to already know the `/u/me/` convention
+exists at all; there was no obvious link pointing them at it, and the
+BARE `#/cms/` still meant the (relay-admin-only-writable) global shell,
+the least useful thing for an ordinary visitor to land on. Fixed by
+flipping the default: for a `mode: 'multiuser'` app, a subPath NOT
+matching `/u/<ref>/...` (`boot.js`'s `parseMultiUserSubPath()`) is now
+treated as an IMPLICIT `{ref: 'me', ...}` rather than falling through to
+the global shell - `#/cms/` and `#/cms/cms` now mean "my own space" and
+"my own CMS editor," no URL convention to discover at all. `/u/<ref>/...`
+remains, explicitly, for the one thing a bare prefix genuinely cannot
+express - addressing "me" explicitly, or someone else's space on purpose.
+
+This left the app's own GLOBAL shell - what the bare prefix used to mean -
+without a home, since it obviously couldn't keep the bare prefix once that
+now means "your own space." Given it back one level up:
+`#/admin/<appPrefix>/...` (`parseAdminSubPath()`/`renderGlobalShell()`,
+`boot.js`) - `startPlatform()`'s `"admin"` branch tries this BEFORE
+falling back to the admin console's own UI, delegating to
+`renderGlobalShell()` (the SAME `AppRuntime`/`GLOBAL_KINDS`/
+`globalAppAnchor()`/`wireCms({global: true})` combination every
+`mode: 'global'` app's bare prefix already used, just factored out for
+this second call site) whenever the next path segment names another
+CURRENTLY-registered `realm: 'global'` app. Gated by the exact same
+`space.isRelayAdmin()` check the console's own root already had - a
+`mode: 'multiuser'` app's global shell is exactly as relay-admin-only as a
+plain `mode: 'global'` app's always was, only its ADDRESS moved.
+
+**`registerApp()`/`setAppMode()`'s own version of the self-provisioning
+race, caught by the admin console's new mode buttons:** giving the admin
+console UI actual mode-toggle buttons (instead of registration only)
+surfaced a second instance of the exact bug class `ensureSelfProvisioned()`
+already fixed once (`Space.createNode()` never refcounts its own
+creation - the first `useNode()`/`release()` pair ANY reader does
+afterward tears the local Y.Doc back down). `registerApp()`/`setAppMode()`
+used to do a bare `space.getNode(id) ?? (await space.createNode(...))`
+against `qu-platform-apps`'s own registry Node - harmless the FIRST time
+any given `Space` instance ever touches it, but the admin console's own
+apps-list refresh (`platform.resolveApps()`, an ordinary `useNode()`+
+`release()` pair) now runs BETWEEN a relay-admin's page load and their
+next mode-button click, tearing that registry back down locally; the next
+`setAppMode()` call's own `getNode(id)` then found nothing, fell into
+`createNode()`, and built a brand-new, EMPTY local Y.Doc for an id that
+already held every other relay-admin's registrations - `setAppMode()`
+promptly failed to find the very entry it was just asked to change
+(`"cms" is not a registered app"`, reproduced via exactly this
+click-right-after-a-list-refresh sequence, not a contrived one). Fixed by
+routing both functions through `getOrSyncRegistryNode()` - the SAME
+"never blindly re-`createNode()`, check whether it merely needs a moment
+to resync first" helper `publishRoute()`/`createTemplate()`/`createStyle()`
+already used for their own per-owner registries - instead of hand-rolling
+the same check again, incorrectly, for this one global registry.
 
 **Reading this as a CMS, not just a router:** the admin console proves the
 general shape - "UI legt sich selbst innerhalb des Storage an und hat

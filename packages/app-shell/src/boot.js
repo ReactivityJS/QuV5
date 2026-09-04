@@ -25,7 +25,12 @@ const GLOBAL_KINDS = { appManifestKind: adminAppManifestKind, pageKind: adminPag
 
 /** @param {{mountEl: Element, doc: Document, platform: PlatformRuntime}} params - shown when no registered app's prefix (nor a well-formed owner id) matches the current route. The one piece of `startPlatform()` UI that ISN'T Qu content: by definition nothing here resolved, so there is no content to fetch it from - same "Framework Default" posture `@qu/app-renderer` already takes for a single app's own unresolved routes. */
 async function renderLandingPage({ mountEl, doc, platform }) {
-  const apps = await platform.resolveApps({ timeout: 1500 });
+  // Filters out `mode: 'off'` global apps - kinds.js's own doc comment on the three states requires
+  // an "off" app to be INDISTINGUISHABLE from one never registered at all; a landing-page link that
+  // 404s the moment it's clicked would violate that for ordinary visitors (an admin still sees it,
+  // deliberately, in the admin console's own apps list - that one needs to stay reachable to turn it
+  // back on).
+  const apps = (await platform.resolveApps({ timeout: 1500 })).filter((a) => !(a.realm === 'global' && a.mode === 'off'));
   const container = doc.createElement('div');
   container.style.cssText = 'font-family: sans-serif; max-width: 40rem; margin: 2rem auto; line-height: 1.5; padding: 0 1rem;';
   const h1 = doc.createElement('h1');
@@ -89,17 +94,20 @@ function renderAdminUnauthorized({ mountEl, doc }) {
 }
 
 /**
- * Recognizes a `realm: 'global'`, `mode: 'multiuser'` app's own per-user
- * sub-namespace (kinds.js's own doc comment on the three states) -
+ * Recognizes a `realm: 'global'`, `mode: 'multiuser'` app's EXPLICIT
+ * per-user sub-namespace (kinds.js's own doc comment on the three states) -
  * `/u/<ref>/<rest>` where `ref` is either the literal string `"me"` (the
- * CURRENTLY signed-in identity - by far the common case, no need for a
- * visitor to know/paste their own pubkey) or another identity's own
+ * CURRENTLY signed-in identity - the default anyway, see `startPlatform()`,
+ * so this form is rarely typed by hand) or another identity's own
  * base64url-encoded pubkey (the SAME encoding `PlatformRuntime`'s own
  * top-level "unregistered prefix = literal owner id" fallback already
- * uses - reading it is always public, same as any other content here).
- * Everything else under this prefix (no `/u/` segment at all) is the
- * app's ordinary GLOBAL shell content, unaffected by `multiuser` mode -
- * `startPlatform()` falls through to that when this returns `null`.
+ * uses - reading it is always public, same as any other content here) -
+ * the one case a bare prefix genuinely can't express: looking at someone
+ * ELSE's own space on purpose. Returns `null` for anything else, which
+ * `startPlatform()` then treats as an IMPLICIT `{ref: 'me', ...}` - see
+ * that function's own doc comment on why the default flipped away from
+ * the global shell (discoverability: a first-time visitor has no reason to
+ * know or paste their own pubkey just to reach their OWN space).
  * @param {string} subPath
  * @returns {{ref: string, userSubPath: string}|null}
  */
@@ -107,6 +115,29 @@ function parseMultiUserSubPath(subPath) {
   const match = /^\/u\/([^/]+)(\/.*)?$/.exec(subPath ?? '');
   if (!match) return null;
   return { ref: match[1], userSubPath: match[2] || '/' };
+}
+
+/**
+ * Recognizes `#/admin/<appPrefix>/<rest>` - the relay-admin-only route to
+ * another registered `realm: 'global'` app's OWN global shell content
+ * (`renderGlobalShell()`, right below) - `startPlatform()`'s `"admin"`
+ * branch tries this BEFORE falling back to rendering the admin console's
+ * own UI, so `#/admin/cms/` reaches the "cms" app's global landing page and
+ * `#/admin/cms/cms` its global CMS editor, exactly the counterpart to how
+ * `#/<prefix>/...` used to reach it directly before `mode: 'multiuser'`
+ * claimed the bare prefix for each visitor's OWN space instead (see this
+ * file's own top doc comment on `startPlatform()`). Returns `null` for a
+ * bare `/` (the admin console's OWN root) - callers only ever consult this
+ * from within the already-matched `"admin"` prefix, so an empty match here
+ * correctly means "render the admin console itself," not "some app named
+ * the empty string."
+ * @param {string} subPath - `match.subPath` for `prefix === 'admin'`.
+ * @returns {{appPrefix: string, appSubPath: string}|null}
+ */
+function parseAdminSubPath(subPath) {
+  const match = /^\/([^/]+)(\/.*)?$/.exec(subPath ?? '');
+  if (!match) return null;
+  return { appPrefix: match[1], appSubPath: match[2] || '/' };
 }
 
 /** `parseMultiUserSubPath()`'s own `ref` resolved to a real pubkey, or `null` if it's neither `"me"` nor a well-formed base64url pubkey. */
@@ -203,6 +234,30 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
 }
 
 /**
+ * Renders a `realm: 'global'` app's own GLOBAL shell content - the exact
+ * same `AppRuntime`/`GLOBAL_KINDS`/`globalAppAnchor()`/`wireCms({global:
+ * true})` combination `startPlatform()` always used for a global app's bare
+ * prefix, factored out here since it now has TWO different call sites: an
+ * ordinary `mode: 'global'` app's own bare `#/<prefix>/...` (unchanged),
+ * and, for a `mode: 'multiuser'` app - whose bare prefix now resolves to
+ * each visitor's OWN space instead (`renderMultiUserRoute()`, right above) -
+ * `#/admin/<prefix>/...` instead (`parseAdminSubPath()`, this file's own
+ * doc comment on it). Deliberately takes a plain `prefix` string, never a
+ * whole `match` object - the admin-delegation call site has no
+ * `PlatformRuntime` match for the DELEGATED app, only its prefix from the
+ * URL and a lookup in `platform.resolveApps()` confirming it is actually a
+ * currently-registered `realm: 'global'` app.
+ */
+async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix, subPath }) {
+  const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
+  const runtime = new AppRuntime(space, { appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
+  const plan = await runtime.resolveRoute(subPath, timeoutOpt);
+  mountEl.quSpace = space;
+  renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+  await wireCms({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), global: true, prefix });
+}
+
+/**
  * @param {{space: import('@qu/space-core').Space, appAdminPub: Uint8Array, mountEl: Element, window: {location: object, document: Document, addEventListener: Function, removeEventListener: Function}, styleId?: string, resolveTimeout?: number}} params
  *   `resolveTimeout` - how long to wait for a route's content to sync before giving up and rendering the "not found" fallback (see @qu/app-core's `ContentResolver`'s own `timeout` param); defaults to that resolver's own default.
  * @returns {{runtime: AppRuntime, router: HashRouter}} - `router.stop()` tears down the hashchange listener; nothing else here needs explicit cleanup.
@@ -270,15 +325,23 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  * at all, only the admin console's own management UI does.
  *
  * `mode: 'multiuser'` (kinds.js's own doc comment on the three
- * administrable states) additionally recognizes a `/u/<ref>/...` sub-path
- * (`parseMultiUserSubPath()`/`renderMultiUserRoute()`, right above) - `ref`
- * `"me"` or another identity's own base64url pubkey - and resolves/renders
- * THAT identity's own ordinary, self-owned `'content'`-ACL Kinds instead
- * of this app's global anchor, an `AppRuntime`/`wireCms()` pair no
- * different from a single-owner app. Every OTHER sub-path under a
- * `multiuser` app still resolves against the global anchor exactly like
- * `mode: 'global'` - `multiuser` only ADDS the per-user namespace, it
- * never removes the shared one.
+ * administrable states) FLIPS the default at a bare `#/<prefix>/...`: it
+ * now resolves/renders the CURRENTLY signed-in identity's own ordinary,
+ * self-owned `'content'`-ACL Kinds (`renderMultiUserRoute()`, `ref: 'me'`)
+ * instead of the app's global anchor - the whole point of this mode is
+ * that a visitor needs ZERO relay-admin cooperation to get their own
+ * space, so making them additionally discover and type `/u/me/` just to
+ * reach it would defeat that. `parseMultiUserSubPath()`'s explicit
+ * `/u/<ref>/...` form still works, for the one thing a bare prefix can't
+ * express: addressing a DIFFERENT identity's space on purpose (`ref` =
+ * that identity's own base64url pubkey). The app's own GLOBAL shell
+ * content - what a bare prefix used to mean, before this flip - moves to
+ * `#/admin/<prefix>/...` instead (`parseAdminSubPath()`/
+ * `renderGlobalShell()`, this file's own doc comments on them), reachable
+ * only by a relay-admin, same as the admin console's own root - a
+ * `multiuser` app's global shell is exactly as relay-admin-administered as
+ * a plain `mode: 'global'` app's, it is simply no longer reachable at the
+ * BARE prefix once that prefix means "your own space" by default.
  * @param {{space: import('@qu/space-core').Space, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
  *   `space` - MUST have been constructed with a `relayAdmins` list (see
  *   `Space`'s own constructor doc comment) matching the relay's own
@@ -304,28 +367,53 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
         await renderLandingPage({ mountEl, doc: window.document, platform });
         return;
       }
-      if (match.prefix === 'admin' && !space.isRelayAdmin()) {
-        renderAdminUnauthorized({ mountEl, doc: window.document });
-        return;
-      }
-      const isGlobal = match.realm === 'global';
-      if (isGlobal && match.mode === 'multiuser') {
-        const userRoute = parseMultiUserSubPath(match.subPath);
-        if (userRoute) {
-          await renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ...userRoute });
+
+      if (match.prefix === 'admin') {
+        if (!space.isRelayAdmin()) {
+          renderAdminUnauthorized({ mountEl, doc: window.document });
           return;
         }
-        // No `/u/...` segment - falls through below to this app's own ordinary GLOBAL shell content,
-        // exactly like `mode: 'global'` - `multiuser` only ADDS the per-user namespace, see kinds.js's
-        // own doc comment on the three states.
+        // #/admin/<appPrefix>/... - a DIFFERENT registered realm:'global' app's own global shell
+        // (parseAdminSubPath()'s own doc comment) - tried BEFORE falling back to the admin console's
+        // own UI, so this never shadows the console's own root ("/" never matches it, see that
+        // function's own doc comment).
+        const delegated = parseAdminSubPath(match.subPath);
+        if (delegated) {
+          const apps = await platform.resolveApps(timeoutOpt);
+          const target = apps.find((a) => a.prefix === delegated.appPrefix && (a.realm ?? 'main') === 'global');
+          if (target) {
+            await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: target.prefix, subPath: delegated.appSubPath });
+            return;
+          }
+        }
+        const runtime = new AppRuntime(space, { appAdminPub: await globalAppAnchor('admin'), kinds: GLOBAL_KINDS });
+        const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
+        mountEl.quSpace = space;
+        renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+        wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
+        return;
       }
-      const runtime = isGlobal ? new AppRuntime(space, { appAdminPub: await globalAppAnchor(match.prefix), kinds: GLOBAL_KINDS }) : new AppRuntime(space, { appAdminPub: match.appAdminPub });
+
+      const isGlobal = match.realm === 'global';
+      if (isGlobal && match.mode === 'multiuser') {
+        // Bare prefix defaults to THIS visitor's own space now - see this function's own doc
+        // comment on why the default flipped. `/u/<ref>/...` remains available to address "me"
+        // explicitly or another identity's space on purpose.
+        const userRoute = parseMultiUserSubPath(match.subPath) ?? { ref: 'me', userSubPath: match.subPath };
+        await renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ...userRoute });
+        return;
+      }
+
+      if (isGlobal) {
+        await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: match.prefix, subPath: match.subPath });
+        return;
+      }
+
+      const runtime = new AppRuntime(space, { appAdminPub: match.appAdminPub });
       const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
       mountEl.quSpace = space;
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
-      if (match.prefix === 'admin') wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
-      else if (isGlobal) await wireCms({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(match.prefix), global: true, prefix: match.prefix });
-      else await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
+      await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
     },
   });
   router.start();

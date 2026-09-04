@@ -32,7 +32,7 @@
  * comment), so `bin/install-admin-console.mjs` remains the only way to
  * update it, unchanged. A reasonable future extension, not attempted here.
  */
-import { createTemplate, createPage } from '@qu/app-core';
+import { createTemplate, createPage, createGlobalTemplate, createGlobalPage } from '@qu/app-core';
 
 export const cmsBundle = {
   template: {
@@ -107,4 +107,35 @@ export const cmsBundle = {
 export async function installCms(space, bundle = cmsBundle) {
   await createTemplate(space, bundle.template);
   await createPage(space, bundle.page);
+}
+
+/**
+ * GLOBAL-APP COUNTERPART TO `installCms()` - the SAME editor template+page,
+ * but written as the `qu-admin-*` Kinds (`createGlobalTemplate()`/
+ * `createGlobalPage()`, `@qu/app-core`'s "GLOBAL APP DEV API"), anchored on
+ * `prefix`'s own global anchor instead of an app-admin's pubkey. Used for a
+ * `realm: 'global'`, `mode: 'multiuser'` app's OWN global shell - reachable
+ * by any relay-admin at `#/admin/<prefix>/cms` (`boot.js`'s
+ * `parseAdminSubPath()`/`renderGlobalShell()`), completely separate content
+ * from any visitor's own self-provisioned `installCms()` call at
+ * `#/<prefix>/u/<ref>/cms` - the two never share a Node id (different owner
+ * anchors entirely), so editing one never touches the other.
+ *
+ * Does NOT call `publishGlobalRoute()` itself for `/cms` - UNLIKE the
+ * `'content'`-ACL Kinds `installCms()` writes, a `qu-admin-page` write is
+ * only classified correctly once the relay's own live resolver has already
+ * observed a `publishGlobalRoute()` write for that EXACT route
+ * (`dev.js`'s own `publishGlobalRoute()` doc comment), with a real settle
+ * delay in between (see `bootstrap-platform.mjs`'s own "ORDER MATTERS" doc
+ * comment) - a fixed delay baked into this shared function would either be
+ * too short for a real network deployment or needlessly slow for an
+ * in-process test, so that step stays the CALLER's job, same as it already
+ * is for the admin console's own `/` route in `bin/install-admin-console.mjs`.
+ * @param {import('@qu/space-core').Space} space - a relay-admin's own Space.
+ * @param {string} prefix - the SAME prefix this app is `registerApp()`ed under, with `/cms`'s route already `publishGlobalRoute()`d and settled.
+ * @param {typeof cmsBundle} [bundle]
+ */
+export async function installGlobalCms(space, prefix, bundle = cmsBundle) {
+  await createGlobalTemplate(space, prefix, bundle.template);
+  await createGlobalPage(space, prefix, bundle.page);
 }
