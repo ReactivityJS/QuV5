@@ -332,6 +332,43 @@ platform.mjs`'s `trackWrites()`/`waitUntilAllWritesAcked()` (also now used
 by `install-admin-console.mjs`) is the reference implementation; copy it
 into your own install script rather than reinventing it.
 
+**"Why do I have to import an app-admin's private key into my browser just
+to edit its content - can't I just list MY OWN identity as admin
+somewhere instead?"** - no, and this isn't a bug: ownership of an ordinary
+(`realm: 'main'`) app's `qu-page`/`qu-template`/`qu-style` content is
+CRYPTOGRAPHIC and permanent, fixed forever at the moment each one was
+created (`deriveContentNodeId(ownerPub, kind, path)`) - no config change,
+`registerApp()` re-alias, or `QU_RELAY_ADMINS` entry can retroactively
+change who owns EXISTING content (relay-admin status is a completely
+separate, unrelated permission - see "Does the relay itself need an entry
+in QU_RELAY_ADMINS?" above for the same "these are different lists"
+confusion one level up). There genuinely is no way around touching the
+owner's private key at least ONCE - either by importing it directly
+(`bootstrap-platform.mjs`'s own printed devtools snippet, fine for a quick
+test, a real anti-pattern to keep doing for ongoing work - sharing a
+private key at all is a smell), or, the actual self-service fix:
+
+```sh
+node packages/app-shell/bin/grant-app-access.mjs \
+  --relay wss://your-host --dir ./bootstrap-identity \
+  --identity demo-app-admin --to <base64 pubkey of YOUR OWN identity>
+```
+
+Connects ONCE as the app-admin (`--dir`/`--identity`, the SAME identity
+directory `bootstrap-platform.mjs` already created - never generates a new
+one) and calls `grantContentWriter()` (`@qu/app-core`) for every currently
+published page/template/style, extending write access to `--to`'s pubkey
+- find your own browser identity's pubkey via `window.Qu.pub` in devtools,
+or the relay's unconfigured setup page. After this runs once, that
+identity can use `#/<prefix>/cms` with its OWN key, forever (grants don't
+expire) - never needing the app-admin's private key again. Only covers
+EXISTING content - re-run it after publishing new pages/templates/styles
+if the same grantee should maintain those too (or just keep using it as
+the app-admin for anything genuinely new). The built-in admin console and
+any OTHER `realm: 'global'` app don't have this problem at all - every
+relay-admin already has full access, by design (see the CMS section
+above).
+
 ## Deploying the legacy chat relay
 
 The OLD, hardcoded chat demo relay (`@qu/space-transport`'s own
