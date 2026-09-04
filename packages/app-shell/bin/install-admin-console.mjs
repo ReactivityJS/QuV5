@@ -9,19 +9,32 @@
  * that SAME main Space (see relay-server.js's own "ONE RELAY SPACE, NOT
  * TWO" doc comment - there is no more separate admin realm/`/admin-ws`) -
  *
- *   1. the built-in admin console's own content (`installGlobalAppBundle()`,
+ *   1. ONE `qu-platform-apps` alias (`registerApp()`) mapping the chosen
+ *      prefix (`"admin"` by default) to `realm: 'global'` - succeeds only
+ *      if this identity is already listed in that relay's `QU_RELAY_ADMINS`
+ *      (`qu-platform-apps` is `acl.write: 'relay-admins'` - see
+ *      `@qu/space-core`'s kind-schema.js own doc comment on the mode);
+ *   2. its own route(s) (`publishGlobalRoute()`, `adminRouteRegistryKind`) -
+ *      REQUIRED, not cosmetic: `@qu/app-shell`'s own `live-app-resolver.js`
+ *      only classifies a global app's PAGE writes correctly once it has
+ *      observed the route here (the exact same requirement any OTHER
+ *      global app's pages now have - this file used to skip it, a real,
+ *      fixed regression, see that file's own doc comment);
+ *   3. the built-in admin console's own content (`installGlobalAppBundle()`,
  *      `admin-console-bundle.js`, `acl.write: 'relay-admins'` - see
  *      `@qu/app-core`'s kinds.js own "GLOBAL APP CONTENT" doc comment) -
- *      succeeds only if this identity is already listed in that relay's
- *      `QU_RELAY_ADMINS`. The admin console is simply the ONE global app
- *      every deployment conventionally installs at `prefix: 'admin'` - not
- *      a framework special case; the exact same call installs any OTHER
- *      global app too, given a different bundle/prefix.
- *   2. ONE `qu-platform-apps` alias (`registerApp()`) mapping the chosen
- *      prefix (`"admin"` by default) to `realm: 'global'` - succeeds under
- *      the exact SAME condition (`qu-platform-apps` is also `acl.write:
- *      'relay-admins'`, checked against that exact list - see
- *      `@qu/space-core`'s kind-schema.js own doc comment on the mode).
+ *      succeeds under the exact SAME condition. The admin console is
+ *      simply the ONE global app every deployment conventionally installs
+ *      at `prefix: 'admin'` - not a framework special case; the exact same
+ *      call installs any OTHER global app too, given a different
+ *      bundle/prefix.
+ *
+ * ORDER MATTERS - each step needs the RELAY to have already observed the
+ * previous one before the next write lands, or it gets silently
+ * misclassified against the generic `'content'`-ACL fallback and rejected
+ * (the exact same "register/publish before seeding" reasoning
+ * `bootstrap-platform.mjs`'s own doc comment documents for a brand-new
+ * app-admin) - hence the settle delays between steps below.
  *
  * Run once per deployment (re-running is harmless - every write here is
  * idempotent/overwriting, same as `installAppBundle()`'s own posture).
@@ -35,7 +48,7 @@ import WebSocket from 'ws';
 import { QuCrypto } from '@qu/core';
 import { Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport';
-import { installGlobalAppBundle, registerApp } from '@qu/app-core';
+import { installGlobalAppBundle, registerApp, publishGlobalRoute } from '@qu/app-core';
 import { adminConsoleBundle } from '../admin-console-bundle.js';
 
 function parseArgs(argv) {
@@ -93,10 +106,17 @@ async function main() {
   const transport = new WsClientTransport(relay, { WebSocketImpl: WebSocket });
   await transport.connect();
   const space = new Space({ identity, members: [{ pub: identity.signingPub, xPub: identity.xPublicKey }], relayAdmins: [identity.signingPub], transport });
-  console.log('Installing the built-in admin console content…');
-  await installGlobalAppBundle(space, prefix, adminConsoleBundle);
+
   console.log(`Registering the "${prefix}" alias…`);
   await registerApp(space, { prefix, name, realm: 'global' });
+  await new Promise((resolve) => setTimeout(resolve, 1000)); // let the relay's live resolver observe the new prefix and start watching its route registry.
+
+  console.log('Publishing its route(s)…');
+  await publishGlobalRoute(space, prefix, { route: '/', title: name });
+  await new Promise((resolve) => setTimeout(resolve, 1000)); // let the relay observe the new route before the page content write follows.
+
+  console.log('Installing the built-in admin console content…');
+  await installGlobalAppBundle(space, prefix, adminConsoleBundle);
   await new Promise((resolve) => setTimeout(resolve, 300)); // let the writes actually leave before closing.
   transport.close();
 

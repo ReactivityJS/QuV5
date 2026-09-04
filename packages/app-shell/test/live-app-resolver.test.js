@@ -24,7 +24,23 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { QuCrypto } from '@qu/core';
 import { Space, deriveOwnerNodeId } from '@qu/space-core';
 import { createWsServerHub, WsClientTransport, createRelayForwarder } from '@qu/space-transport';
-import { createApp, createTemplate, createPage, registerApp, ContentResolver, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
+import { createMemoryStore } from '@qu/space-storage';
+import {
+  createApp,
+  createTemplate,
+  createPage,
+  registerApp,
+  ContentResolver,
+  platformAppsKind,
+  PLATFORM_REGISTRY_ANCHOR,
+  createGlobalApp,
+  createGlobalTemplate,
+  createGlobalPage,
+  publishGlobalRoute,
+  adminPageKind,
+  adminTemplateKind,
+  globalAppAnchor,
+} from '@qu/app-core';
 import { createLiveAppResolveKindSchema } from '../src/live-app-resolver.js';
 
 async function actor() {
@@ -56,7 +72,17 @@ test('a relay-admin registers a brand-new app-admin at runtime; a DIFFERENT visi
   const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: true });
   const hub = createWsServerHub(wss);
   const { resolveKindSchema, start } = createLiveAppResolveKindSchema();
-  const relay = createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema });
+  // `storage` matters here, not just cosmetically: EVERY real deployment
+  // (`@qu/app-shell`'s own relay-server.js) always mirrors durable-persistence
+  // writes to disk (`createFileStore()`) - a late subscriber's `handleSubscribe()`
+  // replays from THAT mirror regardless of when its own subscribe happened to
+  // arrive relative to the write. Omitting `storage` here (as an earlier version
+  // of this test did) makes the assertion below depend on a genuine, accidental
+  // NETWORK RACE instead (whether the write or the late subscribe reaches the
+  // relay first) - not a reflection of anything this test is actually meant to
+  // verify, and NOT how a real relay behaves. A plain in-memory store is enough
+  // to remove that race; a real `createFileStore()` isn't needed for a unit test.
+  const relay = createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema, storage: createMemoryStore() });
 
   await new Promise((resolve) => httpServer.listen(0, resolve)); // port 0 = OS picks a free port
   const port = httpServer.address().port;
@@ -101,6 +127,77 @@ test('a relay-admin registers a brand-new app-admin at runtime; a DIFFERENT visi
   // entire lifetime BY DESIGN (see live-app-resolver.js's own doc comment) - httpServer.close()'s
   // callback otherwise never fires (Node waits for every connection to end), so every remaining
   // WebSocket (that one included) is force-terminated first, same as a real process exit would do.
+  wss.clients.forEach((ws) => ws.terminate());
+  await new Promise((resolve) => httpServer.close(resolve));
+});
+
+test('a relay-admin registers a brand-new GLOBAL app ("admin") at runtime, publishes its route, and its template+page resolve correctly for a DIFFERENT relay-admin - the exact regression a fixed bug once broke in production', async () => {
+  // Real, production-observed regression this guards against: once live-app-resolver.js starts
+  // rebuilding reactively, it ALWAYS passes an explicit `globalApps` array to
+  // createAppResolveKindSchema() - silently bypassing that function's own STATIC default (which
+  // otherwise supplies `templateNames: ['main']` for prefix "admin", matching what
+  // admin-console-bundle.js ships) - so the admin console's own "main" template got silently
+  // misclassified and rejected by the relay the moment PLATFORM mode's live resolver took over,
+  // even though the exact same content worked fine through the non-reactive, static resolver a
+  // unit test alone would exercise. This test goes through the REAL live-app-resolver.js, the only
+  // way to actually catch it.
+  const relayAdminA = await actor();
+  const relayAdminB = await actor(); // a DIFFERENT relay-admin - proves this isn't just "the writer reads back its own local state."
+  const relayAdmins = [relayAdminA.signingPub, relayAdminB.signingPub];
+  const members = [
+    { pub: relayAdminA.signingPub, xPub: relayAdminA.xPublicKey },
+    { pub: relayAdminB.signingPub, xPub: relayAdminB.xPublicKey },
+  ];
+
+  const httpServer = createServer();
+  const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: true });
+  const hub = createWsServerHub(wss);
+  const { resolveKindSchema, start } = createLiveAppResolveKindSchema();
+  // See the first test's own comment on why `storage` is required here: without it, whether the
+  // page/template below actually resolve for `spaceB` depends on an accidental race between its
+  // own (late) subscribe and spaceA's writes reaching the relay - not on whether the CLASSIFICATION
+  // fix this test exists to verify actually works. Real deployments always mirror durable writes.
+  const relay = createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema, storage: createMemoryStore() });
+
+  await new Promise((resolve) => httpServer.listen(0, resolve));
+  const port = httpServer.address().port;
+  const url = `ws://127.0.0.1:${port}`;
+  await start({ url, relayAdmins });
+
+  async function connect(identity) {
+    const transport = new WsClientTransport(url, { WebSocketImpl: WebSocket });
+    await transport.connect();
+    return new Space({ identity, members, relayAdmins, transport });
+  }
+
+  const spaceA = await connect(relayAdminA);
+  const spaceB = await connect(relayAdminB);
+
+  await registerApp(spaceA, { prefix: 'admin', name: 'Relay-Admin', realm: 'global' });
+  const platformNodeId = await deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind);
+  assert.ok(await waitUntil(() => relay.seen.some((e) => e.nodeId === platformNodeId)), 'the registerApp() write reached the relay');
+  await new Promise((resolve) => setTimeout(resolve, 150)); // let the relay start watching "admin"'s own route registry.
+
+  await publishGlobalRoute(spaceA, 'admin', { route: '/', title: 'Relay-Admin' });
+  const anchor = await globalAppAnchor('admin');
+  await new Promise((resolve) => setTimeout(resolve, 150)); // let the relay observe the new route before content writes follow.
+
+  await createGlobalApp(spaceA, 'admin', { name: 'Relay-Admin', rootTemplate: 'main', defaultRoute: '/' });
+  await createGlobalTemplate(spaceA, 'admin', { name: 'main', html: '<header>ADMIN</header><qu-slot name="content"></qu-slot>' });
+  await createGlobalPage(spaceA, 'admin', { route: '/', title: 'Relay-Admin', template: 'main', content: '<p>Konsole</p>' });
+
+  // A DIFFERENT relay-admin (never wrote anything above) resolves BOTH the page AND its template -
+  // the template check is what the regression actually broke (the page alone could still resolve
+  // while the template silently failed, rendering through @qu/app-renderer's template-not-found
+  // fallback instead of the real one).
+  const resolver = new ContentResolver(spaceB, { appAdminPub: anchor, kinds: { pageKind: adminPageKind, templateKind: adminTemplateKind } });
+  const page = await resolver.resolvePage('/', { timeout: 2000 });
+  assert.equal(page?.title, 'Relay-Admin', 'the global app\'s page resolves for a different relay-admin');
+  assert.equal(page?.content, '<p>Konsole</p>');
+
+  const template = await resolver.resolveTemplate('main', { timeout: 2000 });
+  assert.ok(template?.includes('ADMIN'), 'the global app\'s "main" template resolves too - this is the part the regression actually broke');
+
   wss.clients.forEach((ws) => ws.terminate());
   await new Promise((resolve) => httpServer.close(resolve));
 });
