@@ -6,7 +6,7 @@
  * fallback); an unmatched route falls back to a landing page; and the
  * built-in admin console is genuinely installed Qu CONTENT
  * (`admin-console-bundle.js`) living in this SAME ordinary main Space
- * (`acl.write: 'relay-admins'`, kinds.js's own "THE ADMIN APP" doc
+ * (`acl.write: 'relay-admins'`, kinds.js's own "GLOBAL APP CONTENT" doc
  * comment) - resolved and rendered through the exact same
  * `AppRuntime`/`renderPage()` pipeline as any other app, with
  * `admin-actions.js`'s `wireAdminConsole()` as the only framework-provided
@@ -24,7 +24,7 @@ import {
   createTemplate,
   createPage,
   registerApp,
-  installAdminAppBundle,
+  installGlobalAppBundle,
   createAppResolveKindSchema,
   platformAppsKind,
   PLATFORM_REGISTRY_ANCHOR,
@@ -127,8 +127,8 @@ test('the built-in admin console is genuine installed content in the SAME main S
   // Bootstrap, as the relay-admin, using ONE Space/connection for both steps - see
   // bin/install-admin-console.mjs for the real, single-connection version of exactly this.
   const relayAdminSpace = await connect(relayAdmin, 'relay-admin-bootstrap');
-  await installAdminAppBundle(relayAdminSpace, adminConsoleBundle);
-  await registerApp(relayAdminSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'admin' });
+  await installGlobalAppBundle(relayAdminSpace, 'admin', adminConsoleBundle);
+  await registerApp(relayAdminSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'global' });
 
   // A REAL relay-admin visits #/admin using their OWN regular identity/Space - no separate admin
   // identity to generate or import - sees the installed content, and can register a new app

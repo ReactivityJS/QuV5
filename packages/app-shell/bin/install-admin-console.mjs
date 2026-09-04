@@ -9,13 +9,16 @@
  * that SAME main Space (see relay-server.js's own "ONE RELAY SPACE, NOT
  * TWO" doc comment - there is no more separate admin realm/`/admin-ws`) -
  *
- *   1. the built-in admin console's own content (`installAdminAppBundle()`,
+ *   1. the built-in admin console's own content (`installGlobalAppBundle()`,
  *      `admin-console-bundle.js`, `acl.write: 'relay-admins'` - see
- *      `@qu/app-core`'s kinds.js own "THE ADMIN APP" doc comment) -
+ *      `@qu/app-core`'s kinds.js own "GLOBAL APP CONTENT" doc comment) -
  *      succeeds only if this identity is already listed in that relay's
- *      `QU_RELAY_ADMINS`;
+ *      `QU_RELAY_ADMINS`. The admin console is simply the ONE global app
+ *      every deployment conventionally installs at `prefix: 'admin'` - not
+ *      a framework special case; the exact same call installs any OTHER
+ *      global app too, given a different bundle/prefix.
  *   2. ONE `qu-platform-apps` alias (`registerApp()`) mapping the chosen
- *      prefix (`"admin"` by default) to `realm: 'admin'` - succeeds under
+ *      prefix (`"admin"` by default) to `realm: 'global'` - succeeds under
  *      the exact SAME condition (`qu-platform-apps` is also `acl.write:
  *      'relay-admins'`, checked against that exact list - see
  *      `@qu/space-core`'s kind-schema.js own doc comment on the mode).
@@ -32,7 +35,7 @@ import WebSocket from 'ws';
 import { QuCrypto } from '@qu/core';
 import { Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport';
-import { installAdminAppBundle, registerApp } from '@qu/app-core';
+import { installGlobalAppBundle, registerApp } from '@qu/app-core';
 import { adminConsoleBundle } from '../admin-console-bundle.js';
 
 function parseArgs(argv) {
@@ -91,9 +94,9 @@ async function main() {
   await transport.connect();
   const space = new Space({ identity, members: [{ pub: identity.signingPub, xPub: identity.xPublicKey }], relayAdmins: [identity.signingPub], transport });
   console.log('Installing the built-in admin console content…');
-  await installAdminAppBundle(space, adminConsoleBundle);
+  await installGlobalAppBundle(space, prefix, adminConsoleBundle);
   console.log(`Registering the "${prefix}" alias…`);
-  await registerApp(space, { prefix, name, realm: 'admin' });
+  await registerApp(space, { prefix, name, realm: 'global' });
   await new Promise((resolve) => setTimeout(resolve, 300)); // let the writes actually leave before closing.
   transport.close();
 

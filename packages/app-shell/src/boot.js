@@ -12,13 +12,13 @@
  * them and hand it here - this function knows nothing about HOW it was
  * built, only that it behaves like one.
  */
-import { AppRuntime, HashRouter, PlatformRuntime, adminAppManifestKind, adminPageKind, adminTemplateKind, adminStyleKind, ADMIN_REALM_ANCHOR } from '@qu/app-core';
+import { AppRuntime, HashRouter, PlatformRuntime, adminAppManifestKind, adminPageKind, adminTemplateKind, adminStyleKind, globalAppAnchor } from '@qu/app-core';
 import { renderPage } from '@qu/app-renderer';
 import { wireAdminConsole } from './admin-actions.js';
 import { wireCms } from './cms-actions.js';
 
-/** Passed as `AppRuntime`'s `kinds` override for `realm: 'admin'` routes - see `resolver.js`'s own doc comment on what this parametrizes. No `routeRegistryKind` entry: `AppRuntime.resolveRoute()` (the only method `startPlatform()` calls) never touches it - see `runtime.js`. */
-const ADMIN_KINDS = { appManifestKind: adminAppManifestKind, pageKind: adminPageKind, templateKind: adminTemplateKind, styleKind: adminStyleKind };
+/** Passed as `AppRuntime`'s `kinds` override for `realm: 'global'` routes - see `resolver.js`'s own doc comment on what this parametrizes. Shared by EVERY global app (they all use the SAME Kind set, told apart only by their anchor - see kinds.js's own "GLOBAL APP CONTENT" doc comment). No `routeRegistryKind` entry: `AppRuntime.resolveRoute()` (the only method `startPlatform()` calls) never touches it - see `runtime.js`. */
+const GLOBAL_KINDS = { appManifestKind: adminAppManifestKind, pageKind: adminPageKind, templateKind: adminTemplateKind, styleKind: adminStyleKind };
 
 /** @param {{mountEl: Element, doc: Document, platform: PlatformRuntime}} params - shown when no registered app's prefix (nor a well-formed owner id) matches the current route. The one piece of `startPlatform()` UI that ISN'T Qu content: by definition nothing here resolved, so there is no content to fetch it from - same "Framework Default" posture `@qu/app-renderer` already takes for a single app's own unresolved routes. */
 async function renderLandingPage({ mountEl, doc, platform }) {
@@ -83,32 +83,33 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  * the CURRENT route against `PlatformRuntime.resolveForPath()` - a
  * registered alias (`qu-platform-apps`), or failing that, the path's first
  * segment tried as a literal owner id - and delegates to an ordinary
- * `AppRuntime`, no differently for the built-in admin app than for any
+ * `AppRuntime`, no differently for a `realm: 'global'` app than for any
  * other app: NEITHER is special-cased on the route STRING (architecture.md
  * §7 - "kein Sonderfall zu normalen Spaces"), only on the resolved match's
- * `realm`, which decides only WHICH Kind SET (`ADMIN_KINDS` vs. the
- * default) and WHICH fixed owner (`ADMIN_REALM_ANCHOR` vs. `match.appAdminPub`)
- * to resolve against - both realms live in the exact SAME `space` (see
- * "One relay Space, not two" in this document's own history / kinds.js's
- * own "THE ADMIN APP" doc comment: there is no second, separately-
- * membered `Space`/relay-forwarder any more). Only ONE thing here is
- * genuinely framework UI, never Qu content: a route matching NO
- * alias/owner id at all renders `renderLandingPage()` (see this file's own
- * doc comment on it, right above) - the admin console's own markup, by
- * contrast, is ordinary installed content (`bin/install-admin-console.mjs`),
- * rendered through the EXACT SAME `renderPage()` call as any other app;
- * `wireAdminConsole()` (`admin-actions.js`) is the one bit of framework
- * interactivity that content-declared markup attaches to afterward (its
- * own doc comment explains why that's not a `<script>`-execution loophole).
- * `wireCms()` (`cms-actions.js`) runs unconditionally for every OTHER
- * (non-admin) route, on the exact same "content stays inert markup" terms
- * - a correct no-op unless the resolved page happens to be the built-in
- * CMS editor (`cms-bundle.js`'s `installCms()`), which any app-admin can
- * install into their OWN app's Space, same as `startApp()` does below.
+ * `realm`, which decides only WHICH Kind SET (`GLOBAL_KINDS` vs. the
+ * default) and WHICH owner anchor (`globalAppAnchor(match.prefix)` vs.
+ * `match.appAdminPub`) to resolve against - every app lives in the exact
+ * SAME `space` (see "One relay Space, not two" in this document's own
+ * history / kinds.js's own "GLOBAL APP CONTENT" doc comment: there is no
+ * second, separately-membered `Space`/relay-forwarder any more). Only ONE
+ * thing here is genuinely framework UI, never Qu content: a route matching
+ * NO alias/owner id at all renders `renderLandingPage()` (see this file's
+ * own doc comment on it, right above). The built-in admin console
+ * (`prefix === 'admin'`) is the ONE `realm: 'global'` app with its own
+ * dedicated framework interactivity, `wireAdminConsole()`
+ * (`admin-actions.js`) - a bit of interactivity content-declared markup
+ * attaches to afterward (its own doc comment explains why that's not a
+ * `<script>`-execution loophole), since it is the one app every deployment
+ * conventionally has and needs an app-registration form, not a generic
+ * page/template/style editor. Every OTHER route (any other app, `realm:
+ * 'main'` or `'global'` alike) gets `wireCms()` (`cms-actions.js`) instead,
+ * on the exact same "content stays inert markup" terms - a correct no-op
+ * unless the resolved page happens to be the built-in CMS editor
+ * (`cms-bundle.js`'s `installCms()`).
  * @param {{space: import('@qu/space-core').Space, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
  *   `space` - MUST have been constructed with a `relayAdmins` list (see
  *   `Space`'s own constructor doc comment) matching the relay's own
- *   `QU_RELAY_ADMINS` config, or BOTH `qu-platform-apps` AND the admin
+ *   `QU_RELAY_ADMINS` config, or BOTH `qu-platform-apps` AND any global
  *   app's own `qu-admin-*` Kinds fail this Space's own independent ACL
  *   check regardless of what the relay allows (`kinds.js`'s own
  *   `'relay-admins'` doc comments) - `shell.js`'s own boot sequence fetches
@@ -130,11 +131,13 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
         await renderLandingPage({ mountEl, doc: window.document, platform });
         return;
       }
-      const runtime = match.realm === 'admin' ? new AppRuntime(space, { appAdminPub: ADMIN_REALM_ANCHOR, kinds: ADMIN_KINDS }) : new AppRuntime(space, { appAdminPub: match.appAdminPub });
+      const isGlobal = match.realm === 'global';
+      const runtime = isGlobal ? new AppRuntime(space, { appAdminPub: await globalAppAnchor(match.prefix), kinds: GLOBAL_KINDS }) : new AppRuntime(space, { appAdminPub: match.appAdminPub });
       const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
       mountEl.quSpace = space;
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
-      if (match.realm === 'admin') wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
+      if (match.prefix === 'admin') wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
+      else if (isGlobal) await wireCms({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(match.prefix), global: true, prefix: match.prefix });
       else await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
     },
   });

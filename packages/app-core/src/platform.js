@@ -27,13 +27,13 @@
  *   1. A REGISTERED alias (`qu-platform-apps`, prettier, opt-in, relay-
  *      admin-curated - any of the configured relay-admins, see kinds.js's
  *      own doc comment on `platformAppsKind`'s `'relay-admins'` ACL) -
- *      `{realm: 'main', appAdminPub, ...}` as above, or `{realm: 'admin',
- *      ...}` (no `appAdminPub` - the built-in admin app has no single
- *      owner, see kinds.js's own "THE ADMIN APP" doc comment) when a
- *      relay-admin registered that prefix with `registerApp(..., {realm:
- *      'admin'})` - conventionally `"admin"`, but that is a NAMING
- *      convention the bootstrap installer picks, not something this class
- *      special-cases.
+ *      `{realm: 'main', appAdminPub, ...}` as above, or `{realm: 'global',
+ *      ...}` (no `appAdminPub` - a global app has no single owner, see
+ *      kinds.js's own "GLOBAL APP CONTENT" doc comment) when a relay-admin
+ *      registered that prefix with `registerApp(..., {realm: 'global'})` -
+ *      the built-in admin console is conventionally `"admin"`, but any
+ *      OTHER prefix works identically; this class never special-cases the
+ *      route STRING.
  *   2. UNREGISTERED, the DEFAULT: every app is self-certifyingly reachable
  *      at its OWN owner id with zero relay-admin involvement - the prefix
  *      is tried as a literal base64url-encoded owner pubkey

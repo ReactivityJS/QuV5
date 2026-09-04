@@ -107,7 +107,7 @@ import { Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport';
 import { EventBus } from '@qu/events';
 import {
-  installAdminAppBundle,
+  installGlobalAppBundle,
   registerApp,
   createApp,
   createTemplate,
@@ -117,7 +117,7 @@ import {
   PlatformRuntime,
   ContentResolver,
   adminAppManifestKind,
-  ADMIN_REALM_ANCHOR,
+  globalAppAnchor,
 } from '@qu/app-core';
 import { adminConsoleBundle } from '../admin-console-bundle.js';
 import { installCms } from '../cms-bundle.js';
@@ -283,25 +283,25 @@ async function main() {
   const mainSpace = new Space({ identity: relayAdmin, members: [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }], relayAdmins, transport: mainTransport, bus: mainBus });
   const mainWrites = trackWrites(mainBus);
 
-  // installAdminAppBundle()/createNode() always build a FRESH Y.Doc for whatever id they target -
+  // installGlobalAppBundle()/createNode() always build a FRESH Y.Doc for whatever id they target -
   // safe for a Node that doesn't exist yet, but calling it AGAIN for one that already does would
   // duplicate every Y.Text field's content (html/content), not overwrite it - the exact footgun
   // architecture.md's own edit*() functions exist to avoid, and there is no admin-app edit*()
   // counterpart yet (this file's own top doc comment). Check first, skip if already installed.
-  const adminResolver = new ContentResolver(mainSpace, { appAdminPub: ADMIN_REALM_ANCHOR, kinds: { appManifestKind: adminAppManifestKind } });
+  const adminResolver = new ContentResolver(mainSpace, { appAdminPub: await globalAppAnchor('admin'), kinds: { appManifestKind: adminAppManifestKind } });
   const adminAlreadyInstalled = (await adminResolver.resolveManifest({ timeout: 800 })) !== null;
   if (adminAlreadyInstalled) {
     console.log('  admin console content already installed - skipping (edit it live at #/admin once bootstrapped, or re-run bin/install-admin-console.mjs to overwrite).');
   } else {
     console.log('  installing the built-in admin console content...');
-    await installAdminAppBundle(mainSpace, adminConsoleBundle);
+    await installGlobalAppBundle(mainSpace, 'admin', adminConsoleBundle);
   }
 
   const platform = new PlatformRuntime(mainSpace);
   const existingApps = await platform.resolveApps({ timeout: 800 });
   if (!existingApps.some((a) => a.prefix === 'admin')) {
     console.log('  registering the "admin" alias...');
-    await registerApp(mainSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'admin' });
+    await registerApp(mainSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'global' });
   } else {
     console.log('  "admin" alias already registered.');
   }
