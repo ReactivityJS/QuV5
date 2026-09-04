@@ -55,6 +55,37 @@ async function renderLandingPage({ mountEl, doc, platform }) {
 }
 
 /**
+ * Shown at `#/admin` for anyone whose OWN identity isn't currently a
+ * relay-admin (`space.isRelayAdmin()`), INSTEAD of the real admin console -
+ * a real, requested UX gap this closes: the admin console's own CONTENT is
+ * `'public'`-visibility by design (kinds.js's own "GLOBAL APP CONTENT" doc
+ * comment - readable by anyone, WRITE is what the relay actually gates,
+ * exactly like a rejected write elsewhere in this framework), but nothing
+ * client-side previously reflected that distinction - an ordinary visitor
+ * saw the exact same "register an app"/apps-list UI a relay-admin does,
+ * with every write silently rejected the instant they tried one. Purely
+ * cosmetic, purely client-side (this Space's OWN independent `relayAdmins`
+ * view - never trusts the relay's own say-so, same posture as everywhere
+ * else) - the relay's write-ACL is and remains the only REAL boundary,
+ * unchanged by this function existing at all.
+ */
+function renderAdminUnauthorized({ mountEl, doc }) {
+  const container = doc.createElement('div');
+  container.style.cssText = 'font-family: sans-serif; max-width: 40rem; margin: 2rem auto; line-height: 1.5; padding: 0 1rem;';
+  const h1 = doc.createElement('h1');
+  h1.textContent = 'Kein Zugriff';
+  container.appendChild(h1);
+  const p = doc.createElement('p');
+  p.textContent = 'Diese Seite ist nur für Relay-Admins sichtbar. Deine aktuelle Identität ist keine.';
+  container.appendChild(p);
+  const a = doc.createElement('a');
+  a.href = '#/';
+  a.textContent = 'Zur Startseite';
+  container.appendChild(a);
+  mountEl.replaceChildren(container);
+}
+
+/**
  * @param {{space: import('@qu/space-core').Space, appAdminPub: Uint8Array, mountEl: Element, window: {location: object, document: Document, addEventListener: Function, removeEventListener: Function}, styleId?: string, resolveTimeout?: number}} params
  *   `resolveTimeout` - how long to wait for a route's content to sync before giving up and rendering the "not found" fallback (see @qu/app-core's `ContentResolver`'s own `timeout` param); defaults to that resolver's own default.
  * @returns {{runtime: AppRuntime, router: HashRouter}} - `router.stop()` tears down the hashchange listener; nothing else here needs explicit cleanup.
@@ -106,6 +137,20 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  * on the exact same "content stays inert markup" terms - a correct no-op
  * unless the resolved page happens to be the built-in CMS editor
  * (`cms-bundle.js`'s `installCms()`).
+ *
+ * `#/admin` SPECIFICALLY also gets a visibility check
+ * (`renderAdminUnauthorized()`, this file's own doc comment on it) BEFORE
+ * any of the above - a real, requested UX gap: the console's own content is
+ * `'public'`-visibility (readable by anyone - kinds.js's own doc comment),
+ * so without this, an ordinary visitor saw the exact same UI a relay-admin
+ * does, with every write silently rejected relay-side. Purely cosmetic
+ * (`space.isRelayAdmin()`, this Space's own independent view, never the
+ * relay's say-so) - the relay's write-ACL was always the only REAL
+ * boundary and remains exactly as strict either way. Deliberately scoped
+ * to `"admin"` only, not every `realm: 'global'` app - an ordinary global
+ * app (a platform-wide chat/calendar/etc., relay-admin-ADMINISTERED but
+ * meant for everyone to USE) has no reason to hide itself from non-admins
+ * at all, only the admin console's own management UI does.
  * @param {{space: import('@qu/space-core').Space, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
  *   `space` - MUST have been constructed with a `relayAdmins` list (see
  *   `Space`'s own constructor doc comment) matching the relay's own
@@ -129,6 +174,10 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
       const match = await platform.resolveForPath(route, timeoutOpt);
       if (!match) {
         await renderLandingPage({ mountEl, doc: window.document, platform });
+        return;
+      }
+      if (match.prefix === 'admin' && !space.isRelayAdmin()) {
+        renderAdminUnauthorized({ mountEl, doc: window.document });
         return;
       }
       const isGlobal = match.realm === 'global';

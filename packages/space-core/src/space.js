@@ -329,6 +329,22 @@ export class Space {
   }
 
   /**
+   * Read-only check against THIS Space's own independent `relayAdmins` view
+   * (constructor param, kept current by `addRelayAdmin()`/`removeRelayAdmin()`
+   * - never trusts the relay's own say-so, same posture as everything else
+   * `_isAuthorizedWriter()` checks) - for a caller that wants to know "is
+   * pub a relay-admin" WITHOUT actually attempting a `'relay-admins'`-ACL
+   * write just to find out (e.g. deciding whether to even RENDER admin UI
+   * at all - `@qu/app-shell`'s `boot.js` own `startPlatform()`). Defaults to
+   * this Space's own identity - the common "am I one" case.
+   * @param {Uint8Array} [pub]
+   * @returns {boolean}
+   */
+  isRelayAdmin(pub = this._identity.signingPub) {
+    return this._relayAdmins.has(QuCrypto.toBase64(pub));
+  }
+
+  /**
    * Returns this Node's write-ACL check, shaped exactly like
    * `verifyEnvelope()` wants: `(pubBase64) => boolean|Promise<boolean>`.
    * Branches on `kindSchema.acl.write` (see kind-schema.js's own doc
