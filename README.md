@@ -320,6 +320,24 @@ relay-admin to maintain pages afterward (see the CMS section above) -
 templates/styles still need a script (`createGlobalTemplate()`/
 `editGlobalTemplate()`), the same scope cut mentioned above.
 
+**Three administrable states for a global app, not a per-app relay
+feature-gate** (`mode`, `registerApp()`/`setAppMode()`,
+architecture.md §7's own "Three administrable states" section for the
+full design reasoning) - `'off'` (unreachable, same as never registered),
+`'global'` (the default - only relay-admins may write, exactly the
+paragraph above), or `'multiuser'` - the global shell stays exactly as in
+`'global'` mode, PLUS every visitor (relay-admins included, no special
+role needed) may ALSO maintain their OWN content at
+`#/<prefix>/u/<ref>/...` (`ref` = `"me"`, or another identity's own
+base64url pubkey to read theirs) - an ordinary, self-owned `'content'`-ACL
+namespace, no registration or grant required, a first-ever visit to
+`/u/me/` self-provisioning a minimal personal app + CMS editor on the
+spot. `setAppMode(space, {prefix, mode})` changes an ALREADY-registered
+app's mode later (a relay-admin call, same as `registerApp()` itself) -
+see `packages/app-shell/test/multiuser-app.test.js` for the reference
+example (registers `"cms"` this way, two independent visitors each
+maintain their own page with zero further cooperation).
+
 **Verifying an install actually worked, not just that it ran**: a script
 that only `await`s each write and prints "done" can be lying - a write to
 `'relay-admins'`-ACL content is silently rejected if this identity isn't
@@ -331,6 +349,43 @@ expected write to be acked before reporting success - `bootstrap-
 platform.mjs`'s `trackWrites()`/`waitUntilAllWritesAcked()` (also now used
 by `install-admin-console.mjs`) is the reference implementation; copy it
 into your own install script rather than reinventing it.
+
+**"Why do I have to import an app-admin's private key into my browser just
+to edit its content - can't I just list MY OWN identity as admin
+somewhere instead?"** - no, and this isn't a bug: ownership of an ordinary
+(`realm: 'main'`) app's `qu-page`/`qu-template`/`qu-style` content is
+CRYPTOGRAPHIC and permanent, fixed forever at the moment each one was
+created (`deriveContentNodeId(ownerPub, kind, path)`) - no config change,
+`registerApp()` re-alias, or `QU_RELAY_ADMINS` entry can retroactively
+change who owns EXISTING content (relay-admin status is a completely
+separate, unrelated permission - see "Does the relay itself need an entry
+in QU_RELAY_ADMINS?" above for the same "these are different lists"
+confusion one level up). There genuinely is no way around touching the
+owner's private key at least ONCE - either by importing it directly
+(`bootstrap-platform.mjs`'s own printed devtools snippet, fine for a quick
+test, a real anti-pattern to keep doing for ongoing work - sharing a
+private key at all is a smell), or, the actual self-service fix:
+
+```sh
+node packages/app-shell/bin/grant-app-access.mjs \
+  --relay wss://your-host --dir ./bootstrap-identity \
+  --identity demo-app-admin --to <base64 pubkey of YOUR OWN identity>
+```
+
+Connects ONCE as the app-admin (`--dir`/`--identity`, the SAME identity
+directory `bootstrap-platform.mjs` already created - never generates a new
+one) and calls `grantContentWriter()` (`@qu/app-core`) for every currently
+published page/template/style, extending write access to `--to`'s pubkey
+- find your own browser identity's pubkey via `window.Qu.pub` in devtools,
+or the relay's unconfigured setup page. After this runs once, that
+identity can use `#/<prefix>/cms` with its OWN key, forever (grants don't
+expire) - never needing the app-admin's private key again. Only covers
+EXISTING content - re-run it after publishing new pages/templates/styles
+if the same grantee should maintain those too (or just keep using it as
+the app-admin for anything genuinely new). The built-in admin console and
+any OTHER `realm: 'global'` app don't have this problem at all - every
+relay-admin already has full access, by design (see the CMS section
+above).
 
 ## Deploying the legacy chat relay
 

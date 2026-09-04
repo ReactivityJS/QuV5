@@ -33,6 +33,7 @@ export {
   publishRoute,
   installAppBundle,
   registerApp,
+  setAppMode,
   createGlobalApp,
   createGlobalTemplate,
   createGlobalStyle,

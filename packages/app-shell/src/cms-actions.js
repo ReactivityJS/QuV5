@@ -33,7 +33,15 @@
  * leave the STYLE form's submit listener unattached for that entire
  * stretch - a visitor filling in the style form within roughly the first
  * 500ms of the page existing would submit into dead air, no listener yet
- * to catch it, and nothing would appear to happen at all.
+ * to catch it, and nothing would appear to happen at all. `wirePages()`
+ * ONCE genuinely violated this same invariant for ITSELF (its own
+ * `refreshTemplateSelect()`/`globalAppAnchor()` awaits used to run BEFORE
+ * its listener attachment, not after) - a real, deployment-observed bug,
+ * not hypothetical: a self-provisioned first-time visitor (`boot.js`'s
+ * `renderMultiUserRoute()`) with a genuinely-empty template registry could
+ * submit into that same "no listener yet" dead air for the ENTIRE 500ms
+ * `resolveTemplateNames()` wait. Fixed - see that function's own doc
+ * comment.
  *
  * KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE BETWEEN "load into form" AND
  * "save" - a real, observed bug this fixes: `Space.useNode()` is
@@ -417,6 +425,16 @@ async function wireStyles({ mountEl, doc, space, resolver, global, ownerPub }) {
 }
 
 /**
+ * ORDERING WITHIN THIS FUNCTION MATTERS, a real bug this fixes: the submit/
+ * reset listeners below are attached BEFORE `anchor` is computed
+ * (`globalAppAnchor()`, an `await`) and before `holdRegistry()`/
+ * `refreshTemplateSelect()` run - matching this file's own top doc comment
+ * invariant ("each `wire*()` attaches its own form's submit listener
+ * SYNCHRONOUSLY, before its first `await`"), which an earlier version of
+ * THIS function specifically violated (those awaits used to run FIRST).
+ * Safe to compute `anchor` afterward: the listeners that close over it
+ * only ever READ it once a real submit/click event fires, unavoidably
+ * long after this whole function has already finished running.
  * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, resolver: ContentResolver, global?: boolean, prefix?: string, ownerPub?: Uint8Array}} params
  *   `global`/`prefix` - see `wireCms()`'s own doc comment. In global mode,
  *   every write goes through `createGlobalPage()`/`editGlobalPage()`/
@@ -436,11 +454,14 @@ async function wirePages({ mountEl, doc, space, resolver, global = false, prefix
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="page"]');
   if (!list && !form) return;
 
-  const anchor = global ? await globalAppAnchor(prefix) : ownerPub;
-  holdRegistry(space, global ? adminRouteRegistryKind : routeRegistryKind, anchor).catch(() => {}); // see wireTemplates()'s own identical comment.
-  if (!global) await refreshTemplateSelect({ mountEl, doc, resolver });
-
+  // `anchor` is only actually READ once a submit/click handler below RUNS (real user interaction,
+  // always long after this whole function has finished) - safe to compute it AFTER attaching the
+  // listeners that close over it (a `const` is only unusable before its OWN assignment runs, not
+  // before every closure that later reads it does - see this function's own doc comment on why the
+  // listener-attachment order below matters at all: a real, deployment-observed bug, not a style
+  // preference).
   let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".
+  let anchor; // assigned below, before any AWAIT that could let an event actually fire first.
 
   async function refreshList() {
     if (!list) return;
@@ -536,6 +557,12 @@ async function wirePages({ mountEl, doc, space, resolver, global = false, prefix
     });
   }
 
+  // Everything below has its own AWAIT, on purpose placed AFTER every listener above is already
+  // attached (this function's own top doc comment on why) - `anchor` is assigned here but not
+  // actually read until a later user interaction, long after this line runs.
+  anchor = global ? await globalAppAnchor(prefix) : ownerPub;
+  holdRegistry(space, global ? adminRouteRegistryKind : routeRegistryKind, anchor).catch(() => {}); // see wireTemplates()'s own identical comment.
+  if (!global) await refreshTemplateSelect({ mountEl, doc, resolver });
   await refreshList();
 }
 

@@ -229,20 +229,53 @@ export const platformAppsKind = publicMeta(
   defineKind('qu-platform-apps', {
     fields: {
       /**
-       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global'}>`
-       * - see `dev.js`'s `registerApp()`/`platform.js`'s `PlatformRuntime`.
-       * `realm: 'global'` entries (`appAdminPub: null`) route into content
-       * ANY configured relay-admin collectively administers (see this
-       * file's own "GLOBAL APP CONTENT" doc comment) instead of an
-       * ordinary owner-pubkey-addressed app - the SAME registry, the SAME
-       * `'public'`-visibility mapping, no separate mechanism; the built-in
-       * admin console is simply the one ALWAYS-present `realm: 'global'`
-       * entry (conventionally at prefix `"admin"`), not a special case.
-       * This mapping is itself only a convenience: `PlatformRuntime.resolveForPath()`
-       * falls back to treating an UNREGISTERED prefix as a literal
-       * base64url-encoded owner pubkey when nothing here matches, so no
-       * app-admin needs a relay-admin's cooperation just to be reachable at
-       * all - registering a prefix here only ever adds a prettier alias.
+       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser'}>`
+       * - see `dev.js`'s `registerApp()`/`setAppMode()`, `platform.js`'s
+       * `PlatformRuntime`. `realm: 'global'` entries (`appAdminPub: null`)
+       * route into content ANY configured relay-admin collectively
+       * administers (see this file's own "GLOBAL APP CONTENT" doc comment)
+       * instead of an ordinary owner-pubkey-addressed app - the SAME
+       * registry, the SAME `'public'`-visibility mapping, no separate
+       * mechanism; the built-in admin console is simply the one
+       * ALWAYS-present `realm: 'global'` entry (conventionally at prefix
+       * `"admin"`), not a special case. This mapping is itself only a
+       * convenience: `PlatformRuntime.resolveForPath()` falls back to
+       * treating an UNREGISTERED prefix as a literal base64url-encoded
+       * owner pubkey when nothing here matches, so no app-admin needs a
+       * relay-admin's cooperation just to be reachable at all - registering
+       * a prefix here only ever adds a prettier alias.
+       *
+       * `mode` (a `realm: 'global'` app's own runtime state, ignored for
+       * `realm: 'main'`, defaults to `'global'` when absent - every entry
+       * from before this field existed, admin console included, keeps
+       * working unchanged) - see architecture.md §7's "Three administrable
+       * states, not a feature-gate" for the full design reasoning:
+       *   - `'off'` - not routable at all (`resolveForPath()` returns
+       *     `null`, same as an unregistered prefix) - a relay-admin's OWN
+       *     ordinary write-ACL already fully controls this, no new
+       *     mechanism needed.
+       *   - `'global'` (the default/legacy behavior) - only relay-admins
+       *     may write its content (`qu-admin-*` Kinds, `'relay-admins'`-ACL) -
+       *     what every `realm: 'global'` app already did before `mode`
+       *     existed.
+       *   - `'multiuser'` - the global/shell content stays exactly as in
+       *     `'global'` mode, PLUS every visiting identity (relay-admins
+       *     included) may additionally maintain their OWN content under
+       *     this prefix, in their own `'content'`-ACL, self-owned
+       *     namespace (`#/<prefix>/<pubkey-or-"me">/...`, `boot.js`'s
+       *     `startPlatform()`) - deliberately NOT a relay-enforced toggle:
+       *     self-owned content is, by design, never gate-able (nobody
+       *     needs anyone's permission to write their OWN Node) - `mode`
+       *     here only decides which ROUTING shape this app's own visitors
+       *     get, never who may write what (that was always, and remains,
+       *     entirely up to each Kind's own `acl.write`).
+       *
+       * Updating `mode` for an ALREADY-registered prefix is a normal
+       * `apps.push()` of a new entry with the SAME `prefix` (this list has
+       * no removal/update primitive at all, "ONLY ADDITIVE" above) - every
+       * reader treats the LAST entry for a given `prefix` as current
+       * (`platform.js`'s own `resolveForPath()`), the same log-of-states
+       * pattern, just one field deep.
        */
       apps: { shape: 'list', visibility: 'public' },
     },

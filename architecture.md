@@ -1368,6 +1368,99 @@ relay process in both the misconfigured and correctly-configured state,
 plus a real headless-Chromium check that `#/admin` genuinely renders (no
 404) once fixed.
 
+**Three administrable states, not a feature-gate (a later revision):** once
+relay-admins could administer global apps, a real, sharp design question
+followed - should a relay-admin also be able to enable/disable a global
+app for ALL users, or just some, with a black-/whitelist for exceptions? A
+per-Kind, per-app "feature gate" the relay enforces (a registry saying
+`{mode: 'allow-all'|'deny-all', exceptions: [...]}`, consulted by
+`buildWriteAcl()` IN ADDITION to a Kind's own `acl.write`) was designed in
+detail and then DELIBERATELY REJECTED, for a reason worth keeping: it
+would need to be repeated per app (Calendar, Forum, CMS, ...), reintroducing
+exactly the app-specific-relay-logic problem `'relay-admins'`-ACL itself
+was built to avoid, and it draws an inconsistent line - if a Gästebuch/
+Blog/Kalender legitimately lets any user write into their OWN
+`'content'`-ACL namespace with no gatekeeper (the whole point of
+self-certifying ownership, see "GLOBAL APP CONTENT" above), a CMS wanting
+a DIFFERENT rule ("nobody may, except...") is solving the wrong problem:
+self-owned content is, by design, never meant to be gate-able - nobody
+needs anyone's permission to write their OWN Node, full stop. Landed on
+instead - three states per `realm: 'global'` app
+(`platformAppsKind.apps[].mode`, `kinds.js`'s own doc comment on the
+field, `dev.js`'s `setAppMode()`), ALL of them free consequences of
+primitives that already existed, no relay change needed at all:
+
+- `'off'` - not routable (`PlatformRuntime.resolveForPath()` returns
+  `null`, indistinguishable from never having been registered) - a
+  registration/routing decision, not an ACL one.
+- `'global'` (the pre-existing, only-ever behavior before `mode` existed) -
+  only relay-admins may write, `qu-admin-*` Kinds exactly as before.
+- `'multiuser'` - the global shell stays exactly as in `'global'` mode,
+  PLUS every visiting identity (relay-admins included, with no special
+  role) may ALSO maintain their own content under `#/<prefix>/u/<ref>/...`
+  (`ref` = `"me"` or another identity's own base64url pubkey -
+  `boot.js`'s `parseMultiUserSubPath()`/`renderMultiUserRoute()`), an
+  ORDINARY `AppRuntime`/`wireCms()` pair addressed at that identity's own
+  pubkey instead of the global anchor - no relay-admin cooperation, no
+  registration, no grant, just the ordinary `'content'`-ACL self-grant any
+  `createPage()` already has. A brand-new visitor's first-ever `/u/me/`
+  self-provisions a minimal manifest + CMS editor on the spot
+  (`ensureSelfProvisioned()`) - checked via `ContentResolver.resolveManifest()`
+  with a generous timeout, NOT a hand-rolled existence check: an earlier
+  version of this function used its own `space.useNode()`/`node.meta`
+  bounded poll instead, and a REAL bug followed - `Space.createNode()`
+  never refcounts its own creation, so the very first `useNode()`/
+  `release()` pair ANY reader does afterward (including that hand-rolled
+  check's own `release()`) tears the local Y.Doc back down (the exact
+  "torn down after every read" trap `dev.js`'s `getOrSyncRegistryNode()`
+  doc comment already describes for registries, here for an ordinary
+  owner Node), needing a genuine round-trip through the relay's own
+  mirror to become visible again - not instant even in-process, and the
+  hand-rolled check's own 400ms bound occasionally lost that race,
+  causing a spurious SECOND `createApp()`/`installCms()` call for a
+  manifest that already existed. `resolveManifest()`'s own established,
+  generous timeout absorbs the same round-trip reliably; a genuinely
+  concurrent double-call (two tabs, same identity, same instant) remains
+  an accepted, low-stakes residual, no different from `createPage()`
+  itself having no built-in protection against being called twice at
+  once either.
+
+**CMS as the first `mode: 'multiuser'` example, not a special case:**
+proves the pattern end to end - a relay-admin registers `"cms"` ONCE
+(`realm: 'global', mode: 'multiuser'`), and any number of completely
+independent visitors each get their own, self-owned, CMS-managed page
+under it with ZERO further relay-admin involvement per user - verified
+with two totally uninvolved identities each creating their own page
+through the real rendered CMS form, an uninvolved THIRD identity
+confirming both exist independently with genuinely isolated content, and
+`setAppMode(..., {mode: 'off'})` making the whole app unreachable again
+for a brand-new visitor (`packages/app-shell/test/multiuser-app.test.js`).
+A REAL, separately-caught bug surfaced along the way: `wirePages()` (`cms-
+actions.js`) computed its `anchor`/called `refreshTemplateSelect()`
+(`await`s) BEFORE attaching its own form's submit listener - violating
+that file's own documented invariant ("each `wire*()` attaches its
+listener SYNCHRONOUSLY, before its first `await`"), invisible until a
+genuinely-empty template registry (a self-provisioned first-time visitor,
+exactly this scenario) made `refreshTemplateSelect()`'s own 500ms
+registry-wait long enough to submit into: no listener yet, no error, no
+status - just silence. Fixed by moving every listener attachment back
+before the first `await`, matching `wireTemplates()`/`wireStyles()`'s own
+(always-correct) ordering.
+
+**Moderation - documented as future work, deliberately not built now:**
+if the actual concern behind "gate CMS specifically" was misuse/spam
+rather than "who may write at all," the right tool is moderation AFTER
+the fact, not an access gate before it - a relay-admin hiding one
+specific, already-written Node from RESOLUTION/RENDERING (a blocklist the
+render/resolve path consults, e.g. `ContentResolver`/`AppRuntime` refusing
+to serve a listed nodeId) without touching that Kind's write-ACL at all.
+Strictly smaller in scope than a feature-gate: no relay-side enforcement
+change, no new ACL mode, purely a "what do I choose to show" decision -
+closer to `renderAdminUnauthorized()`'s own "purely cosmetic front-end
+decision, the real boundary is elsewhere" posture than to anything
+`buildWriteAcl()` needs to know about. Not implemented in this pass -
+real, separate work if a concrete need for it ever materializes.
+
 **Reading this as a CMS, not just a router:** the admin console proves the
 general shape - "UI legt sich selbst innerhalb des Storage an und hat
 zuständige Admins" (the user's own framing) - a piece of UI is installed

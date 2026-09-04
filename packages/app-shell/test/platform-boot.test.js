@@ -104,7 +104,7 @@ test('startPlatform() resolves a REGISTERED app by alias, an UNREGISTERED app by
   router.stop();
 });
 
-test('the built-in admin console is genuine installed content in the SAME main Space - any relay-admin\'s own regular identity sees and uses it, a non-admin sees the same markup but cannot write', async () => {
+test('the built-in admin console is genuine installed content in the SAME main Space - any relay-admin\'s own regular identity sees and uses it, a non-admin sees a plain "kein Zugriff" page instead and cannot write even by bypassing the UI', async () => {
   const relayAdmin = await actor();
   const calendarAdmin = await actor();
   const outsider = await actor();
@@ -158,29 +158,30 @@ test('the built-in admin console is genuine installed content in the SAME main S
   }
 
   // An OUTSIDER (an ordinary Space member, but NOT a relay-admin) visits #/admin: the console's own
-  // markup is now `'public'`-visibility (this design's own tradeoff - there was never anything
-  // secret IN it), so it renders identically - but WRITE-access is still gated by the relay's own
-  // independent 'relay-admins' ACL check, so a submit through the same form is silently rejected.
+  // CONTENT is still `'public'`-visibility (this design's own tradeoff - there was never anything
+  // secret IN it), but startPlatform() now renders a plain "kein Zugriff" page instead of the real
+  // console for anyone who isn't a relay-admin (boot.js's own renderAdminUnauthorized() doc comment) -
+  // a real, requested UX fix: an outsider used to see the exact same "register an app" form a
+  // relay-admin does, with every submit silently rejected relay-side, indistinguishable from a
+  // genuine, temporary failure. Purely a client-side rendering decision (space.isRelayAdmin(), this
+  // Space's own independent view) - the relay's write-ACL remains the only REAL boundary, proven
+  // below by attempting the write directly through the Dev API, bypassing the (now hidden) UI
+  // entirely, so this test still catches a regression in the ACTUAL enforcement, not just the UI.
   {
     const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/admin' });
     const mountEl = window.document.querySelector('qu-app-shell');
     const mainSpace = await connect(outsider, 'outsider-visit');
     const { router } = startPlatform({ space: mainSpace, mountEl, window, resolveTimeout: 500 });
 
-    await waitUntil(() => mountEl.textContent.includes('Relay-Admin'));
-    assert.ok(mountEl.querySelector('form[data-qu-action="register-app"]'), 'an outsider sees the SAME installed admin console markup - it was never secret');
+    await waitUntil(() => mountEl.textContent.includes('Kein Zugriff'));
+    assert.ok(!mountEl.querySelector('form[data-qu-action="register-app"]'), 'an outsider no longer sees the admin console\'s own form at all, not just a form whose submit would fail');
 
-    const form = mountEl.querySelector('form');
-    form.querySelector('input[name="prefix"]').value = 'sneaky';
-    form.querySelector('input[name="appAdminPub"]').value = QuCrypto.toBase64(calendarAdmin.signingPub);
-    form.querySelector('input[name="name"]').value = 'Sneaky';
-    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-
+    await registerApp(mainSpace, { prefix: 'sneaky', appAdminPub: calendarAdmin.signingPub, name: 'Sneaky' });
     await new Promise((resolve) => setTimeout(resolve, 300)); // let the (doomed) write attempt finish.
 
     const platformNodeId = await deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind);
     const apps = await relayAdminSpace.getNode(platformNodeId).field('apps').toArray();
-    assert.ok(!apps.some((a) => a.prefix === 'sneaky'), 'an outsider\'s submit is rejected by the relay\'s own independent relay-admins ACL check, never just a UI courtesy');
+    assert.ok(!apps.some((a) => a.prefix === 'sneaky'), 'an outsider\'s write is rejected by the relay\'s own independent relay-admins ACL check, never just a UI courtesy');
 
     router.stop();
   }
