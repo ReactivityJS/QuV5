@@ -37,12 +37,18 @@
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN --mount=type=cache,target=/root/.npm npm ci
+# --omit=dev straight away, not "npm ci then npm prune --omit=dev" - esbuild (used by the build
+# step right below) is a regular dependency, not dev-only, so this loses nothing; the devDependency
+# tree (jsdom, declared by several workspace packages purely for their own test files) is never
+# needed here or in the runtime image - installing it just to prune it again wastes real `npm ci`
+# time, which a slow/rate-limited registry connection can turn into minutes of apparently-stuck
+# build output (only npm's own deprecation warnings print meanwhile, no per-package progress) - a
+# real, observed symptom this avoids entirely, not just a tidiness fix.
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev
 # Bundles demo/web/main.js -> demo/web/dist/bundle.js at BUILD TIME (esbuild is a regular
 # dependency, not dev-only, but doing this now means the runtime image never needs to run a
 # bundler on every boot the way `npm run demo:relay` does - see relay-server.js's own doc comment).
 RUN node demo/web/build.mjs
-RUN npm prune --omit=dev
 
 FROM node:22-alpine AS runtime
 WORKDIR /app
