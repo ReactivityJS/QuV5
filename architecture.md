@@ -668,8 +668,14 @@ second, separate way to boot the SAME `@qu/app-shell` that instead serves
 however many independently-owned apps are reachable on one Relay - each
 app self-certifyingly reachable at its OWN owner id with zero relay-admin
 involvement, PLUS an opt-in, prettier alias layer a **relay-admin** - a
-role distinct from any app's own app-admin, deliberately NOT a superuser
-over app content - curates. "Kein Sonderfall zu normalen Spaces" was the
+role distinct from any app's own app-admin - curates. For an ORDINARY
+(`realm: 'main'`) app this role is deliberately NOT a superuser over that
+app's content (registering an alias is not the same as being granted write
+access to it); for a `realm: 'global'` app it deliberately IS - see
+"Global apps, not just one admin console" further down for the full
+"why" (in short: relay-admins collectively own global apps' content by
+design, the same way they collectively own `qu-platform-apps` itself).
+"Kein Sonderfall zu normalen Spaces" was the
 guiding constraint here (a real question this design started from): the
 built-in admin console is not special-cased framework UI at all, it is
 installed Qu content like any other app, living in the exact SAME main
@@ -1311,6 +1317,56 @@ edits that SAME page and creates a brand-new one under the SAME app,
 BOTH through the real browser CMS UI (`#/blog/cms`), not just the Dev API
 directly; every result is independently readable by a fresh, uninvolved
 visitor identity afterward.
+
+**Three real bugs this generalization itself introduced, all deployment-
+observed on a genuinely fresh (wiped-data) setup, not caught by the tests
+written alongside the original change:**
+
+1. `live-app-resolver.js`'s reactive `rebuild()` always passes an explicit
+   `globalApps` array to `createAppResolveKindSchema()` - silently
+   bypassing that function's own STATIC default (`templateNames: ['main']`
+   for prefix `"admin"`, matching what `admin-console-bundle.js` ships)
+   the moment PLATFORM mode's live resolver takes over, even for the
+   built-in console itself. Since global apps have no template registry
+   yet (see above), the console's own `"main"` template had no other way
+   to stay classified - its write got silently rejected, and the console
+   rendered through `@qu/app-renderer`'s template-not-found fallback (or,
+   combined with bug 2 below, a literal "404"). Fixed with a hardcoded
+   `KNOWN_GLOBAL_TEMPLATE_NAMES = {admin: ['main']}` map in
+   `live-app-resolver.js` - the same "small, fixed, known set" posture the
+   admin console's content has always had, just made explicit now that the
+   STATIC default alone is no longer reachable in platform mode.
+2. `bin/install-admin-console.mjs` and `bin/bootstrap-platform.mjs` never
+   called `publishGlobalRoute()` for the admin console's own `"/"` page at
+   all (a requirement `adminRouteRegistryKind`/`live-app-resolver.js`
+   introduced for every global app, this document's own bullet above) -
+   `bootstrap-platform.mjs` additionally installed the console's CONTENT
+   before even registering `"admin"` as an alias, the exact inverse of the
+   "register/publish before seeding" ordering this section already
+   requires one level down for a global app's pages. Both scripts now
+   strictly: register the alias -> wait for the write to be acked and
+   settle -> publish its route -> wait/settle again -> install content.
+3. `bin/install-admin-console.mjs` printed "✅ Installiert." unconditionally,
+   even when every write above was silently rejected (the identity running
+   it not yet actually configured as a relay-admin on the RUNNING relay -
+   a very easy state to be in right after a fresh deploy, since the
+   identity is only generated on a script's first run and has to be pasted
+   into `QU_RELAY_ADMINS` and redeployed before a SECOND run can actually
+   write anything - see the root `README.md`'s "Deploying the App Shell"
+   section). `bootstrap-platform.mjs` already guarded against this
+   (`trackWrites()`/`waitUntilAllWritesAcked()`); `install-admin-console.mjs`
+   now does too, and reports failure with the same "add this pubkey to
+   QU_RELAY_ADMINS and redeploy" guidance instead of lying about success.
+
+All three verified against a real `relay-server.js` process: bug 1+2 via a
+regression test that exercises the REAL, reactive `live-app-resolver.js`
+(not just the static resolver a plain unit test would use) for a
+dynamically-registered `"admin"` global app, checked from a DIFFERENT
+relay-admin identity than the one that wrote the content
+(`packages/app-shell/test/live-app-resolver.test.js`); bug 3 via a real
+relay process in both the misconfigured and correctly-configured state,
+plus a real headless-Chromium check that `#/admin` genuinely renders (no
+404) once fixed.
 
 **Reading this as a CMS, not just a router:** the admin console proves the
 general shape - "UI legt sich selbst innerhalb des Storage an und hat

@@ -109,6 +109,7 @@ import { EventBus } from '@qu/events';
 import {
   installGlobalAppBundle,
   registerApp,
+  publishGlobalRoute,
   createApp,
   createTemplate,
   createStyle,
@@ -283,6 +284,30 @@ async function main() {
   const mainSpace = new Space({ identity: relayAdmin, members: [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }], relayAdmins, transport: mainTransport, bus: mainBus });
   const mainWrites = trackWrites(mainBus);
 
+  // REGISTER, THEN PUBLISH ITS ROUTE, THEN SEED CONTENT - a real, fixed regression: this used to
+  // install the admin console's own content BEFORE even registering "admin" as a global app at
+  // all, let alone publishing its route. @qu/app-shell's own live-app-resolver.js only classifies a
+  // global app's PAGE writes correctly (`adminPageKind`, 'relay-admins'-ACL) once it has observed
+  // BOTH the registerApp() write (to start watching that app's own route registry) AND a
+  // publishGlobalRoute() write for the specific route - out of that order, the write is silently
+  // misclassified against the generic 'content'-ACL fallback and rejected outright (the exact same
+  // "register/publish before seeding" reasoning this file's own comment already documents for a
+  // brand-new APP-ADMIN below, just one level up for a GLOBAL APP's own alias/route). The admin
+  // console's own "main" TEMPLATE has no such registry yet (kinds.js's own "GLOBAL APP CONTENT" doc
+  // comment - templates/styles are a deliberate, separate scope cut for global apps) - it stays
+  // correctly classified only because live-app-resolver.js hardcodes it for prefix "admin"
+  // specifically (that file's own `KNOWN_GLOBAL_TEMPLATE_NAMES` doc comment).
+  const platform = new PlatformRuntime(mainSpace);
+  const existingApps = await platform.resolveApps({ timeout: 800 });
+  if (!existingApps.some((a) => a.prefix === 'admin')) {
+    console.log('  registering the "admin" alias...');
+    await registerApp(mainSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'global' });
+    await waitUntilAllWritesAcked(mainWrites);
+    await new Promise((resolve) => setTimeout(resolve, 300)); // let the relay's live resolver start watching "admin"'s own route registry.
+  } else {
+    console.log('  "admin" alias already registered.');
+  }
+
   // installGlobalAppBundle()/createNode() always build a FRESH Y.Doc for whatever id they target -
   // safe for a Node that doesn't exist yet, but calling it AGAIN for one that already does would
   // duplicate every Y.Text field's content (html/content), not overwrite it - the exact footgun
@@ -293,17 +318,12 @@ async function main() {
   if (adminAlreadyInstalled) {
     console.log('  admin console content already installed - skipping (edit it live at #/admin once bootstrapped, or re-run bin/install-admin-console.mjs to overwrite).');
   } else {
+    console.log('  publishing its route...');
+    await publishGlobalRoute(mainSpace, 'admin', { route: '/', title: 'Relay-Admin' });
+    await waitUntilAllWritesAcked(mainWrites);
+    await new Promise((resolve) => setTimeout(resolve, 300)); // let the relay observe the new route before the page content write follows.
     console.log('  installing the built-in admin console content...');
     await installGlobalAppBundle(mainSpace, 'admin', adminConsoleBundle);
-  }
-
-  const platform = new PlatformRuntime(mainSpace);
-  const existingApps = await platform.resolveApps({ timeout: 800 });
-  if (!existingApps.some((a) => a.prefix === 'admin')) {
-    console.log('  registering the "admin" alias...');
-    await registerApp(mainSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'global' });
-  } else {
-    console.log('  "admin" alias already registered.');
   }
 
   // REGISTER FIRST, THEN SEED CONTENT - order matters now, unlike under the old static

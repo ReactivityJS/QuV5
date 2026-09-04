@@ -63,6 +63,33 @@ import WebSocket from 'ws';
 import { createAppResolveKindSchema, platformAppsKind, PLATFORM_REGISTRY_ANCHOR, adminRouteRegistryKind, globalAppAnchor } from '@qu/app-core';
 
 /**
+ * A REAL REGRESSION THIS ONCE HAD, fixed here: once this file starts
+ * rebuilding `resolveKindSchema` reactively, it ALWAYS passes an explicit
+ * `globalApps` array to `createAppResolveKindSchema()` - which means that
+ * function's OWN default parameter (`[{prefix: 'admin', templateNames:
+ * ['main'], ...}]`, matching what `admin-console-bundle.js` ships) never
+ * applies in platform mode any more, not even for the 'admin' prefix
+ * itself. Since global apps have no TEMPLATE registry yet (kinds.js's own
+ * "GLOBAL APP CONTENT" doc comment - a deliberate, documented scope cut,
+ * pages first), the built-in admin console's own "main" template has no
+ * OTHER way to stay correctly classified once this reactive resolver takes
+ * over - its write gets silently misclassified against the generic
+ * `'content'`-ACL fallback and rejected, and the console renders through
+ * `@qu/app-renderer`'s own template-not-found fallback (no `<qu-slot>`
+ * wrapper around the page's own markup) instead of the real one, or - if
+ * the console's own PAGE also isn't registered in its route registry
+ * (`bin/install-admin-console.mjs`/`bootstrap-platform.mjs` MUST call
+ * `publishGlobalRoute()` for it, the exact same requirement any other
+ * global app's page now has) - a literal "404" fallback, indistinguishable
+ * from the console genuinely not being installed at all. Hardcoded here,
+ * not derived from anything dynamic, because there is still no per-app
+ * template registry to discover it FROM - this is the SAME "small, fixed,
+ * known set" the admin console's own content has always been scoped to
+ * (`@qu/app-core`'s `relay-resolver.js` own doc comment on "GLOBAL APPS").
+ */
+const KNOWN_GLOBAL_TEMPLATE_NAMES = { admin: ['main'] };
+
+/**
  * @param {{collectionRegistryKinds?: object[]}} [params] - forwarded to every `createAppResolveKindSchema()` rebuild, see that function's own doc comment.
  * @returns {{resolveKindSchema: (nodeId: string) => object, start: (params: {url: string, relayAdmins?: Array<Uint8Array>}) => Promise<void>}}
  */
@@ -126,6 +153,7 @@ export function createLiveAppResolveKindSchema({ collectionRegistryKinds = [] } 
         .map((b64) => QuCrypto.fromBase64(b64));
       const globalApps = [...watchedPrefixes].map((prefix) => ({
         prefix,
+        templateNames: KNOWN_GLOBAL_TEMPLATE_NAMES[prefix] ?? [],
         pageRoutes: (globalPageRoutesByPrefix.get(prefix) ?? []).filter(Boolean).map((r) => r.route),
       }));
       current = await createAppResolveKindSchema({ appAdminPubs, collectionRegistryKinds, globalApps });
