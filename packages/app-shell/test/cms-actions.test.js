@@ -16,7 +16,7 @@ import { QuCrypto } from '@qu/core';
 import { Space } from '@qu/space-core';
 import { InProcessTransport, createInProcessHub, createRelayForwarder } from '@qu/space-transport';
 import { createMemoryStore } from '@qu/space-storage';
-import { createApp, createAppResolveKindSchema, ContentResolver } from '@qu/app-core';
+import { createApp, createAppResolveKindSchema, ContentResolver, grantContentWriter, pageKind, createPage, publishRoute } from '@qu/app-core';
 import { startApp } from '../src/boot.js';
 import { installCms } from '../cms-bundle.js';
 
@@ -154,6 +154,76 @@ test('the CMS editor is genuine installed content - an app-admin creates AND edi
   assert.equal(pageForm.querySelector('input[name="mode"]').value, 'create');
   assert.equal(pageForm.querySelector('[name="route"]').readOnly, false);
   assert.equal(pageForm.querySelector('[name="title"]').value, '');
+
+  router.stop();
+});
+
+test('a GRANTED CO-EDITOR - a different identity than the app-admin - can edit an existing page through the CMS forms, not just the app-admin themselves', async () => {
+  // Real, deployment-observed regression this guards against: wireTemplates()/wireStyles()/
+  // wirePages() used to omit `ownerPub` entirely on every holdEdit()/holdRegistry()/edit*() call,
+  // silently defaulting to `space.identity.signingPub` (dev.js's own default) - the VISITING
+  // identity, not the app's actual owner. Listing/reading (via ContentResolver, always correctly
+  // configured with the real appAdminPub) was unaffected, so the list/form correctly SHOWED the
+  // app-admin's existing page - but SAVING computed an entirely different, nonexistent Node id from
+  // the co-editor's own pubkey, throwing "editPage: page ... does not exist" for a page that
+  // plainly does. The previous test in this file never caught this because it always used the SAME
+  // identity for both `space.identity` and `appAdminPub` - this test deliberately does not.
+  const admin = await actor();
+  const coEditor = await actor(); // a DIFFERENT identity - never the app-admin.
+  const visitor = await actor();
+  const members = [
+    { pub: admin.signingPub, xPub: admin.xPublicKey },
+    { pub: coEditor.signingPub, xPub: coEditor.xPublicKey },
+    { pub: visitor.signingPub, xPub: visitor.xPublicKey },
+  ];
+  const hub = createInProcessHub();
+  const resolveKindSchema = await createAppResolveKindSchema({ appAdminPub: admin.signingPub });
+  createRelayForwarder({ hub, members, resolveKindSchema, storage: createMemoryStore() });
+
+  async function connect(identity, peerId) {
+    const transport = new InProcessTransport(hub, peerId);
+    await transport.connect();
+    return new Space({ identity, members, transport });
+  }
+
+  const adminBootstrapSpace = await connect(admin, 'admin-bootstrap');
+  await createApp(adminBootstrapSpace, { name: 'Demo', rootTemplate: null, defaultRoute: '/' });
+  await installCms(adminBootstrapSpace);
+  await createPage(adminBootstrapSpace, { route: '/', title: 'Start v1', content: '<p>v1 content</p>' });
+  await publishRoute(adminBootstrapSpace, { route: '/', title: 'Start' });
+  // The actual mechanism this test proves works end to end - see grantContentWriter()'s own doc
+  // comment ("let user X edit exactly this page").
+  await grantContentWriter(adminBootstrapSpace, { kind: pageKind, path: '/', granteePub: coEditor.signingPub });
+  await new Promise((resolve) => setTimeout(resolve, 100)); // let the grant actually reach the relay/other peers before the co-editor's own write follows.
+
+  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/cms' });
+  const mountEl = window.document.querySelector('qu-app-shell');
+  const coEditorSpace = await connect(coEditor, 'co-editor-visit');
+  // The critical bit: `space` is the CO-EDITOR's own Space, `appAdminPub` is still the real owner -
+  // exactly the "may or may not be appAdminPub itself or a granted co-editor" case wireCms()'s own
+  // doc comment already described as intended, just never actually wired through until now.
+  const { router } = startApp({ space: coEditorSpace, appAdminPub: admin.signingPub, mountEl, window, resolveTimeout: 500 });
+
+  await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-page-form"]'), { timeout: 4000 });
+  await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].some((b) => b.textContent === '/'), { timeout: 4000 });
+
+  const pageForm = mountEl.querySelector('form[data-qu-action="cms-page-form"]');
+  const pageListButton = [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].find((b) => b.textContent === '/');
+  pageListButton.click();
+  await waitUntil(() => pageForm.querySelector('input[name="mode"]').value === 'edit');
+  assert.equal(pageForm.querySelector('[name="title"]').value, 'Start v1', "the co-editor's own click-to-load correctly finds the app-admin's EXISTING page");
+
+  pageForm.querySelector('[name="title"]').value = 'Start v2 (von Co-Editor)';
+  pageForm.querySelector('[name="content"]').value = '<p>v2 content</p>';
+  submit(pageForm, window);
+  await waitUntil(() => (pageForm.querySelector('[data-qu-status]')?.textContent ?? '').length > 0, { timeout: 4000 });
+  assert.match(pageForm.querySelector('[data-qu-status]').textContent, /Gespeichert/, `the co-editor's save must succeed, not throw "does not exist" - got: ${pageForm.querySelector('[data-qu-status]').textContent}`);
+
+  const visitorSpace = await connect(visitor, 'visitor-check');
+  const resolver = new ContentResolver(visitorSpace, { appAdminPub: admin.signingPub });
+  const page = await resolver.resolvePage('/', { timeout: 2000 });
+  assert.equal(page.title, 'Start v2 (von Co-Editor)', "the co-editor's edit actually landed on the app-admin's OWN page Node, not a new one owned by the co-editor");
+  assert.equal(page.content, '<p>v2 content</p>');
 
   router.stop();
 });
