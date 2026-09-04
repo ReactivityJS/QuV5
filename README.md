@@ -171,6 +171,21 @@ unconfigured setup page, or via `window.Qu.pub` in devtools on any already
 configured page) - just add IT to `QU_RELAY_ADMINS` too, no separate
 identity to generate or import into the browser.
 
+**"Does the relay itself need an entry in `QU_RELAY_ADMINS`?" - no.** Every
+entry is a HUMAN/OPERATOR identity - an Ed25519 keypair someone actually
+holds the private half of and signs writes with (a browser's `localStorage`
+identity, `relay-admin`/`demo-app-admin`'s files under `--dir`, or any
+other client identity) - never the relay PROCESS's own. `packages/app-shell/
+relay-server.js` has no identity of its own at all; it only ever CHECKS
+signatures against the pubkeys you list, it never signs anything itself.
+(`@qu/space-transport`'s plain `relay-server.js` - the legacy chat relay,
+a different binary - DOES persist its own identity, but that one is used
+exclusively for relay-to-relay FEDERATION trust, unrelated to
+`QU_RELAY_ADMINS`/app content entirely - see that file's own doc comment.)
+So the only identities that ever belong in `QU_RELAY_ADMINS` are whichever
+people (or CI/automation identities acting on their behalf) you want to be
+able to administer this platform's global apps.
+
 Two runs on a totally fresh setup is normal, not a bug - see
 `packages/app-shell/bin/bootstrap-platform.mjs`'s own doc comment for the
 full "why" (in short: env vars are read once at relay boot, so it can't
@@ -224,11 +239,98 @@ DIFFERENT things, at two different levels** - a common point of confusion:
   your own install script (see `demo/install-app-shell-demo.mjs` for the
   connect-as-app-admin pattern) or add it to your own bundle install flow.
 
-There is currently no SINGLE, platform-wide CMS shared across every app,
-and no CMS for `#/admin`'s own content either (its `qu-admin-*` Kinds have
-no `edit*()` counterparts yet - `bin/install-admin-console.mjs` remains
-the only way to update it) - each ordinary app gets its OWN independent
-CMS editor, installed once per app.
+There is currently no SINGLE, platform-wide CMS shared across every app -
+each ordinary app gets its OWN independent CMS editor, installed once per
+app - and no CMS for `#/admin`'s own content specifically either (its
+`qu-admin-*` Kinds have no `edit*()` counterparts wired into that console's
+UI - `bin/install-admin-console.mjs` remains the only way to update it).
+
+**Any OTHER `realm: 'global'` app DOES get a page editor for free, though**
+(a later addition than the paragraph above) - relay-admins collectively
+administer every global app's content, not just register it (see
+architecture.md §7's "Global apps, not just one admin console"), and
+`#/<prefix>/cms` for such an app wires the exact same CMS editor UI against
+`createGlobalPage()`/`editGlobalPage()`/`publishGlobalRoute()` instead of
+an independently-owned app's own `create*()`/`edit*()` - ANY currently-
+configured relay-admin can then edit ANY page under that prefix, not just
+whoever created it first. Templates/styles are a deliberate, separate scope
+cut for global apps (no dynamic registry for them yet - see the same
+architecture.md section) - only the pages section of the CMS editor is
+wired in global mode. See "Writing and installing your own app" below for
+the two shapes an app can take (ordinary vs. global) and which one this is
+right for.
+
+## Writing and installing your own app
+
+An "app" here is never code the relay runs - it is Qu content (a manifest +
+templates + styles + pages, `@qu/app-core`'s Dev API, `kinds.js`) an
+identity WRITES into the platform's one main Space, resolved and rendered
+by the SAME `@qu/app-shell` bundle every other app uses. There is no
+separate deploy/build step per app and no app registry beyond
+`qu-platform-apps`'s optional alias. Two shapes to choose from:
+
+**Ordinary app (`realm: 'main'`, the common case)** - owned by exactly ONE
+app-admin identity, reachable at its own owner pubkey with zero relay-admin
+involvement, `registerApp()` only ever adding a prettier `#/<prefix>` alias
+on top. `packages/app-shell/bin/bootstrap-platform.mjs`'s own "demo"
+section is the reference recipe, generalized:
+
+1. Generate/persist an app-admin identity (`ensureIdentity()`-style: load
+   from disk if it exists, generate + save a fresh Ed25519+X25519 keypair
+   otherwise - same pattern `demo/lib/identity.mjs` and
+   `bin/install-admin-console.mjs` both already use).
+2. As a **relay-admin**, `registerApp(relayAdminSpace, {prefix, appAdminPub,
+   name})` - wait for it to be relay-acked (`waitUntilAllWritesAcked()` in
+   both bootstrap scripts) and let the relay's live resolver settle
+   (~300ms) BEFORE step 3. This step is optional for reachability (an
+   app-admin's content is always self-certifyingly reachable at their own
+   owner id, `PlatformRuntime.resolveForPath()`'s registration-free
+   fallback) but required for the nicer `#/<prefix>` URL, and for the
+   relay to correctly classify this app-admin's registry Nodes as
+   `'named'`-ACL instead of the generic `'content'`-ACL fallback (see
+   architecture.md §7's "REGISTER FIRST, THEN SEED CONTENT").
+3. Connect AS the app-admin identity (join the main Space - `POST /join`,
+   or list it in `QU_MEMBERS_JSON` - needed for ordinary presence/`'members'`-
+   ACL features, not for the content writes below, but every reference
+   installer does it anyway) and write the app's content with `@qu/app-core`'s
+   Dev API: `createApp()` (the manifest), `createTemplate()`, `createStyle()`,
+   `createPage()` + `publishRoute()` for each page, or all of it in one call
+   via `installAppBundle(space, {manifest, templates, styles, pages, routes})`.
+4. Optionally `installCms(space)` (`@qu/app-shell`'s `cms-bundle.js`) so the
+   app-admin (or anyone they `grantContentWriter()` to) can maintain pages/
+   templates/styles live at `#/<prefix>/cms` afterward, instead of re-running
+   a script for every change.
+
+**Global app (`realm: 'global'`)** - no single owner; every currently-
+configured relay-admin can install/edit its content, and a relay-admin
+added LATER automatically gets the same access (`kinds.js`'s
+`adminAppManifestKind`/`adminPageKind`/`adminTemplateKind`/`adminStyleKind`,
+all `acl.write: 'relay-admins'`). Pick this when the content is genuinely
+platform-owned rather than any one person's (the built-in admin console
+itself is simply `registerApp({prefix: 'admin', realm: 'global'})` - not a
+framework special case). As a relay-admin: `registerApp(space, {prefix,
+realm: 'global'})` -> wait/settle -> `publishGlobalRoute(space, prefix,
+{route, title})` for each page -> wait/settle -> `createGlobalApp()`/
+`createGlobalTemplate()`/`createGlobalPage()` (or `installGlobalAppBundle()`
+for all of it at once) - see `bin/install-admin-console.mjs` for the
+reference installer and its own doc comment on why the ORDER of these steps
+matters (`publishGlobalRoute()` before the matching `createGlobalPage()`,
+every time). `#/<prefix>/cms` then works out of the box for any OTHER
+relay-admin to maintain pages afterward (see the CMS section above) -
+templates/styles still need a script (`createGlobalTemplate()`/
+`editGlobalTemplate()`), the same scope cut mentioned above.
+
+**Verifying an install actually worked, not just that it ran**: a script
+that only `await`s each write and prints "done" can be lying - a write to
+`'relay-admins'`-ACL content is silently rejected if this identity isn't
+(yet) actually configured as a relay-admin on the RUNNING relay (see
+"Deploying the App Shell" above on why that's an easy state to be in right
+after a fresh deploy). Track `debug.space.write.local` vs.
+`space.node.*.write-ack` on the `Space`'s own `bus` and wait for every
+expected write to be acked before reporting success - `bootstrap-
+platform.mjs`'s `trackWrites()`/`waitUntilAllWritesAcked()` (also now used
+by `install-admin-console.mjs`) is the reference implementation; copy it
+into your own install script rather than reinventing it.
 
 ## Deploying the legacy chat relay
 
