@@ -243,6 +243,24 @@ export class Space {
     return this._identity;
   }
 
+  /**
+   * This Space's own `EventBus` (`null` if none was passed to the
+   * constructor) - read-only, for the same "framework-level add-on needs
+   * it without reaching into a private field" reason `identity` above
+   * exists. Lets a caller holding only a `Space` reference (not the
+   * original construction-site `bus` variable) still listen for
+   * `debug.space.write.local`/`space.node.<id>.write-ack` - e.g. to verify
+   * a write it did not itself issue actually reached the relay, rather than
+   * reporting success the instant the local optimistic mutation applied
+   * (see `@qu/app-shell`'s `cms-actions.js` for a caller that does exactly
+   * this - a write silently REJECTED by the relay is otherwise
+   * indistinguishable, client-side, from one that simply hasn't arrived
+   * yet, both looking like "saved" until a reload proves otherwise).
+   */
+  get bus() {
+    return this._bus;
+  }
+
   _recipientXPubKeys() {
     return this._members.map((m) => m.xPub);
   }

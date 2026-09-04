@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { QuCrypto } from '@qu/core';
+import { EventBus } from '@qu/events';
 import { Space } from '@qu/space-core';
 import { InProcessTransport, createInProcessHub, createRelayForwarder } from '@qu/space-transport';
 import { createMemoryStore } from '@qu/space-storage';
@@ -224,6 +225,72 @@ test('a GRANTED CO-EDITOR - a different identity than the app-admin - can edit a
   const page = await resolver.resolvePage('/', { timeout: 2000 });
   assert.equal(page.title, 'Start v2 (von Co-Editor)', "the co-editor's edit actually landed on the app-admin's OWN page Node, not a new one owned by the co-editor");
   assert.equal(page.content, '<p>v2 content</p>');
+
+  router.stop();
+});
+
+test('an UNAUTHORIZED identity - no grant, not the app-admin - gets an honest "not acked" error instead of a false "Gespeichert", and the rejected write never actually lands', async () => {
+  // Real, deployment-observed regression this guards against: editTemplate()/editStyle()/editPage()/
+  // createTemplate()/createStyle()/createPage() all apply their own field mutations to the LOCAL
+  // Y.Doc synchronously and return - awaiting any of them only proves the local mutation happened,
+  // never that the relay accepted it. Without space.bus + verifyWritesAcked() (cms-actions.js's own
+  // doc comment), the CMS form showed "Gespeichert" the instant the local mutation applied,
+  // REGARDLESS of whether the relay ever actually accepted it - a write silently REJECTED (this
+  // identity has neither a self-grant nor a grantContentWriter() grant for this page) looked
+  // IDENTICAL, client-side, to a genuinely successful save, until a reload proved otherwise.
+  const admin = await actor();
+  const stranger = await actor(); // never granted anything.
+  const visitor = await actor();
+  const members = [
+    { pub: admin.signingPub, xPub: admin.xPublicKey },
+    { pub: stranger.signingPub, xPub: stranger.xPublicKey },
+    { pub: visitor.signingPub, xPub: visitor.xPublicKey },
+  ];
+  const hub = createInProcessHub();
+  const resolveKindSchema = await createAppResolveKindSchema({ appAdminPub: admin.signingPub });
+  createRelayForwarder({ hub, members, resolveKindSchema, storage: createMemoryStore() });
+
+  async function connect(identity, peerId, { withBus = false } = {}) {
+    const transport = new InProcessTransport(hub, peerId);
+    await transport.connect();
+    const bus = withBus ? new EventBus() : null;
+    return new Space({ identity, members, transport, bus });
+  }
+
+  const adminBootstrapSpace = await connect(admin, 'admin-bootstrap');
+  await createApp(adminBootstrapSpace, { name: 'Demo', rootTemplate: null, defaultRoute: '/' });
+  await installCms(adminBootstrapSpace);
+  await createPage(adminBootstrapSpace, { route: '/', title: 'Start v1', content: '<p>v1 content</p>' });
+  await publishRoute(adminBootstrapSpace, { route: '/', title: 'Start' });
+  // Deliberately NO grantContentWriter() for `stranger` - the whole point of this test.
+
+  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/cms' });
+  const mountEl = window.document.querySelector('qu-app-shell');
+  const strangerSpace = await connect(stranger, 'stranger-visit', { withBus: true }); // WITH a bus - the only way verifyWritesAcked() can actually check anything.
+  const { router } = startApp({ space: strangerSpace, appAdminPub: admin.signingPub, mountEl, window, resolveTimeout: 500 });
+
+  await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-page-form"]'), { timeout: 4000 });
+  await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].some((b) => b.textContent === '/'), { timeout: 4000 });
+
+  const pageForm = mountEl.querySelector('form[data-qu-action="cms-page-form"]');
+  const pageListButton = [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].find((b) => b.textContent === '/');
+  pageListButton.click();
+  await waitUntil(() => pageForm.querySelector('input[name="mode"]').value === 'edit');
+
+  pageForm.querySelector('[name="title"]').value = 'Hijacked title';
+  pageForm.querySelector('[name="content"]').value = '<p>hijacked</p>';
+  submit(pageForm, window);
+  await waitUntil(() => (pageForm.querySelector('[data-qu-status]')?.textContent ?? '').length > 0, { timeout: 5000 });
+  const status = pageForm.querySelector('[data-qu-status]').textContent;
+  assert.match(status, /Fehler.*nicht bestätigt/, `an unauthorized save must surface a clear error, not "Gespeichert" - got: ${status}`);
+
+  // The durable truth (what a reload would actually re-sync) never changed - a FRESH, uninvolved
+  // visitor Space proves this independently of the rejected write's own local, optimistic mutation.
+  const visitorSpace = await connect(visitor, 'visitor-check');
+  const resolver = new ContentResolver(visitorSpace, { appAdminPub: admin.signingPub });
+  const page = await resolver.resolvePage('/', { timeout: 2000 });
+  assert.equal(page.title, 'Start v1', 'the unauthorized write must never actually reach the durable Space, however convincing its own local echo looked');
+  assert.equal(page.content, '<p>v1 content</p>');
 
   router.stop();
 });

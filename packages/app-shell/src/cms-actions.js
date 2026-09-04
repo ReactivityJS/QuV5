@@ -119,6 +119,80 @@ async function holdRegistry(space, registryKind, ownerPub = space.identity.signi
   return space.useNode(id, registryKind);
 }
 
+/**
+ * A REAL, deployment-observed failure class this exists to catch: a save
+ * that silently never reaches the relay at all - most commonly, a write
+ * REJECTED because the signed-in identity is neither `nodeId`'s owner nor
+ * an explicitly `grantContentWriter()`ed co-editor. `Space.editTemplate()`/
+ * `editStyle()`/`editPage()`/`createTemplate()`/`createStyle()`/
+ * `createPage()` all apply their own field mutations to the LOCAL Y.Doc
+ * synchronously and return - `await`ing any of them only proves the LOCAL
+ * mutation happened, never that the relay accepted it (relay.js's own
+ * `acceptWrite()` sends a `write-ack` on success; a REJECTED write gets no
+ * reply of any kind - see relay.js's own "WRITE-ACK" doc comment). Without
+ * this, the CMS form showed "Gespeichert" (this file's own hardcoded
+ * success message) the instant the local mutation applied, REGARDLESS of
+ * whether the relay ever actually accepted it - the exact "stillschweigend...
+ * die Seite ist anschließend nicht verfügbar" failure class this whole
+ * effort started from, just one level deeper than the ones already fixed
+ * elsewhere (`install-admin-console.mjs`'s own former silent-success bug).
+ * The symptom this produces is genuinely confusing without this check:
+ * the edited value stays visible in the form/rendered page until the next
+ * reload (the local Y.Doc still holds the optimistic mutation), then
+ * reverts, because the relay's own mirror - what a reload actually re-syncs
+ * from - never had it.
+ *
+ * Watches `nodeId`'s own `debug.space.write.local`/`space.node.<id>.write-ack`
+ * pair on `space`'s own `bus` (`Space`'s own `bus` getter) WHILE `fn()` runs,
+ * then waits up to `timeout` for every local write it counted to be acked -
+ * throws a clear, actionable error instead of resolving silently if even
+ * one wasn't. No-ops (skips verification, same as before this existed) if
+ * `space` has no `bus` configured at all (still true of some test setups) -
+ * can't verify what it can't observe, and that must never make an
+ * otherwise-working save start throwing.
+ * @param {import('@qu/space-core').Space} space
+ * @param {string} nodeId - the SAME id `fn()`'s own write(s) target.
+ * @param {() => Promise<*>} fn
+ */
+async function verifyWritesAcked(space, nodeId, fn, { timeout = 3000 } = {}) {
+  const bus = space.bus;
+  if (!bus) return fn();
+  let expected = 0;
+  let acked = 0;
+  const offLocal = bus.on('debug.space.write.local', (payload) => {
+    if (payload?.nodeId === nodeId) expected++;
+  });
+  const offAck = bus.on(`space.node.${nodeId}.write-ack`, () => {
+    acked++;
+  });
+  try {
+    const result = await fn();
+    // `fn()` resolving proves only that its OWN field.set()/replaceText() calls returned - Yjs's
+    // `doc.on('update', ...)` (space.js's own `_handleLocalUpdate()`) fires SYNCHRONOUSLY but is
+    // itself `async` (sealing an envelope is real crypto work) and is never awaited by the write
+    // that triggered it, so `debug.space.write.local` for THIS save can still be several
+    // microtasks/one real async hop away from having fired at all - `expected` itself needs a
+    // moment to catch up before comparing it against `acked` means anything, the same "settle"
+    // margin `bootstrap-platform.mjs`'s own `waitUntilAllWritesAcked()` already bakes in for the
+    // identical reason, just applied before the FIRST check here instead of only before it.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const deadline = Date.now() + timeout;
+    while (acked < expected && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    if (acked < expected) {
+      throw new Error(
+        'Speichern wurde vom Relay nicht bestätigt - die Änderung bleibt nur lokal sichtbar und geht bei einem Reload verloren. ' +
+          'Meist bedeutet das: die aktuell angemeldete Identität ist weder der Owner dieses Inhalts noch wurde ihr per grantContentWriter() Schreibzugriff gewährt.'
+      );
+    }
+    return result;
+  } finally {
+    offLocal();
+    offAck();
+  }
+}
+
 function setStatus(form, text) {
   const status = form.querySelector('[data-qu-status]') ?? form.appendChild(form.ownerDocument.createElement('p'));
   status.setAttribute('data-qu-status', '');
@@ -248,9 +322,14 @@ async function wireTemplates({ mountEl, doc, space, resolver, global, ownerPub }
         const mode = form.querySelector('input[name="mode"]').value;
         const name = form.querySelector('[name="name"]').value.trim();
         const html = form.querySelector('[name="html"]').value;
-        if (mode === 'edit') await editTemplate(space, { name, html, ownerPub, timeout: 2000 });
-        else await createTemplate(space, { name, html });
-        setStatus(form, 'Gespeichert. Falls du berechtigt bist, ist die Änderung jetzt im Space.');
+        if (mode === 'edit') {
+          const id = await deriveContentNodeId(ownerPub ?? space.identity.signingPub, templateKind.kind, name);
+          await verifyWritesAcked(space, id, () => editTemplate(space, { name, html, ownerPub, timeout: 2000 }));
+        } else {
+          const id = await deriveContentNodeId(space.identity.signingPub, templateKind.kind, name);
+          await verifyWritesAcked(space, id, () => createTemplate(space, { name, html }));
+        }
+        setStatus(form, 'Gespeichert und vom Relay bestätigt.');
         await Promise.all([refreshList(), refreshTemplateSelect({ mountEl, doc, resolver })]);
       } catch (err) {
         setStatus(form, `Fehler: ${err.message}`);
@@ -312,9 +391,14 @@ async function wireStyles({ mountEl, doc, space, resolver, global, ownerPub }) {
         const mode = form.querySelector('input[name="mode"]').value;
         const name = form.querySelector('[name="name"]').value.trim();
         const css = form.querySelector('[name="css"]').value;
-        if (mode === 'edit') await editStyle(space, { name, css, ownerPub, timeout: 2000 });
-        else await createStyle(space, { name, css });
-        setStatus(form, 'Gespeichert. Falls du berechtigt bist, ist die Änderung jetzt im Space.');
+        if (mode === 'edit') {
+          const id = await deriveContentNodeId(ownerPub ?? space.identity.signingPub, styleKind.kind, name);
+          await verifyWritesAcked(space, id, () => editStyle(space, { name, css, ownerPub, timeout: 2000 }));
+        } else {
+          const id = await deriveContentNodeId(space.identity.signingPub, styleKind.kind, name);
+          await verifyWritesAcked(space, id, () => createStyle(space, { name, css }));
+        }
+        setStatus(form, 'Gespeichert und vom Relay bestätigt.');
         await refreshList();
       } catch (err) {
         setStatus(form, `Fehler: ${err.message}`);
@@ -407,9 +491,12 @@ async function wirePages({ mountEl, doc, space, resolver, global = false, prefix
             throw new Error(`"Strukturierte Daten" ist kein gültiges JSON: ${err.message}`);
           }
         }
+        const pageKindHere = global ? adminPageKind : pageKind;
         if (global) {
-          if (mode === 'edit') await editGlobalPage(space, prefix, { route, title, template, content, data, timeout: 2000 });
-          else {
+          if (mode === 'edit') {
+            const id = await deriveContentNodeId(anchor, pageKindHere.kind, route);
+            await verifyWritesAcked(space, id, () => editGlobalPage(space, prefix, { route, title, template, content, data, timeout: 2000 }));
+          } else {
             // PUBLISH THE ROUTE FIRST, THEN CREATE THE PAGE - order matters here, the same "register
             // before seeding" reasoning bootstrap-platform.mjs's own doc comment documents for a
             // brand-new app-admin: the relay's live resolver (live-app-resolver.js) only classifies
@@ -419,19 +506,22 @@ async function wirePages({ mountEl, doc, space, resolver, global = false, prefix
             // 'content'-ACL fallback (no grant for this anchor-derived id exists, or ever will).
             // The settle delay gives the relay's own internal watcher time to actually rebuild
             // before the page write follows - the SAME margin bootstrap-platform.mjs's own explicit
-            // wait-for-ack-plus-settle uses, just a fixed delay here rather than tracking acks
-            // through this file's own bus (which cms-actions.js has no handle on).
+            // wait-for-ack-plus-settle uses. `verifyWritesAcked()` (space.bus, now available) confirms
+            // the page write itself actually landed, rather than just hoping the delay was enough.
             await publishGlobalRoute(space, prefix, { route, title });
             await new Promise((resolve) => setTimeout(resolve, 400));
-            await createGlobalPage(space, prefix, { route, title, template, content, data });
+            const id = await deriveContentNodeId(anchor, pageKindHere.kind, route);
+            await verifyWritesAcked(space, id, () => createGlobalPage(space, prefix, { route, title, template, content, data }));
           }
         } else if (mode === 'edit') {
-          await editPage(space, { route, title, template, content, data, ownerPub, timeout: 2000 });
+          const id = await deriveContentNodeId(anchor, pageKindHere.kind, route);
+          await verifyWritesAcked(space, id, () => editPage(space, { route, title, template, content, data, ownerPub, timeout: 2000 }));
         } else {
-          await createPage(space, { route, title, template, content, data });
+          const id = await deriveContentNodeId(space.identity.signingPub, pageKindHere.kind, route);
+          await verifyWritesAcked(space, id, () => createPage(space, { route, title, template, content, data }));
           await publishRoute(space, { route, title });
         }
-        setStatus(form, 'Gespeichert. Falls du berechtigt bist, ist die Änderung jetzt im Space.');
+        setStatus(form, 'Gespeichert und vom Relay bestätigt.');
         await refreshList();
       } catch (err) {
         setStatus(form, `Fehler: ${err.message}`);
