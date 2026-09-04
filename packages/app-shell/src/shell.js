@@ -39,6 +39,7 @@
  * any app/platform is even configured. See that file's own doc comment.
  */
 import { QuCrypto } from '@qu/core';
+import { EventBus } from '@qu/events';
 import { Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport/ws-client-transport';
 import '@qu/space-components/elements'; // registers <qu-view>/<qu-bind>/<qu-list> - see that module's own doc comment. Side-effect only import, deliberately unused otherwise.
@@ -69,7 +70,11 @@ export class QuAppShell extends HTMLElement {
 
       const transport = new WsClientTransport(relayUrl);
       await transport.connect();
-      const space = new Space({ identity, members, relayAdmins, transport });
+      // A real EventBus, not the framework's own `null` default - `cms-actions.js`'s `wireCms()`
+      // reads `space.bus` (Space's own doc comment on that getter) to tell a save the RELAY silently
+      // rejected apart from one that genuinely succeeded, both otherwise indistinguishable client-side.
+      const bus = new EventBus();
+      const space = new Space({ identity, members, relayAdmins, transport, bus });
 
       if (isPlatformMode) {
         // The admin app lives in this SAME main Space now (kinds.js's own "THE ADMIN APP" doc
