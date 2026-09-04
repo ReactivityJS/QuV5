@@ -178,7 +178,26 @@ async function refreshTemplateSelect({ mountEl, doc, resolver }) {
   select.value = current;
 }
 
-async function wireTemplates({ mountEl, doc, space, resolver, global }) {
+/**
+ * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, resolver: ContentResolver, global?: boolean, ownerPub?: Uint8Array}} params
+ *   `ownerPub` - the app's REAL owner pubkey (`wireCms()`'s own `appAdminPub`, see its doc comment) -
+ *   REQUIRED for editing to ever work for anyone other than whichever identity happens to be
+ *   `space.identity` right now. A real, deployment-observed bug this fixes: every `holdEdit()`/
+ *   `holdRegistry()`/`edit*()` call below used to omit `ownerPub` entirely, silently defaulting to
+ *   `space.identity.signingPub` (dev.js's own default) - the browsing VISITOR's own identity, not
+ *   the app's actual owner. Listing/reading (`resolver.resolve*()`, constructed with the correct
+ *   `appAdminPub` in `wireCms()`) was never affected - only writes were - so the list/form correctly
+ *   SHOWED an app-admin's existing content while a save (`edit*()`) computed an entirely different,
+ *   nonexistent Node id from the visitor's own pubkey instead, throwing "does not exist" for content
+ *   that plainly does. This is the exact scenario `grantContentWriter()`/`editPage()`'s own `ownerPub`
+ *   parameter exists for (dev.js's own doc comment) - it was simply never threaded through from this
+ *   UI at all, making a granted co-editor's save fail identically to an unauthorized one's, with no
+ *   way to tell the two apart. Still relies entirely on the RELAY's own write-ACL to reject an
+ *   actually-unauthorized save (this file's own top doc comment, "WRITE-ACL, not this file, is what
+ *   actually gates a save") - passing the correct `ownerPub` only fixes the intended CASE (the real
+ *   owner, or a real grantee, signed in with THEIR OWN identity) from failing for the wrong reason.
+ */
+async function wireTemplates({ mountEl, doc, space, resolver, global, ownerPub }) {
   // Global apps have no template REGISTRY yet (kinds.js's own "GLOBAL APP CONTENT" doc comment -
   // "TEMPLATES/STYLES stay a smaller, more static set for global apps for now," matching the
   // priority the user themselves set: pages first, templates/styles optional) - a deliberate,
@@ -193,7 +212,7 @@ async function wireTemplates({ mountEl, doc, space, resolver, global }) {
   // Fire-and-forget, started BEFORE the submit listener below attaches (same synchronous-first-tick
   // reasoning as _sendSubscribeRequest()'s own posture elsewhere) - see this file's own top doc
   // comment, "KEEPING EACH SECTION'S OWN REGISTRY SUBSCRIPTION ALIVE...".
-  holdRegistry(space, templateRegistryKind).catch(() => {});
+  holdRegistry(space, templateRegistryKind, ownerPub).catch(() => {});
   let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".
 
   async function refreshList() {
@@ -212,7 +231,7 @@ async function wireTemplates({ mountEl, doc, space, resolver, global }) {
       btn.type = 'button';
       btn.textContent = name;
       btn.addEventListener('click', async () => {
-        activeEdit = await holdEdit(space, templateKind, name, activeEdit);
+        activeEdit = await holdEdit(space, templateKind, name, activeEdit, ownerPub);
         const html = (await resolver.resolveTemplate(name, { timeout: 2000 })) ?? '';
         enterEditMode(form, { keyFieldName: 'name', keyValue: name, fields: { html } });
       });
@@ -229,7 +248,7 @@ async function wireTemplates({ mountEl, doc, space, resolver, global }) {
         const mode = form.querySelector('input[name="mode"]').value;
         const name = form.querySelector('[name="name"]').value.trim();
         const html = form.querySelector('[name="html"]').value;
-        if (mode === 'edit') await editTemplate(space, { name, html, timeout: 2000 });
+        if (mode === 'edit') await editTemplate(space, { name, html, ownerPub, timeout: 2000 });
         else await createTemplate(space, { name, html });
         setStatus(form, 'Gespeichert. Falls du berechtigt bist, ist die Änderung jetzt im Space.');
         await Promise.all([refreshList(), refreshTemplateSelect({ mountEl, doc, resolver })]);
@@ -249,14 +268,15 @@ async function wireTemplates({ mountEl, doc, space, resolver, global }) {
   await refreshList();
 }
 
-async function wireStyles({ mountEl, doc, space, resolver, global }) {
+/** See `wireTemplates()`'s own doc comment on `ownerPub` - identical reasoning here. */
+async function wireStyles({ mountEl, doc, space, resolver, global, ownerPub }) {
   if (global) return; // see wireTemplates()'s own identical comment.
   const list = mountEl.querySelector('[data-qu-bind="cms-style-list"]');
   const form = mountEl.querySelector('form[data-qu-action="cms-style-form"]');
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="style"]');
   if (!list && !form) return;
 
-  holdRegistry(space, styleRegistryKind).catch(() => {}); // see wireTemplates()'s own identical comment.
+  holdRegistry(space, styleRegistryKind, ownerPub).catch(() => {}); // see wireTemplates()'s own identical comment.
   let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".
 
   async function refreshList() {
@@ -275,7 +295,7 @@ async function wireStyles({ mountEl, doc, space, resolver, global }) {
       btn.type = 'button';
       btn.textContent = name;
       btn.addEventListener('click', async () => {
-        activeEdit = await holdEdit(space, styleKind, name, activeEdit);
+        activeEdit = await holdEdit(space, styleKind, name, activeEdit, ownerPub);
         const css = (await resolver.resolveStyle(name, { timeout: 2000 })) ?? '';
         enterEditMode(form, { keyFieldName: 'name', keyValue: name, fields: { css } });
       });
@@ -292,7 +312,7 @@ async function wireStyles({ mountEl, doc, space, resolver, global }) {
         const mode = form.querySelector('input[name="mode"]').value;
         const name = form.querySelector('[name="name"]').value.trim();
         const css = form.querySelector('[name="css"]').value;
-        if (mode === 'edit') await editStyle(space, { name, css, timeout: 2000 });
+        if (mode === 'edit') await editStyle(space, { name, css, ownerPub, timeout: 2000 });
         else await createStyle(space, { name, css });
         setStatus(form, 'Gespeichert. Falls du berechtigt bist, ist die Änderung jetzt im Space.');
         await refreshList();
@@ -313,7 +333,7 @@ async function wireStyles({ mountEl, doc, space, resolver, global }) {
 }
 
 /**
- * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, resolver: ContentResolver, global?: boolean, prefix?: string}} params
+ * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, resolver: ContentResolver, global?: boolean, prefix?: string, ownerPub?: Uint8Array}} params
  *   `global`/`prefix` - see `wireCms()`'s own doc comment. In global mode,
  *   every write goes through `createGlobalPage()`/`editGlobalPage()`/
  *   `publishGlobalRoute()` (`@qu/app-core`'s Dev API) instead of the
@@ -322,15 +342,17 @@ async function wireStyles({ mountEl, doc, space, resolver, global }) {
  *   not just whoever happened to create it first (kinds.js's own "GLOBAL
  *   APP CONTENT" doc comment) - `refreshTemplateSelect()` is skipped
  *   entirely here (no template registry for global apps yet, see
- *   `wireTemplates()`'s own doc comment on that scope cut).
+ *   `wireTemplates()`'s own doc comment on that scope cut). `ownerPub` (non-
+ *   global only) - see `wireTemplates()`'s own doc comment on why editing
+ *   needs it explicitly, not just `space.identity`'s default.
  */
-async function wirePages({ mountEl, doc, space, resolver, global = false, prefix }) {
+async function wirePages({ mountEl, doc, space, resolver, global = false, prefix, ownerPub }) {
   const list = mountEl.querySelector('[data-qu-bind="cms-page-list"]');
   const form = mountEl.querySelector('form[data-qu-action="cms-page-form"]');
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="page"]');
   if (!list && !form) return;
 
-  const anchor = global ? await globalAppAnchor(prefix) : undefined;
+  const anchor = global ? await globalAppAnchor(prefix) : ownerPub;
   holdRegistry(space, global ? adminRouteRegistryKind : routeRegistryKind, anchor).catch(() => {}); // see wireTemplates()'s own identical comment.
   if (!global) await refreshTemplateSelect({ mountEl, doc, resolver });
 
@@ -404,7 +426,7 @@ async function wirePages({ mountEl, doc, space, resolver, global = false, prefix
             await createGlobalPage(space, prefix, { route, title, template, content, data });
           }
         } else if (mode === 'edit') {
-          await editPage(space, { route, title, template, content, data, timeout: 2000 });
+          await editPage(space, { route, title, template, content, data, ownerPub, timeout: 2000 });
         } else {
           await createPage(space, { route, title, template, content, data });
           await publishRoute(space, { route, title });
@@ -444,9 +466,14 @@ async function wirePages({ mountEl, doc, space, resolver, global = false, prefix
  */
 export async function wireCms({ mountEl, doc, space, appAdminPub, global = false, prefix }) {
   const resolver = new ContentResolver(space, { appAdminPub, kinds: global ? { pageKind: adminPageKind, routeRegistryKind: adminRouteRegistryKind } : undefined });
+  // Non-global only - a global app's writes already target the right id through `prefix`/
+  // `globalAppAnchor()` (createGlobalPage()/etc. take no ownerPub at all), so passing appAdminPub
+  // (there, `globalAppAnchor(prefix)` - not a real identity) down as `ownerPub` too would be
+  // redundant, not wrong, but wireTemplates()/wireStyles() already return early for global regardless.
+  const ownerPub = global ? undefined : appAdminPub;
   await Promise.all([
-    wireTemplates({ mountEl, doc, space, resolver, global }),
-    wireStyles({ mountEl, doc, space, resolver, global }),
-    wirePages({ mountEl, doc, space, resolver, global, prefix }),
+    wireTemplates({ mountEl, doc, space, resolver, global, ownerPub }),
+    wireStyles({ mountEl, doc, space, resolver, global, ownerPub }),
+    wirePages({ mountEl, doc, space, resolver, global, prefix, ownerPub }),
   ]);
 }
