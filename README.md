@@ -320,6 +320,24 @@ relay-admin to maintain pages afterward (see the CMS section above) -
 templates/styles still need a script (`createGlobalTemplate()`/
 `editGlobalTemplate()`), the same scope cut mentioned above.
 
+**Three administrable states for a global app, not a per-app relay
+feature-gate** (`mode`, `registerApp()`/`setAppMode()`,
+architecture.md §7's own "Three administrable states" section for the
+full design reasoning) - `'off'` (unreachable, same as never registered),
+`'global'` (the default - only relay-admins may write, exactly the
+paragraph above), or `'multiuser'` - the global shell stays exactly as in
+`'global'` mode, PLUS every visitor (relay-admins included, no special
+role needed) may ALSO maintain their OWN content at
+`#/<prefix>/u/<ref>/...` (`ref` = `"me"`, or another identity's own
+base64url pubkey to read theirs) - an ordinary, self-owned `'content'`-ACL
+namespace, no registration or grant required, a first-ever visit to
+`/u/me/` self-provisioning a minimal personal app + CMS editor on the
+spot. `setAppMode(space, {prefix, mode})` changes an ALREADY-registered
+app's mode later (a relay-admin call, same as `registerApp()` itself) -
+see `packages/app-shell/test/multiuser-app.test.js` for the reference
+example (registers `"cms"` this way, two independent visitors each
+maintain their own page with zero further cooperation).
+
 **Verifying an install actually worked, not just that it ran**: a script
 that only `await`s each write and prints "done" can be lying - a write to
 `'relay-admins'`-ACL content is silently rejected if this identity isn't

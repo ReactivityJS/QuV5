@@ -12,10 +12,13 @@
  * them and hand it here - this function knows nothing about HOW it was
  * built, only that it behaves like one.
  */
-import { AppRuntime, HashRouter, PlatformRuntime, adminAppManifestKind, adminPageKind, adminTemplateKind, adminStyleKind, globalAppAnchor } from '@qu/app-core';
+import { AppRuntime, HashRouter, PlatformRuntime, ContentResolver, createApp, appManifestKind, adminAppManifestKind, adminPageKind, adminTemplateKind, adminStyleKind, globalAppAnchor } from '@qu/app-core';
+import { QuCrypto } from '@qu/core';
+import { deriveOwnerNodeId } from '@qu/space-core';
 import { renderPage } from '@qu/app-renderer';
 import { wireAdminConsole } from './admin-actions.js';
 import { wireCms } from './cms-actions.js';
+import { installCms } from '../cms-bundle.js';
 
 /** Passed as `AppRuntime`'s `kinds` override for `realm: 'global'` routes - see `resolver.js`'s own doc comment on what this parametrizes. Shared by EVERY global app (they all use the SAME Kind set, told apart only by their anchor - see kinds.js's own "GLOBAL APP CONTENT" doc comment). No `routeRegistryKind` entry: `AppRuntime.resolveRoute()` (the only method `startPlatform()` calls) never touches it - see `runtime.js`. */
 const GLOBAL_KINDS = { appManifestKind: adminAppManifestKind, pageKind: adminPageKind, templateKind: adminTemplateKind, styleKind: adminStyleKind };
@@ -86,6 +89,120 @@ function renderAdminUnauthorized({ mountEl, doc }) {
 }
 
 /**
+ * Recognizes a `realm: 'global'`, `mode: 'multiuser'` app's own per-user
+ * sub-namespace (kinds.js's own doc comment on the three states) -
+ * `/u/<ref>/<rest>` where `ref` is either the literal string `"me"` (the
+ * CURRENTLY signed-in identity - by far the common case, no need for a
+ * visitor to know/paste their own pubkey) or another identity's own
+ * base64url-encoded pubkey (the SAME encoding `PlatformRuntime`'s own
+ * top-level "unregistered prefix = literal owner id" fallback already
+ * uses - reading it is always public, same as any other content here).
+ * Everything else under this prefix (no `/u/` segment at all) is the
+ * app's ordinary GLOBAL shell content, unaffected by `multiuser` mode -
+ * `startPlatform()` falls through to that when this returns `null`.
+ * @param {string} subPath
+ * @returns {{ref: string, userSubPath: string}|null}
+ */
+function parseMultiUserSubPath(subPath) {
+  const match = /^\/u\/([^/]+)(\/.*)?$/.exec(subPath ?? '');
+  if (!match) return null;
+  return { ref: match[1], userSubPath: match[2] || '/' };
+}
+
+/** `parseMultiUserSubPath()`'s own `ref` resolved to a real pubkey, or `null` if it's neither `"me"` nor a well-formed base64url pubkey. */
+function resolveUserRef(ref, space) {
+  if (ref === 'me') return space.identity.signingPub;
+  try {
+    const pub = QuCrypto.fromBase64Url(ref);
+    return pub.length === 32 ? pub : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `renderMultiUserRoute()`'s own self-provisioning step - only calls
+ * `createApp()`/`installCms()` if this identity genuinely has no manifest
+ * yet (`ContentResolver.resolveManifest()`, the same check any ordinary
+ * reader already uses, given a generous 1500ms timeout - real, deployment-
+ * observed reasoning below, not an arbitrary number).
+ *
+ * A REAL RACE THIS ONCE HAD, caught before shipping: an earlier version
+ * hand-rolled its OWN "does it exist" check via a raw `space.useNode()` +
+ * bounded `node.meta` poll, released immediately after - which, for a
+ * Node THIS SAME identity just created moments earlier (`createNode()`
+ * never refcounts its own creation - the first `useNode()`/`release()`
+ * pair ANY reader does afterward tears the local Y.Doc back down, exactly
+ * the "torn down after every read, forces a full resync every time"
+ * problem `dev.js`'s own `getOrSyncRegistryNode()` doc comment describes
+ * for registries, just for an ordinary owner Node this time), needed a
+ * REAL round-trip through the relay's own mirror to become visible again -
+ * not instant even in-process, and the hand-rolled check's own bound
+ * (400ms) occasionally lost that race, causing a second, spurious
+ * `createApp()`/`installCms()` call for a manifest that already existed
+ * (a real, observed bug, not hypothetical - reproduced via the exact
+ * `#/cms/u/me/` -> `#/cms/u/me/cms` navigation this function exists for).
+ * `resolveManifest()`'s own generous, already-established timeout absorbs
+ * that same round-trip reliably, with no bespoke logic to get subtly
+ * wrong. A genuinely CONCURRENT double-call (two tabs, same identity, same
+ * exact instant) could still race here - an accepted, low-stakes residual
+ * (a rare, cosmetic duplicate on someone's own first-ever visit, no
+ * different from `createApp()`/`createTemplate()`/`createPage()` having no
+ * built-in protection against being called twice concurrently either),
+ * not something worth a heavier lock for.
+ */
+async function ensureSelfProvisioned(space, ownerPub) {
+  const resolver = new ContentResolver(space, { appAdminPub: ownerPub });
+  const manifest = await resolver.resolveManifest({ timeout: 1500 });
+  if (!manifest) {
+    await createApp(space, { name: 'Mein Bereich', rootTemplate: null, defaultRoute: '/' });
+    await installCms(space);
+  }
+}
+
+/**
+ * Renders one user's own sub-namespace within a `mode: 'multiuser'` global
+ * app - an ORDINARY `AppRuntime`/`wireCms()` pair, exactly like a single-
+ * owner app (`startApp()`'s own posture), just addressed at `ownerPub`
+ * instead of a `qu-platform-apps`-registered `appAdminPub` - the whole
+ * point of this mode: self-owned `'content'`-ACL Kinds need no relay-admin
+ * cooperation or per-app registration to work AT ALL, they only need an
+ * agreed-upon URL SHAPE to be discoverable, which is all this function
+ * provides.
+ *
+ * SELF-PROVISIONING, `ref === "me"` ONLY: a brand-new visitor's own
+ * identity has no `qu-app` manifest yet the very first time they reach
+ * their own `/u/me/` - rather than a 404 (technically correct, but a
+ * dead end with no way to fix itself), this creates one, plus installs
+ * the CMS editor, using nothing but THIS identity's own already-connected
+ * `space` - the same `createApp()`/`installCms()` calls any install
+ * script already makes, just triggered by a first visit instead of an
+ * operator running one. Never done for someone else's `ref` (an ordinary
+ * visitor reading Alice's still-empty page must never conjure content
+ * into Alice's OWN name) - reading stays side-effect-free regardless of
+ * what's actually there.
+ */
+async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ref, userSubPath }) {
+  const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
+  const ownerPub = resolveUserRef(ref, space);
+  if (!ownerPub) {
+    renderPage({ mountEl, doc: window.document, templateHtml: null, page: null, css: '', styleId });
+    return;
+  }
+  if (ref === 'me') await ensureSelfProvisioned(space, ownerPub);
+  const runtime = new AppRuntime(space, { appAdminPub: ownerPub });
+  const plan = await runtime.resolveRoute(userSubPath, timeoutOpt);
+  mountEl.quSpace = space;
+  renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+  // Wired regardless of whose `ref` this is, same posture #/<prefix>/cms already has for an
+  // ordinary app: write-ACL (self-owned, or an explicit grantContentWriter()) is what actually
+  // gates a save, never this UI - a visitor viewing someone ELSE's page sees the same editor,
+  // and their save simply fails cleanly (cms-actions.js's own verifyWritesAcked()) unless that
+  // owner actually granted them access.
+  await wireCms({ mountEl, doc: window.document, space, appAdminPub: ownerPub });
+}
+
+/**
  * @param {{space: import('@qu/space-core').Space, appAdminPub: Uint8Array, mountEl: Element, window: {location: object, document: Document, addEventListener: Function, removeEventListener: Function}, styleId?: string, resolveTimeout?: number}} params
  *   `resolveTimeout` - how long to wait for a route's content to sync before giving up and rendering the "not found" fallback (see @qu/app-core's `ContentResolver`'s own `timeout` param); defaults to that resolver's own default.
  * @returns {{runtime: AppRuntime, router: HashRouter}} - `router.stop()` tears down the hashchange listener; nothing else here needs explicit cleanup.
@@ -151,6 +268,17 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  * app (a platform-wide chat/calendar/etc., relay-admin-ADMINISTERED but
  * meant for everyone to USE) has no reason to hide itself from non-admins
  * at all, only the admin console's own management UI does.
+ *
+ * `mode: 'multiuser'` (kinds.js's own doc comment on the three
+ * administrable states) additionally recognizes a `/u/<ref>/...` sub-path
+ * (`parseMultiUserSubPath()`/`renderMultiUserRoute()`, right above) - `ref`
+ * `"me"` or another identity's own base64url pubkey - and resolves/renders
+ * THAT identity's own ordinary, self-owned `'content'`-ACL Kinds instead
+ * of this app's global anchor, an `AppRuntime`/`wireCms()` pair no
+ * different from a single-owner app. Every OTHER sub-path under a
+ * `multiuser` app still resolves against the global anchor exactly like
+ * `mode: 'global'` - `multiuser` only ADDS the per-user namespace, it
+ * never removes the shared one.
  * @param {{space: import('@qu/space-core').Space, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
  *   `space` - MUST have been constructed with a `relayAdmins` list (see
  *   `Space`'s own constructor doc comment) matching the relay's own
@@ -181,6 +309,16 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
         return;
       }
       const isGlobal = match.realm === 'global';
+      if (isGlobal && match.mode === 'multiuser') {
+        const userRoute = parseMultiUserSubPath(match.subPath);
+        if (userRoute) {
+          await renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ...userRoute });
+          return;
+        }
+        // No `/u/...` segment - falls through below to this app's own ordinary GLOBAL shell content,
+        // exactly like `mode: 'global'` - `multiuser` only ADDS the per-user namespace, see kinds.js's
+        // own doc comment on the three states.
+      }
       const runtime = isGlobal ? new AppRuntime(space, { appAdminPub: await globalAppAnchor(match.prefix), kinds: GLOBAL_KINDS }) : new AppRuntime(space, { appAdminPub: match.appAdminPub });
       const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
       mountEl.quSpace = space;

@@ -83,30 +83,57 @@ export class PlatformRuntime {
     this._space = space;
   }
 
-  /** @returns {Promise<Array<{prefix: string, appAdminPub: Uint8Array|null, name: string, realm: 'main'|'admin'}>>} Every app/alias any configured relay-admin has registered - empty if none (yet). */
+  /**
+   * @returns {Promise<Array<{prefix: string, appAdminPub: Uint8Array|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser'}>>}
+   *   Every app/alias any configured relay-admin has registered - empty if
+   *   none (yet). ONE entry PER PREFIX, even if it was registered/updated
+   *   more than once - `apps` is an append-only log (kinds.js's own doc
+   *   comment on `platformAppsKind` - `ListField` has no update/removal
+   *   primitive), so a LATER entry for an already-known prefix (e.g.
+   *   `setAppMode()` changing a `realm: 'global'` app's `mode`) is a state
+   *   UPDATE, not a second, competing app - only the LAST one for a given
+   *   `prefix` is current. `mode` is only ever meaningful for `realm:
+   *   'global'` entries (`undefined` for `realm: 'main'` - see kinds.js's
+   *   own doc comment on the three states), defaulting to `'global'` when
+   *   absent so every entry from before this field existed (the built-in
+   *   admin console's own original registration included) keeps behaving
+   *   exactly as before.
+   */
   async resolveApps({ timeout } = {}) {
     const id = await platformRegistryId();
     const { node, release } = await this._space.useNode(id, platformAppsKind);
     await waitFor(() => (node.field('apps').length > 0 ? true : null), { timeout: timeout ?? 500 });
     const apps = await node.field('apps').toArray();
     release();
-    return apps
-      .filter(Boolean)
-      .map((a) => ({ ...a, appAdminPub: a.appAdminPub ? QuCrypto.fromBase64(a.appAdminPub) : null, realm: a.realm ?? 'main' }));
+    const byPrefix = new Map();
+    for (const a of apps.filter(Boolean)) byPrefix.set(a.prefix, a); // last write per prefix wins - see this method's own doc comment.
+    return [...byPrefix.values()].map((a) => ({
+      ...a,
+      appAdminPub: a.appAdminPub ? QuCrypto.fromBase64(a.appAdminPub) : null,
+      realm: a.realm ?? 'main',
+      mode: (a.realm ?? 'main') === 'global' ? (a.mode ?? 'global') : undefined,
+    }));
   }
 
   /**
    * @param {string} fullPath - the CURRENT route, e.g. `"/forum/topic/123"`.
-   * @returns {Promise<{prefix: string, subPath: string, realm: 'main'|'admin', appAdminPub?: Uint8Array, name: string|null}|null>}
-   *   `null` only if `prefix` matches NEITHER a registered alias NOR a
-   *   valid owner id (see this file's own top doc comment's "TWO KINDS OF
-   *   MATCH") - `boot.js`'s cue to render the landing page.
+   * @returns {Promise<{prefix: string, subPath: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser', appAdminPub?: Uint8Array, name: string|null}|null>}
+   *   `null` if `prefix` matches NEITHER a registered alias NOR a valid
+   *   owner id (see this file's own top doc comment's "TWO KINDS OF
+   *   MATCH"), OR if it matches a `realm: 'global'` app currently in
+   *   `mode: 'off'` (kinds.js's own doc comment on the three states) -
+   *   `boot.js`'s cue to render the landing page either way, indistinguishable
+   *   from "never registered" on purpose (an "off" app should look exactly
+   *   as absent as one that was never installed, not like a broken one).
    */
   async resolveForPath(fullPath, options) {
     const { prefix, subPath } = splitPath(fullPath);
     const apps = await this.resolveApps(options);
-    const match = apps.find((a) => a.prefix === prefix);
-    if (match) return { ...match, subPath };
+    const match = apps.find((a) => a.prefix === prefix); // safe - resolveApps() already dedupes to one (current) entry per prefix.
+    if (match) {
+      if (match.realm === 'global' && match.mode === 'off') return null;
+      return { ...match, subPath };
+    }
     try {
       const appAdminPub = QuCrypto.fromBase64Url(prefix);
       if (appAdminPub.length !== 32) return null;

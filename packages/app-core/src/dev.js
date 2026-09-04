@@ -369,19 +369,50 @@ export async function installAppBundle(space, bundle) {
  * `platform.js`'s own doc comment on the default, registration-free
  * routing fallback).
  * @param {import('@qu/space-core').Space} space - a relay-admin's own Space (see this function's own doc comment above).
- * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'global'}} params
+ * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'global', mode?: 'off'|'global'|'multiuser'}} params
  *   `prefix` is matched against a route's FIRST path segment (no
  *   leading/trailing slash, e.g. `"forum"` for `#/forum/...`).
  *   `realm: 'global'` (default `'main'`) routes this prefix into content
  *   ANY relay-admin collectively administers instead (`appAdminPub` is
  *   ignored/omitted for those entries - a global app has no single owner,
  *   see kinds.js's own "GLOBAL APP CONTENT" doc comment; `prefix` itself IS
- *   the identifier `createGlobalApp()`/etc. anchor their ids on).
+ *   the identifier `createGlobalApp()`/etc. anchor their ids on). `mode`
+ *   (`realm: 'global'` only, defaults to `'global'` if omitted) - see
+ *   kinds.js's own doc comment on the three states; use `setAppMode()`
+ *   to change it later for an app already registered.
  */
-export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main' }) {
+export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode }) {
   const id = await platformRegistryId();
   const node = space.getNode(id) ?? (await space.createNode(platformAppsKind, {}, { id }));
-  await node.field('apps').push({ prefix, appAdminPub: appAdminPub ? QuCrypto.toBase64(appAdminPub) : null, name, realm });
+  const entry = { prefix, appAdminPub: appAdminPub ? QuCrypto.toBase64(appAdminPub) : null, name, realm };
+  if (realm === 'global' && mode) entry.mode = mode;
+  await node.field('apps').push(entry);
+  return node;
+}
+
+/**
+ * Changes an ALREADY-REGISTERED `realm: 'global'` app's `mode` (kinds.js's
+ * own doc comment on the three administrable states: `'off'`/`'global'`/
+ * `'multiuser'`) - reads the CURRENT entry for `prefix` (the last one in
+ * the log - `platform.js`'s `resolveApps()` own "last write wins"
+ * dedup) and re-pushes it with only `mode` changed, `name`/`appAdminPub`
+ * carried over unchanged. `qu-platform-apps`'s own `ListField` has no
+ * update/removal primitive (kinds.js's own "ONLY ADDITIVE" doc comment) -
+ * "updating" state here always means "push a newer entry for the same
+ * prefix," never mutating anything in place.
+ * @param {import('@qu/space-core').Space} space - a relay-admin's own Space.
+ * @param {{prefix: string, mode: 'off'|'global'|'multiuser'}} params
+ */
+export async function setAppMode(space, { prefix, mode }) {
+  const id = await platformRegistryId();
+  const node = space.getNode(id) ?? (await space.createNode(platformAppsKind, {}, { id }));
+  const apps = (await node.field('apps').toArray()).filter(Boolean);
+  const current = [...apps].reverse().find((a) => a.prefix === prefix);
+  if (!current) throw new Error(`setAppMode: "${prefix}" is not a registered app - registerApp() it first.`);
+  if ((current.realm ?? 'main') !== 'global') {
+    throw new Error(`setAppMode: "${prefix}" is realm "${current.realm ?? 'main'}" - mode only applies to realm:'global' apps.`);
+  }
+  await node.field('apps').push({ ...current, mode });
   return node;
 }
 
