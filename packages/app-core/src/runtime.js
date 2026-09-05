@@ -61,8 +61,9 @@ export class AppRuntime {
    * @returns {Promise<{manifest: object|null, page: object|null, templateHtml: string|null, css: string}>}
    */
   async resolveRoute(route, options) {
-    const manifest = await this._resolver.resolveManifest(options);
-    const page = await this._resolver.resolvePage(route, options);
+    // Independent reads (neither depends on the other's RESULT, only `templateName` below depends
+    // on both) - run concurrently instead of back-to-back, each its own subscribe+wait round trip.
+    const [manifest, page] = await Promise.all([this._resolver.resolveManifest(options), this._resolver.resolvePage(route, options)]);
     const templateName = page?.template ?? manifest?.rootTemplate ?? null;
     const [templateHtml, css] = await Promise.all([
       templateName ? this._resolver.resolveTemplate(templateName, options) : null,

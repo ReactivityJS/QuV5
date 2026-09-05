@@ -203,6 +203,8 @@ export class Space {
     this._grants = new Map();
     /** @type {Map<string, number>} nodeId -> active reference count - see `useNode()`'s own doc comment below. */
     this._refCounts = new Map();
+    /** @type {Set<string>} nodeIds a subscribed relay has explicitly confirmed (`sync-ack`, `_handleIncoming()`'s own doc comment) it has told us everything it currently has for - see `isNodeSynced()`'s own doc comment. Cleared on `unsubscribeNode()` (below) - this flag is only ever meaningful relative to the CURRENT local Y.Doc for that id, never across a teardown/resubscribe. */
+    this._syncedNodes = new Set();
     // Serialized (never overlapping) - see _handleIncoming()'s own doc comment on why processing
     // order must match ARRIVAL order for a 'content'-ACL Kind's grant-then-write sequence to be
     // race-free, and why relying on each _handleIncoming() call's own internal await timing to
@@ -525,6 +527,7 @@ export class Space {
   async unsubscribeNode(id) {
     if (!this._nodes.has(id)) return;
     this._nodes.delete(id);
+    this._syncedNodes.delete(id); // see isNodeSynced()'s own doc comment - stale relative to whatever NEW local Y.Doc a later subscribeNode()/useNode() for this SAME id builds.
     const sig = await QuCrypto.sign(new TextEncoder().encode(id), this._identity.signingKey);
     this._transport.send({ type: 'unsubscribe', nodeId: id, pub: this._identity.signingPub, sig });
     this._bus?.emit('debug.space.unsubscribe.sent', { nodeId: id });
@@ -703,6 +706,28 @@ export class Space {
     return { node, release: () => this._releaseNode(id) };
   }
 
+  /**
+   * `true` once a currently-subscribed relay has explicitly confirmed
+   * (`sync-ack`, `_handleIncoming()`'s own doc comment) it has told this
+   * Space everything it currently has mirrored for `id` - INCLUDING when
+   * that turns out to be nothing at all (a genuinely nonexistent Node).
+   * Meant for a caller ALREADY polling a Node's own fields for a value
+   * (`@qu/app-core`'s `resolver.js`'s own `waitFor()` is the reference
+   * consumer) to stop burning the REST of its own timeout budget once it's
+   * clear no more data is coming - `false` (not yet synced, or was never
+   * subscribed at all) is always the SAFE default: a caller that never
+   * checks this at all just keeps behaving exactly as before this existed,
+   * plain polling up to its own configured timeout. `false` again
+   * immediately after `id` is unsubscribed (see `unsubscribeNode()`) -
+   * this flag describes the CURRENT local Y.Doc for `id`, never a promise
+   * about whatever NEXT one a later re-subscribe builds from scratch.
+   * @param {string} id
+   * @returns {boolean}
+   */
+  isNodeSynced(id) {
+    return this._syncedNodes.has(id);
+  }
+
   /** The other half of `useNode()`'s reference count - see that method's own doc comment. Fire-and-forget, same posture as every other control-message-sending method here. */
   _releaseNode(id) {
     const count = (this._refCounts.get(id) ?? 1) - 1;
@@ -769,6 +794,21 @@ export class Space {
       // the relay's durable mirror" signal distinct from a live peer applying it (which arrives as
       // an ordinary `space.node.<nodeId>.changed` with `origin: 'remote'` on THEIR Space, not this one).
       this._bus?.emit(`space.node.${message.nodeId}.write-ack`, { nodeId: message.nodeId, seq: message.seq });
+      return;
+    }
+    if (type === 'sync-ack') {
+      // See @qu/space-transport's relay.js's own "SYNC-ACK" doc comment (in handleSubscribe()) and
+      // isNodeSynced()'s own doc comment above - `count` (this Node's replayed envelope count,
+      // possibly 0) isn't tracked here at all, ONLY the fact that a reply arrived: `isNodeSynced()`
+      // means "nothing more is coming from what this relay already had," true regardless of whether
+      // that turned out to be zero envelopes or several. Recorded ONLY if this Space still has a
+      // local handle for the id (`_nodes.has()`) - a stray/late ack for an id already
+      // `unsubscribeNode()`d (this exact message racing its own unsubscribe) must never resurrect a
+      // stale synced-flag for whatever NEW local Y.Doc a later re-subscribe builds from scratch.
+      if (this._nodes.has(message.nodeId)) {
+        this._syncedNodes.add(message.nodeId);
+        this._bus?.emit(`space.node.${message.nodeId}.sync-ack`, { nodeId: message.nodeId, count: message.count });
+      }
       return;
     }
     if (type === 'grant') {

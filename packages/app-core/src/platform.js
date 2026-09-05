@@ -52,12 +52,17 @@ function platformRegistryId() {
   return (platformRegistryIdPromise ??= deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind));
 }
 
-/** Polls `checkFn` until it returns a non-null/non-undefined value, or `timeout` elapses (then returns `null`) - same shape as `resolver.js`'s own `waitFor()`, local here to avoid a needless cross-file dependency for one small helper. */
-async function waitFor(checkFn, { timeout = 4000, interval = 20 } = {}) {
+/** Polls `checkFn` until it returns a non-null/non-undefined value, `timeout` elapses, or `space.isNodeSynced(nodeId)` has been true for a full `settle` window while `checkFn` is still empty (whichever first) - same shape, same `settle`-margin reasoning ("a DIFFERENT peer's near-simultaneous write has no ordering guarantee relative to this Node's own sync-ack"), and same "resolving a genuinely nonexistent Node needn't burn its full timeout" win as `resolver.js`'s own identically-named `waitFor()` (see that file's own doc comment on both `isNodeSynced()` and `settle`), local here to avoid a needless cross-file dependency for one small helper. */
+async function waitFor(space, nodeId, checkFn, { timeout = 4000, interval = 20, settle = 150 } = {}) {
   const deadline = Date.now() + timeout;
+  let syncedAt = null;
   for (;;) {
     const value = await checkFn();
     if (value !== null && value !== undefined) return value;
+    if (space.isNodeSynced(nodeId)) {
+      syncedAt ??= Date.now();
+      if (Date.now() - syncedAt >= settle) return null;
+    }
     if (Date.now() >= deadline) return null;
     await new Promise((resolve) => setTimeout(resolve, interval));
   }
@@ -102,7 +107,7 @@ export class PlatformRuntime {
   async resolveApps({ timeout } = {}) {
     const id = await platformRegistryId();
     const { node, release } = await this._space.useNode(id, platformAppsKind);
-    await waitFor(() => (node.field('apps').length > 0 ? true : null), { timeout: timeout ?? 500 });
+    await waitFor(this._space, id, () => (node.field('apps').length > 0 ? true : null), { timeout: timeout ?? 500 });
     const apps = await node.field('apps').toArray();
     release();
     const byPrefix = new Map();

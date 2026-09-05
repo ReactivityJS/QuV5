@@ -342,6 +342,18 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  * `multiuser` app's global shell is exactly as relay-admin-administered as
  * a plain `mode: 'global'` app's, it is simply no longer reachable at the
  * BARE prefix once that prefix means "your own space" by default.
+ *
+ * SELF-PROVISIONING ALSO HAPPENS at the platform's own UNREGISTERED
+ * "prefix tried as a literal owner id" fallback (`PlatformRuntime`'s own
+ * top doc comment, "TWO KINDS OF MATCH") whenever that pubkey is the
+ * CURRENTLY signed-in identity's own - `#/<your-own-base64url-pubkey>/`
+ * works as a personal space out of the box, no `mode: 'multiuser'` app
+ * involved at all, same self-owned content `#/cms/` (or `#/cms/u/me/`)
+ * already provisions - just a shorter, app-independent URL to the exact
+ * same place (`deriveOwnerNodeId`/`deriveContentNodeId` derive identically
+ * either way). Never triggered for a REGISTERED `realm: 'main'` alias, even
+ * one pointing at this same identity - see the inline comment at that
+ * check for why.
  * @param {{space: import('@qu/space-core').Space, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
  *   `space` - MUST have been constructed with a `relayAdmins` list (see
  *   `Space`'s own constructor doc comment) matching the relay's own
@@ -409,6 +421,23 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
         return;
       }
 
+      // `match.name === null` is `resolveForPath()`'s own signal for the UNREGISTERED "prefix tried
+      // as a literal owner id" fallback (this file's own top doc comment on `PlatformRuntime`'s "TWO
+      // KINDS OF MATCH") - every identity's own space was ALREADY reachable there with zero
+      // relay-admin cooperation, for READING; self-provisioning here too (the SAME
+      // `ensureSelfProvisioned()` a `mode: 'multiuser'` app's own `ref: 'me'` already uses) means a
+      // brand-new visitor's OWN `#/<their-own-pubkey>/` also becomes a real, working personal space
+      // on first visit, not just a dead 404 - one MORE way to reach the exact same self-owned content
+      // `#/cms/` (or `#/cms/u/me/`) already provisions, never a second, different space (same
+      // `deriveOwnerNodeId(ownerPub, ...)`/`deriveContentNodeId(ownerPub, ...)` derivation regardless
+      // of which URL got you there). Scoped to the FALLBACK only, never a REGISTERED `realm: 'main'`
+      // alias (even one whose `appAdminPub` happens to be this same identity) - an app-admin who
+      // registered their own prefix presumably has (or is about to run) their OWN install script for
+      // it, and auto-provisioning a generic "Mein Bereich" starter there instead would be a surprise,
+      // not a convenience.
+      if (match.name === null && QuCrypto.toBase64(match.appAdminPub) === QuCrypto.toBase64(space.identity.signingPub)) {
+        await ensureSelfProvisioned(space, match.appAdminPub);
+      }
       const runtime = new AppRuntime(space, { appAdminPub: match.appAdminPub });
       const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
       mountEl.quSpace = space;

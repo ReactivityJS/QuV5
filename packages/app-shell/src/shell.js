@@ -61,12 +61,13 @@ export class QuAppShell extends HTMLElement {
       const name = this.getAttribute('display-name') ?? `visitor-${Math.random().toString(36).slice(2, 8)}`;
 
       const identity = await loadOrCreateIdentity(localStorage, IDENTITY_STORAGE_KEY);
-      const members = await joinSpace({ name, identity });
-      // Only fetched in PLATFORM mode - a single-app deployment never touches `qu-platform-apps`
-      // at all, so there is nothing here for it to independently verify (see `Space`'s own
-      // `relayAdmins` constructor doc comment, and `relay-server.js`'s own `GET /relay-admins.json`
-      // doc comment for the server side of this public, unauthenticated read).
-      const relayAdmins = isPlatformMode ? await fetchRelayAdmins().catch(() => []) : [];
+      // joinSpace()'s own POST-then-GET is a genuine dependency (the member list must already
+      // include the just-joined identity) and stays sequential - but fetchRelayAdmins() is a
+      // completely independent, unauthenticated read (only fetched in PLATFORM mode - a single-app
+      // deployment never touches `qu-platform-apps` at all, so there is nothing here for it to
+      // independently verify, see `Space`'s own `relayAdmins` constructor doc comment) - run it
+      // CONCURRENTLY with joinSpace() instead of waiting for it to finish first.
+      const [members, relayAdmins] = await Promise.all([joinSpace({ name, identity }), isPlatformMode ? fetchRelayAdmins().catch(() => []) : []]);
 
       const transport = new WsClientTransport(relayUrl);
       await transport.connect();

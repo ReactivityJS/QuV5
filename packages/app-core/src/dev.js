@@ -43,11 +43,37 @@ function cachedGlobalAppAnchor(prefix) {
   return globalAppAnchorCache.get(prefix);
 }
 
-/** Polls `checkFn` (may itself be async - `'atomic'`-shape fields' own `.get()` is a Promise, `'text'`-shape's is not, see field.js) until it returns truthy or `timeout` elapses - local here (not imported from resolver.js) so this file stays independent of that one; same shape as its own `waitFor()`. Used only by the `edit*()` functions below, to make sure a Node this Space hasn't seen before has actually finished syncing (its founding grant included - see kind-schema.js's own "THE 'content' ACL mode" doc comment) before writing to it. */
-async function waitForSync(checkFn, { timeout = 3000, interval = 20 } = {}) {
+/**
+ * Polls `checkFn` (may itself be async - `'atomic'`-shape fields' own
+ * `.get()` is a Promise, `'text'`-shape's is not, see field.js) until it
+ * returns truthy, `timeout` elapses, or (when `space`/`nodeId` are given)
+ * `space.isNodeSynced(nodeId)` has been true for a full `settle` window
+ * while `checkFn` is still falsy - the SAME "a relay's `sync-ack` means
+ * don't bother waiting out the rest of the timeout for a Node that's
+ * confirmed to not exist, but give a settle margin first" fast-path
+ * `resolver.js`'s own identically-shaped `waitFor()` uses (see that
+ * function's own doc comment on both `isNodeSynced()` and `settle` - in
+ * particular why the settle margin is NOT optional: a concurrent write
+ * from a genuinely different peer has no ordering guarantee relative to an
+ * empty sync-ack), local here (not imported from resolver.js) so this file
+ * stays independent of that one. `space`/`nodeId` are OPTIONAL (default
+ * `null`) - every `edit*()` call site below omits them (an edit's own
+ * "does this exist" check has no single `nodeId` fast-path win worth
+ * threading through every call site for now), only
+ * `getOrSyncRegistryNode()` passes them, since it sits directly in
+ * `createTemplate()`/`createStyle()`'s own hot path (a brand-new
+ * identity's first-ever registry write, exactly the sequence `boot.js`'s
+ * `ensureSelfProvisioned()` runs on a first-time visit).
+ */
+async function waitForSync(checkFn, { timeout = 3000, interval = 20, settle = 150, space = null, nodeId = null } = {}) {
   const deadline = Date.now() + timeout;
+  let syncedAt = null;
   for (;;) {
     if (await checkFn()) return true;
+    if (space?.isNodeSynced(nodeId)) {
+      syncedAt ??= Date.now();
+      if (Date.now() - syncedAt >= settle) return false;
+    }
     if (Date.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, interval));
   }
@@ -107,7 +133,7 @@ async function getOrSyncRegistryNode(space, registryKind, ownerPub = space.ident
   const existing = space.getNode(id);
   if (existing) return existing;
   const { node } = await space.useNode(id, registryKind);
-  const alreadyExists = await waitForSync(() => node.meta.get('kind') !== undefined, { timeout: 500 });
+  const alreadyExists = await waitForSync(() => node.meta.get('kind') !== undefined, { timeout: 500, space, nodeId: id });
   return alreadyExists ? node : space.createNode(registryKind, {}, { id });
 }
 
