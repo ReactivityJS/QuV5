@@ -144,7 +144,7 @@ export async function createAppResolveKindSchema({
     }
   }
 
-  return (nodeId) => {
+  return async (nodeId, claimedPub) => {
     if (globalManifestIds.has(nodeId)) return adminAppManifestKind;
     if (globalRouteRegistryIds.has(nodeId)) return adminRouteRegistryKind;
     if (globalTemplateIds.has(nodeId)) return adminTemplateKind;
@@ -156,6 +156,33 @@ export async function createAppResolveKindSchema({
     if (styleRegistryIds.has(nodeId)) return styleRegistryKind;
     if (collectionRegistryById.has(nodeId)) return collectionRegistryById.get(nodeId);
     if (nodeId === platformId) return platformAppsKind;
+    // DYNAMIC, SELF-CERTIFYING FALLBACK - see relay.js's own doc comment on `resolveKindSchema`'s
+    // `claimedPub` parameter for the full "why this is safe" reasoning. `appManifestKind`/
+    // `routeRegistryKind`/`templateRegistryKind`/`styleRegistryKind` (and any Collection's own
+    // `registryKind`) are ALL per-owner SINGLETONS - `deriveOwnerNodeId(ownerPub, kind)`, no `path`
+    // - so re-deriving from the write/subscribe's own CLAIMED signer (still unverified here; the
+    // caller verifies it independently before actually authorizing anything) classifies them
+    // correctly for ANY owner, not just ones already listed in `appAdminPubs`/`appAdminPub` above.
+    // A REAL, previously-shipped bug this closes: a `mode: 'multiuser'` app's own self-provisioned
+    // participant (`@qu/app-shell`'s `boot.js` `ensureSelfProvisioned()`) is, BY DESIGN, never
+    // `registerApp()`-registered anywhere - `owners` above is permanently empty for them - so
+    // EVERY one of their own 'named'-ACL registry writes (their `qu-app` manifest, their
+    // `qu-route-registry`/`qu-template-registry`/`qu-style-registry`) used to be silently
+    // misclassified against the `pageKind` fallback below and rejected outright (no grant exists
+    // for a Kind their own client never thought it needed one for). Invisible from the CREATING
+    // identity's own already-connected Space (a local write always applies to its own Y.Doc
+    // regardless of what the relay does with it) - only surfaced on a genuine reconnect (a fresh
+    // Space, nothing local to fall back on) or a DIFFERENT peer trying to enumerate that identity's
+    // own routes/templates/styles, which is exactly why it went unnoticed until tested that way.
+    if (claimedPub) {
+      if ((await deriveOwnerNodeId(claimedPub, appManifestKind.kind)) === nodeId) return appManifestKind;
+      if ((await deriveOwnerNodeId(claimedPub, routeRegistryKind.kind)) === nodeId) return routeRegistryKind;
+      if ((await deriveOwnerNodeId(claimedPub, templateRegistryKind.kind)) === nodeId) return templateRegistryKind;
+      if ((await deriveOwnerNodeId(claimedPub, styleRegistryKind.kind)) === nodeId) return styleRegistryKind;
+      for (const registryKind of collectionRegistryKinds) {
+        if ((await deriveOwnerNodeId(claimedPub, registryKind.kind)) === nodeId) return registryKind;
+      }
+    }
     return pageKind;
   };
 }

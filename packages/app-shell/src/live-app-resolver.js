@@ -91,11 +91,14 @@ const KNOWN_GLOBAL_TEMPLATE_NAMES = { admin: ['main'] };
 
 /**
  * @param {{collectionRegistryKinds?: object[]}} [params] - forwarded to every `createAppResolveKindSchema()` rebuild, see that function's own doc comment.
- * @returns {{resolveKindSchema: (nodeId: string) => object, start: (params: {url: string, relayAdmins?: Array<Uint8Array>}) => Promise<void>}}
+ * @returns {{resolveKindSchema: (nodeId: string, claimedPub?: Uint8Array) => Promise<object>, start: (params: {url: string, relayAdmins?: Array<Uint8Array>}) => Promise<void>}}
  */
 export function createLiveAppResolveKindSchema({ collectionRegistryKinds = [] } = {}) {
   let current = () => null; // replaced synchronously at the top of start(), before its first await - see this file's own "BOOTSTRAP WINDOW" doc comment.
-  const resolveKindSchema = (nodeId) => current(nodeId);
+  // `claimedPub` passed straight through - see relay.js's own doc comment on `resolveKindSchema`'s
+  // second parameter (the "self-provisioned participant, never in appAdminPubs" fallback it
+  // unlocks) - `current` is `createAppResolveKindSchema()`'s own returned closure, already async.
+  const resolveKindSchema = (nodeId, claimedPub) => current(nodeId, claimedPub);
 
   /** @param {{url: string, relayAdmins?: Array<Uint8Array>}} params - `url` is this SAME relay's own address (e.g. `ws://127.0.0.1:<port>`), reached ONLY after it is actually listening - see this file's own "ORDERING" doc comment. */
   async function start({ url, relayAdmins = [] }) {

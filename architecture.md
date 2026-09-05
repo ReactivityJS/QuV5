@@ -1610,6 +1610,49 @@ neither depends on the other's RESULT), and `shell.js`'s own
 independent, unauthenticated read, needlessly held until AFTER `joinSpace()`'s
 own two-step POST-then-GET finished).
 
+**A self-provisioned multiuser participant's OWN registries were silently
+dropped by the relay (a real, shipped bug, found and fixed in the same
+pass):** `qu-app`/`qu-route-registry`/`qu-template-registry`/
+`qu-style-registry` are all `acl.write: 'named'` (kinds.js) - genuinely
+self-certifying at the AUTHORIZATION layer (`buildWriteAcl()`, relay.js,
+needs no grant, only `deriveOwnerNodeId(claimedSignerPub, kind) === nodeId`)
+- but `createAppResolveKindSchema()` (relay-resolver.js) could only
+CLASSIFY a nodeId as one of these Kinds for an owner already listed in its
+own `appAdminPubs` parameter, silently misclassifying anyone else's as the
+generic `pageKind` ('content'-ACL, grant-only) fallback - a write with no
+grant, for a Kind the writer's own client never thought it needed one for,
+rejected outright. A `mode: 'multiuser'` participant is, BY DESIGN, never
+`registerApp()`-registered anywhere (the whole point of the mode is ZERO
+relay-admin cooperation) - so EVERY personal registry write such a visitor
+made was silently dropped. Invisible from the CREATING identity's own
+already-connected Space the whole time (a local write always applies to
+its own Y.Doc regardless of what the relay does with it) - only surfaced
+on a genuine RECONNECT (a fresh Space, nothing local to fall back on) or a
+DIFFERENT peer trying to enumerate that identity's own routes/templates/
+styles, exactly why the earlier CMS-as-multiuser-example verification never
+caught it (same-tab, same-session testing throughout) and exactly the
+reported symptom ("mein CMS zeigt nach einem Reload keine Seiten mehr an").
+
+Fixed by teaching `resolveKindSchema` a genuinely optional second
+parameter, `claimedPub` - the write/subscribe message's own claimed signer
+pubkey, straight off the (not yet cryptographically verified at that point)
+envelope/request (`relay.js`'s `handleWrite()`/`handleSubscribe()`/
+`ingestFederated()` all now pass it; `createLiveAppResolveKindSchema()`
+threads it straight through). `createAppResolveKindSchema()`'s own resolver
+uses it as a DYNAMIC fallback: since these four Kinds' ids never involve a
+`path` (`deriveOwnerNodeId(ownerPub, kind)` alone), it can re-derive
+whether `claimedPub` happens to be exactly this owner's manifest/route-
+registry/template-registry/style-registry id, for ANY owner, not just ones
+in `appAdminPubs` - genuinely no pre-registration needed any more. Safe
+specifically because CLASSIFICATION and AUTHORIZATION are cryptographically
+bound together: a forged claim never gets past `verifyEnvelope()`'s actual
+signature check regardless of what it got classified as, so using an
+UNVERIFIED claim purely to pick which Kind-Schema/ACL-check applies never
+grants anything a genuine signature check wouldn't also grant on its own.
+Every `resolveKindSchema` implementation may now be `async` (existing
+synchronous ones keep working - `await`ing a non-Promise value resolves
+immediately) - all four relay.js call sites `await` it.
+
 **Reading this as a CMS, not just a router:** the admin console proves the
 general shape - "UI legt sich selbst innerhalb des Storage an und hat
 zuständige Admins" (the user's own framing) - a piece of UI is installed

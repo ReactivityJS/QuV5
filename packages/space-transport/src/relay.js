@@ -40,14 +40,39 @@
  *     mirrored storage (nothing is deleted) - purely a live-forwarding
  *     opt-out.
  *
- * `resolveKindSchema(nodeId)` lets the relay gate WRITES to only Node ids
- * it's willing to route for, without needing to understand what a Node's
- * content means - same "blind to content, aware only of routing/ACL
- * metadata" posture QuStore's own relay has today. It is NOT consulted for
- * subscribe/catch-up requests - the ONLY gate there is "is this a
- * signed-for space member," precisely because a relay with mirrored
- * history for a Node it doesn't otherwise recognize should still be able
- * to hand that history back to a legitimate member.
+ * `resolveKindSchema(nodeId, claimedPub?)` lets the relay gate WRITES to
+ * only Node ids it's willing to route for, without needing to understand
+ * what a Node's content means - same "blind to content, aware only of
+ * routing/ACL metadata" posture QuStore's own relay has today. May be
+ * `async` (every call site here `await`s it - a plain synchronous function
+ * still works fine, `await`ing a non-Promise value just resolves it
+ * immediately). The optional second argument is the WRITE/SUBSCRIBE
+ * message's own claimed signer pubkey, straight off the (not yet verified
+ * at this point) envelope/request - see `@qu/app-core`'s
+ * `createAppResolveKindSchema()` for the reference consumer: an 'owner'/
+ * 'named' Kind's id is `deriveOwnerNodeId(ownerPub, kind)` with NO `path`
+ * involved, so a resolver CAN classify it purely by re-deriving from this
+ * claim, with no pre-registered owner list required at all - using an
+ * UNVERIFIED claim for CLASSIFICATION ONLY is safe, since the actual
+ * AUTHORIZATION check (`buildWriteAcl()` below) independently re-derives
+ * and compares against the SAME (by then cryptographically verified)
+ * signer - a forged claim fails signature verification regardless of what
+ * it got classified as, and correct classification is what makes THAT
+ * check reachable at all for an owner nobody told this relay about in
+ * advance. Every consumer here should keep passing this - the fallback
+ * (an untold owner's per-owner-singleton Kind indistinguishable from
+ * unrecognized content) is not merely conservative, it silently rejects a
+ * legitimate self-certifying write, one this relay has no OTHER way to
+ * find out about (see architecture.md's own "self-provisioning" section on
+ * why this specifically bit `mode: 'multiuser'` participants, who are
+ * never registered anywhere by design). It is NOT consulted for
+ * subscribe/catch-up requests' OWN membership gate - the ONLY gate there
+ * is "is this a signed-for space member," precisely because a relay with
+ * mirrored history for a Node it doesn't otherwise recognize should still
+ * be able to hand that history back to a legitimate member - but IS still
+ * consulted to pick the right PERSISTENCE tier and content-ACL-mode
+ * membership bypass for that same request, so `claimedPub` is passed there
+ * too.
  *
  * SUBSCRIBER-TRACKING: `handleWrite()`'s forward loop reads ONLY from
  * `subscribers` (`nodeId -> Set<peerId>`, populated exclusively by
@@ -369,7 +394,7 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
     // subscription (not mere connection) is what gates live forwarding at all. A 'members'-mode
     // Kind (or an unresolvable nodeId - e.g. relay-server.js's own `resolveKindSchema: () => true`)
     // keeps the original membership gate exactly as before.
-    const kindSchema = resolveKindSchema(nodeId);
+    const kindSchema = await resolveKindSchema(nodeId, pub);
     const contentAclModes = new Set(['owner', 'named', 'content', 'relay-admins']);
     const requiresMembership = !contentAclModes.has(kindSchema?.acl?.write);
     if (requiresMembership && !isSpaceMember(pubB64)) {
@@ -468,7 +493,7 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
     // the creating owner was ever authorized at all: unlike 'named', 'content' has no owner-pubkey
     // shortcut (kind-schema.js), so EVERY reader needs to have actually seen a grant, not just the
     // relay's own in-memory `grants` map (which handleSubscribe()'s envelope replay alone can't fix).
-    const kindSchema = resolveKindSchema(nodeId);
+    const kindSchema = await resolveKindSchema(nodeId);
     await storageFor(kindSchema)?.append(grantStorageKey(nodeId), message);
 
     // Reactive, same pattern as addMember()'s 'member-joined' broadcast: every OTHER already-
@@ -530,7 +555,7 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
   }
 
   async function handleWrite(fromPeerId, { nodeId, envelope }) {
-    const kindSchema = resolveKindSchema(nodeId);
+    const kindSchema = await resolveKindSchema(nodeId, envelope?.pub);
     if (!kindSchema) {
       bus?.emit('debug.relay.write.rejected', { nodeId, reason: 'unknown-node' });
       return; // unknown Node - nothing to route to.
@@ -613,7 +638,7 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
    * @returns {Promise<boolean>} whether the envelope was accepted.
    */
   async function ingestFederated(nodeId, envelope) {
-    const kindSchema = resolveKindSchema(nodeId);
+    const kindSchema = await resolveKindSchema(nodeId, envelope?.pub);
     if (!kindSchema) return false;
     if (!(await verifyEnvelope(envelope, buildWriteAcl(kindSchema, nodeId)))) return false;
     await acceptWrite(kindSchema, nodeId, envelope, null);
