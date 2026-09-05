@@ -374,6 +374,26 @@ mode later (a relay-admin call, same as `registerApp()` itself) - see
 (registers `"cms"` this way, two independent visitors each maintain their
 own page with zero further cooperation, then a relay-admin turns it off).
 
+**Your own space isn't tied to any one app's prefix at all, either** -
+`PlatformRuntime`'s own, always-on "unregistered prefix = a literal owner
+id" routing fallback (this doc's own "TWO KINDS OF MATCH" reasoning,
+`platform.js`) now also self-provisions: `#/<your-own-pubkey>/` works as a
+personal CMS-managed space out of the box, no `"cms"` app or any
+`mode: 'multiuser'` app needed on the platform at all - same underlying
+storage either way, just a shorter, app-independent door into it.
+
+**A pubkey in a URL MUST be base64url-encoded, never plain base64** - a
+real, easy-to-hit trap: plain base64 (`window.Qu.pub`, meant for pasting
+into config like `QU_RELAY_ADMINS`) routinely contains `/` and `+`, which a
+hash route silently mis-splits into extra path segments instead of
+erroring - `#/<plain-base64-pubkey>/` simply does not work, and looks like
+nothing happened rather than an obvious error. Use `QuCrypto.toBase64Url()`
+(or `window.Qu.pubUrl`/a `[data-qu-pub-url]` element, `dev-console.js`'s own
+doc comment) for a URL - never `toBase64()`/`Qu.pub`. You never actually
+need to construct this by hand, though: the platform's own landing page
+(`#/` with nothing else matching) always links straight to "Dein eigener
+Bereich" using the correct encoding automatically.
+
 **Exact example - deploying/re-registering an app as `multiuser`:**
 `bin/set-app-mode.mjs` is the scriptable version of the admin console's own
 mode buttons - and answers "how do I find the right prefix?" directly,

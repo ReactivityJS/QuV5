@@ -386,7 +386,15 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
     bus?.emit('debug.relay.subscribe.received', { nodeId, pub: pubB64 });
 
     const nodeStorage = storageFor(kindSchema);
-    if (!nodeStorage) return; // nothing to catch up on - but the subscription itself is tracked either way, live pushes still reach this peer from here on.
+    if (!nodeStorage) {
+      // Nothing to catch up on (a live-only relay, or this Kind's tier has none) - but the
+      // subscription itself is tracked either way, live pushes still reach this peer from here on.
+      // SYNC-ACK STILL FIRES, though - see this message's own doc comment below: "genuinely nothing
+      // to replay" is exactly the case a subscriber most wants to hear about quickly, not the one
+      // to skip telling them about.
+      hub.deliverTo(fromPeerId, 'relay', { type: 'sync-ack', nodeId, count: 0 });
+      return;
+    }
     // Grants FIRST, always - see grantStorageKey()'s own doc comment: a 'content'-ACL Node's
     // envelopes (including its very first, from the creating owner) are only verifiable by a
     // subscriber who has already seen the matching grant, exactly the "WRITE-BEFORE-GRANT IS A
@@ -400,6 +408,15 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
       hub.deliverTo(fromPeerId, 'relay', { nodeId, envelope });
     }
     bus?.emit('debug.relay.subscribe.replayed', { nodeId, count: envelopes.length, grants: storedGrants.length });
+    // SYNC-ACK: tells the subscriber "you have now seen everything this relay had mirrored for this
+    // id AS OF this subscribe" - `count` may be 0 (genuinely nothing published yet). Sent LAST, after
+    // every replayed envelope above has already been handed to the hub for delivery, so a subscriber
+    // that reacts to this by concluding "nothing more is coming" never does so before the replay
+    // itself has actually been queued (hub delivery order is FIFO per target - see hub.js). This is
+    // the ONLY way a client can distinguish "genuinely doesn't exist (yet)" from "still in flight" -
+    // see @qu/app-core's resolver.js's own `waitFor()` doc comment on what this unlocks: resolving a
+    // nonexistent Node no longer has to blindly burn its full configured timeout every time.
+    hub.deliverTo(fromPeerId, 'relay', { type: 'sync-ack', nodeId, count: envelopes.length });
   }
 
   /**

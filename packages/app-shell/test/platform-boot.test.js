@@ -101,6 +101,11 @@ test('startPlatform() resolves a REGISTERED app by alias, an UNREGISTERED app by
   await waitUntil(() => mountEl.textContent.includes('Qu App Shell'));
   assert.ok(mountEl.querySelector('a[href="#/forum/"]'), 'the landing page lists the registered alias');
 
+  const visitorOwnUrl = QuCrypto.toBase64Url(visitor.signingPub);
+  const ownLink = mountEl.querySelector(`a[href="#/${visitorOwnUrl}/"]`);
+  assert.ok(ownLink, 'the landing page links straight to THIS visitor\'s own bare-pubkey space, base64url-encoded (never plain base64 - that routinely contains "/"/"+", which a hash route silently mis-splits instead of erroring)');
+  assert.ok(!/[+/=]/.test(visitorOwnUrl), 'the pubkey segment itself contains none of plain base64\'s URL-unsafe characters ("+"/"/"/"=")');
+
   router.stop();
 });
 

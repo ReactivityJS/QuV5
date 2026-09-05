@@ -43,7 +43,7 @@ class FakeCustomEvent {
   }
 }
 
-test('initDevConsole() persists a fresh identity, assigns it to win.Qu, and exposes base64 pub/xPub', async () => {
+test('initDevConsole() persists a fresh identity, assigns it to win.Qu, and exposes base64 pub/xPub plus base64url pubUrl', async () => {
   const storage = fakeStorage();
   const doc = fakeDoc();
   const win = { CustomEvent: FakeCustomEvent };
@@ -53,24 +53,30 @@ test('initDevConsole() persists a fresh identity, assigns it to win.Qu, and expo
   assert.equal(win.Qu, api);
   assert.equal(typeof api.pub, 'string');
   assert.equal(typeof api.xPub, 'string');
+  assert.equal(typeof api.pubUrl, 'string');
   assert.ok(api.identity.signingPub instanceof Uint8Array);
   assert.equal(typeof api.QuCrypto.toBase64, 'function');
   assert.ok(storage.getItem('qu-identity'), 'persisted under the shared IDENTITY_STORAGE_KEY');
+  assert.equal(api.pubUrl, api.QuCrypto.toBase64Url(api.identity.signingPub), 'pubUrl is the base64URL form, never plain base64 - a raw base64 pubkey routinely contains "/"/"+", which breaks silently when pasted into a hash route');
+  assert.ok(!/[+/=]/.test(api.pubUrl), 'pubUrl never contains "+"/"/"/"=" - genuinely URL-safe, unlike pub');
 });
 
-test('initDevConsole() renders the pub/xPub into [data-qu-pub]/[data-qu-xpub] elements when present', async () => {
+test('initDevConsole() renders the pub/xPub/pubUrl into [data-qu-pub]/[data-qu-xpub]/[data-qu-pub-url] elements when present', async () => {
   const storage = fakeStorage();
   const doc = fakeDoc();
   const pubEl = fakeElement();
   const xPubEl = fakeElement();
+  const pubUrlEl = fakeElement();
   doc._elements.set('[data-qu-pub]', pubEl);
   doc._elements.set('[data-qu-xpub]', xPubEl);
+  doc._elements.set('[data-qu-pub-url]', pubUrlEl);
   const win = { CustomEvent: FakeCustomEvent };
 
   const api = await initDevConsole({ storage, doc, win });
 
   assert.equal(pubEl.textContent, api.pub);
   assert.equal(xPubEl.textContent, api.xPub);
+  assert.equal(pubUrlEl.textContent, api.pubUrl);
 });
 
 test('initDevConsole() is a correct no-op when no [data-qu-pub]/[data-qu-xpub] elements exist - never throws', async () => {

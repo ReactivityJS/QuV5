@@ -25,12 +25,65 @@ import { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistry
 
 const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind };
 
-/** Polls `checkFn` until it returns a non-null/non-undefined value, or `timeout` elapses (then returns `null`). Local-first: usually resolves on the very first check when content is already in local storage. */
-async function waitFor(checkFn, { timeout = 4000, interval = 20 } = {}) {
+/**
+ * Polls `checkFn` until it returns a non-null/non-undefined value, `timeout`
+ * elapses, or `space.isNodeSynced(nodeId)` (`@qu/space-core`'s `Space`,
+ * `_handleIncoming()`'s own doc comment on the relay's `sync-ack`) has been
+ * `true` for a full `settle` window while `checkFn` is STILL empty -
+ * whichever comes first. `isNodeSynced()` means a subscribed relay has
+ * explicitly confirmed it has told this Space everything it CURRENTLY has
+ * mirrored for `nodeId` as of subscribe-time - genuinely nothing published
+ * there is one of the two things that can mean, and there is no point
+ * burning the REST of `timeout` once it's known. Before this existed,
+ * resolving a Node that simply never existed (a brand-new visitor's
+ * first-ever page, `boot.js`'s `ensureSelfProvisioned()` being the most
+ * visible case) always burned its FULL configured timeout (up to several
+ * seconds, stacked across several sequential resolve calls) even against an
+ * instantly-responding relay - "still waiting" and "confirmed absent" were
+ * indistinguishable client-side before the relay itself started sending
+ * this ack at all.
+ *
+ * `settle` (default 150ms, the SAME margin `@qu/app-shell`'s
+ * `verifyWritesAcked()` already uses for the identical reason) is NOT
+ * cosmetic: `isNodeSynced()` only describes what the relay's OWN mirror
+ * held at the moment it computed the ack, never anything about a write from
+ * a COMPLETELY DIFFERENT peer that was already in flight to the relay at
+ * that same moment - `subscribers.get(nodeId).add(fromPeerId)` (relay.js's
+ * `handleSubscribe()`) happens BEFORE that snapshot is read, so such a
+ * write is still guaranteed to reach this subscriber as an ordinary live
+ * forward, just not necessarily BEFORE the (already async, storage-backed)
+ * `sync-ack` itself arrives - two independent peers' messages have no
+ * relative ordering guarantee at all (relay.js's own per-peer `peerQueues`
+ * run fully concurrently with each other). Returning the instant
+ * `isNodeSynced()` flips true, with no settle margin, was a REAL, caught
+ * regression: a genuinely-existing page, written by a different identity
+ * moments earlier, would routinely resolve to `null` for a fresh visitor
+ * subscribing right after, purely because that in-flight live update
+ * hadn't been locally applied yet at the exact instant the (separately
+ * timed) empty ack arrived (`test/live-app-resolver.test.js`, a REAL
+ * multi-peer scenario, caught it immediately - a same-identity self-check
+ * like `ensureSelfProvisioned()`'s never raced this way, since nothing else
+ * can concurrently write a not-yet-created identity's own Nodes, which is
+ * exactly why this bug went unnoticed until a cross-peer test exercised
+ * it). `settle` gives any such near-simultaneous write a real window to
+ * actually arrive and update `checkFn` before this gives up - narrows the
+ * remaining race to "an update that took upward of `settle` to physically
+ * arrive after being sent," astronomically rarer than "arrived in some
+ * arbitrary order relative to an unrelated ack" ever was. Still
+ * local-first regardless of any of this: the very first `checkFn()` call
+ * (before `isNodeSynced()` is ever consulted) is what makes an
+ * ALREADY-locally-known value resolve instantly.
+ */
+async function waitFor(space, nodeId, checkFn, { timeout = 4000, interval = 20, settle = 150 } = {}) {
   const deadline = Date.now() + timeout;
+  let syncedAt = null;
   for (;;) {
     const value = await checkFn();
     if (value !== null && value !== undefined) return value;
+    if (space.isNodeSynced(nodeId)) {
+      syncedAt ??= Date.now();
+      if (Date.now() - syncedAt >= settle) return null;
+    }
     if (Date.now() >= deadline) return null;
     await new Promise((resolve) => setTimeout(resolve, interval));
   }
@@ -63,7 +116,7 @@ export class ContentResolver {
     const appManifestKind = this._kinds.appManifestKind;
     const id = await deriveOwnerNodeId(this._appAdminPub, appManifestKind.kind);
     const { node, release } = await this._space.useNode(id, appManifestKind);
-    const manifest = await waitFor(async () => {
+    const manifest = await waitFor(this._space, id, async () => {
       const name = await node.field('name').get();
       if (!name) return null;
       const [version, rootTemplate, defaultRoute, theme, metadata] = await Promise.all([
@@ -84,7 +137,7 @@ export class ContentResolver {
     const routeRegistryKind = this._kinds.routeRegistryKind;
     const id = await deriveOwnerNodeId(this._appAdminPub, routeRegistryKind.kind);
     const { node, release } = await this._space.useNode(id, routeRegistryKind);
-    await waitFor(() => (node.field('routes').length > 0 ? true : null), { timeout: timeout ?? 500 });
+    await waitFor(this._space, id, () => (node.field('routes').length > 0 ? true : null), { timeout: timeout ?? 500 });
     const routes = await node.field('routes').toArray();
     release();
     return routes.filter(Boolean);
@@ -95,7 +148,7 @@ export class ContentResolver {
     const pageKind = this._kinds.pageKind;
     const id = await deriveContentNodeId(this._appAdminPub, pageKind.kind, route);
     const { node, release } = await this._space.useNode(id, pageKind);
-    const page = await waitFor(async () => {
+    const page = await waitFor(this._space, id, async () => {
       const title = await node.field('title').get();
       const content = node.field('content').get();
       // Wait for BOTH: `title`/`content` are written as SEPARATE envelopes (see kinds.js/node.js's
@@ -117,7 +170,7 @@ export class ContentResolver {
     const templateRegistryKind = this._kinds.templateRegistryKind;
     const id = await deriveOwnerNodeId(this._appAdminPub, templateRegistryKind.kind);
     const { node, release } = await this._space.useNode(id, templateRegistryKind);
-    await waitFor(() => (node.field('templates').length > 0 ? true : null), { timeout: timeout ?? 500 });
+    await waitFor(this._space, id, () => (node.field('templates').length > 0 ? true : null), { timeout: timeout ?? 500 });
     const templates = await node.field('templates').toArray();
     release();
     return templates.filter(Boolean);
@@ -128,7 +181,7 @@ export class ContentResolver {
     const styleRegistryKind = this._kinds.styleRegistryKind;
     const id = await deriveOwnerNodeId(this._appAdminPub, styleRegistryKind.kind);
     const { node, release } = await this._space.useNode(id, styleRegistryKind);
-    await waitFor(() => (node.field('styles').length > 0 ? true : null), { timeout: timeout ?? 500 });
+    await waitFor(this._space, id, () => (node.field('styles').length > 0 ? true : null), { timeout: timeout ?? 500 });
     const styles = await node.field('styles').toArray();
     release();
     return styles.filter(Boolean);
@@ -139,7 +192,7 @@ export class ContentResolver {
     const templateKind = this._kinds.templateKind;
     const id = await deriveContentNodeId(this._appAdminPub, templateKind.kind, name);
     const { node, release } = await this._space.useNode(id, templateKind);
-    const html = await waitFor(() => {
+    const html = await waitFor(this._space, id, () => {
       const value = node.field('html').get();
       return value ? value : null;
     }, { timeout });
@@ -161,7 +214,7 @@ export class ContentResolver {
     // createNode() doc comment) before their first write is even readable, so the OLD 1000ms could
     // occasionally time out real, existing content under real network/CPU load - not just "no
     // theme set."
-    const css = await waitFor(() => {
+    const css = await waitFor(this._space, id, () => {
       const value = node.field('css').get();
       return value !== '' ? value : null;
     }, { timeout: timeout ?? 2000 });
@@ -184,7 +237,7 @@ export class ContentResolver {
     const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
     const id = await deriveOwnerNodeId(owner, registryKind.kind);
     const { node, release } = await this._space.useNode(id, registryKind);
-    await waitFor(() => (node.field(registryField).length > 0 ? true : null), { timeout: timeout ?? 500 });
+    await waitFor(this._space, id, () => (node.field(registryField).length > 0 ? true : null), { timeout: timeout ?? 500 });
     const items = await node.field(registryField).toArray();
     release();
     return items.filter(Boolean);
@@ -208,7 +261,7 @@ export class ContentResolver {
     const id = await deriveContentNodeId(owner, itemKind.kind, path);
     const { node, release } = await this._space.useNode(id, itemKind);
     const fieldNames = Object.keys(itemKind.fields);
-    const item = await waitFor(async () => {
+    const item = await waitFor(this._space, id, async () => {
       const values = {};
       let anySet = false;
       for (const name of fieldNames) {

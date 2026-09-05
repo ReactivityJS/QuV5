@@ -1525,6 +1525,91 @@ to resync first" helper `publishRoute()`/`createTemplate()`/`createStyle()`
 already used for their own per-owner registries - instead of hand-rolling
 the same check again, incorrectly, for this one global registry.
 
+**Self-provisioning at your own bare pubkey, not just inside a `multiuser`
+app (a later revision):** a real question followed the routing flip above -
+could a personal space live at `#/<pubkey>/` directly, independent of any
+app's prefix at all, rather than mandatorily nested under `#/cms/...`? The
+platform ALREADY had a fully generic, always-on mechanism for exactly this
+- `PlatformRuntime.resolveForPath()`'s "unregistered prefix tried as a
+literal owner id" fallback (`realm: 'main', appAdminPub`, this file's own
+`platform.js` doc comment) - any identity's own space was already reachable
+there for READING, zero app/prefix involved. The only gap: nothing
+SELF-PROVISIONED there, so a brand-new identity's own `#/<their-pubkey>/`
+was a dead 404 rather than a working starting point. Closed by calling the
+EXACT SAME `ensureSelfProvisioned()` a `mode: 'multiuser'` app's own
+`ref: 'me'` already uses, from `startPlatform()`'s ordinary (non-global)
+branch too, gated on `match.name === null` (the fallback's own signal,
+`resolveForPath()`) AND `match.appAdminPub === space.identity.signingPub` -
+deliberately NOT extended to a REGISTERED `realm: 'main'` alias pointing at
+the same identity, since an app-admin who bothered to register a prefix
+presumably has their own install story already, and auto-seeding a generic
+starter there would surprise, not help. Same underlying storage either way
+(`deriveOwnerNodeId`/`deriveContentNodeId` derive identically regardless of
+which URL reached it) - `#/cms/`, `#/cms/u/me/`, and `#/<your-pubkey>/` are
+three doors into the exact same room, never three different rooms. Making
+the "cms" app's own GLOBAL registration occupy the platform's literal root
+(`prefix: ''`) was considered and set aside instead - technically already
+possible (`registerApp()` never validates `prefix` shape beyond the admin
+console's own form pattern), but it would permanently hide the "nothing
+installed yet" landing page the moment any app claims it, and makes
+`#/admin/<prefix>/...`'s own delegation path (`parseAdminSubPath()`) reduce
+to an awkward double slash - the bare-pubkey fallback above solves the
+actual "can I reach my own space without an app prefix" need without either
+cost.
+
+**Faster reads: a relay `sync-ack` and its `settle`-margin (a later
+revision):** every `@qu/app-core` `ContentResolver`/`PlatformRuntime` read
+used to poll a Node's own fields for up to its FULL configured timeout
+(1500-4000ms, several calls often chained per page load) even when the
+relay could have said "nothing here" almost immediately - `handleSubscribe()`
+(`@qu/space-transport`'s relay.js) previously replied with silence for a
+genuinely nonexistent Node, making "still in flight" and "confirmed absent"
+indistinguishable client-side. Fixed with an explicit `sync-ack` message
+(nodeId + replayed envelope count, possibly 0) sent at the END of every
+subscribe response - `Space.isNodeSynced(id)` (space.js) tracks having
+received one, and `resolver.js`/`platform.js`/`dev.js`'s own `waitFor()`/
+`waitForSync()` helpers now return as soon as that flips true AND `checkFn`
+is still empty, instead of always burning the rest of `timeout`. Measured
+effect: a first-time visitor's self-provisioning + first render dropped
+from ~5.5s of pure dead-wait (against an instantly-responding relay) to
+near-instant; the full `packages/app-shell` test suite's wall-clock time
+dropped by roughly a third.
+
+A REAL RACE THIS CAUGHT BEFORE SHIPPING, the reason `settle` (default
+150ms, the SAME margin `cms-actions.js`'s `verifyWritesAcked()` already
+uses) exists at all: `isNodeSynced()` only describes what the relay's OWN
+mirror held at the exact moment it computed the ack - it says NOTHING about
+a write from a COMPLETELY DIFFERENT peer that was already in flight to the
+relay at that same moment. `subscribers.get(nodeId).add(fromPeerId)`
+happens BEFORE that snapshot is read, so such a write is still guaranteed
+to reach the subscriber as an ordinary live forward - just with NO relative
+ordering guarantee against the (separately, asynchronously computed)
+`sync-ack` itself, since relay.js's own per-peer `peerQueues` run fully
+concurrently with each other. Returning the INSTANT `isNodeSynced()` flipped
+true, with no settle margin at all, was caught immediately by
+`test/live-app-resolver.test.js`'s own genuine cross-peer scenario (a
+different identity's brand-new page, read by a totally uninvolved visitor
+moments later) - it started resolving to `null` for content that
+plainly existed, purely because the relay's OWN empty-ack (correct, AT THE
+INSTANT it was computed) arrived before the concurrently-in-flight write's
+live-forwarded update had been locally applied yet. `ensureSelfProvisioned()`'s
+own self-check never raced this way (nothing else can concurrently write a
+not-yet-created identity's own Nodes), which is exactly why a cross-peer
+test was necessary to catch it - a same-identity check alone would have
+shipped it clean. `settle` narrows, rather than eliminates, the remaining
+window (an update taking upward of `settle` to physically arrive after
+being sent is astronomically rarer than "arrived in some arbitrary order
+relative to an unrelated ack" was) - accepted as the same class of
+pragmatic tradeoff `verifyWritesAcked()`'s own settle margin already makes.
+
+Also parallelized two independent-but-previously-sequential `await` pairs
+found while investigating the same "why is this slow" report:
+`AppRuntime.resolveRoute()`'s manifest+page resolution (`runtime.js`,
+neither depends on the other's RESULT), and `shell.js`'s own
+`joinSpace()`/`fetchRelayAdmins()` boot-sequence calls (a completely
+independent, unauthenticated read, needlessly held until AFTER `joinSpace()`'s
+own two-step POST-then-GET finished).
+
 **Reading this as a CMS, not just a router:** the admin console proves the
 general shape - "UI legt sich selbst innerhalb des Storage an und hat
 zuständige Admins" (the user's own framing) - a piece of UI is installed
