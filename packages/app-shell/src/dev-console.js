@@ -33,24 +33,39 @@
  * are copy-pasteable straight off the page, no devtools required -
  * `window.Qu` itself (`Qu.pub`/`Qu.xPub`/`Qu.identity`) stays available
  * for anyone who prefers the console, or wants the raw keys for a script.
+ *
+ * `pub`/`xPub` are DELIBERATELY plain base64, not base64url - they're for
+ * pasting into CONFIG (`QU_RELAY_ADMINS` etc.), which expects exactly that
+ * encoding. `pubUrl` (`Qu.pubUrl`/`[data-qu-pub-url]`) is the SEPARATE,
+ * base64url-encoded form `boot.js`'s `PlatformRuntime`-driven routing
+ * actually needs for a URL - a raw base64 pubkey routinely contains `/`
+ * and `+`, which a hash route silently mis-splits into extra path segments
+ * instead of erroring (a real, reported trap, not a hypothetical one) -
+ * never conflate the two. `boot.js`'s own `renderLandingPage()` already
+ * builds a ready-to-click "Dein eigener Bereich" link with it directly;
+ * `pubUrl`/`[data-qu-pub-url]` here exists for any OTHER page (a custom
+ * `index.html`, this package's own unconfigured setup page) that wants the
+ * same link without hand-rolling the encoding itself.
  */
 import { QuCrypto } from '@qu/core';
 import { loadOrCreateIdentity, IDENTITY_STORAGE_KEY } from './identity.js';
 
 /**
  * @param {{storage?: {getItem: Function, setItem: Function, removeItem: Function}, doc?: Document, win?: {location?: {reload: Function}}}} [params]
- * @returns {Promise<{QuCrypto: object, identity: object, pub: string, xPub: string, regenerate: () => Promise<void>}>} the same object assigned to `window.Qu`.
+ * @returns {Promise<{QuCrypto: object, identity: object, pub: string, xPub: string, pubUrl: string, regenerate: () => Promise<void>}>} the same object assigned to `window.Qu`.
  */
 export async function initDevConsole({ storage = globalThis.localStorage, doc = globalThis.document, win = globalThis } = {}) {
   const identity = await loadOrCreateIdentity(storage, IDENTITY_STORAGE_KEY);
   const pub = QuCrypto.toBase64(identity.signingPub);
   const xPub = QuCrypto.toBase64(identity.xPublicKey);
+  const pubUrl = QuCrypto.toBase64Url(identity.signingPub);
 
   const api = {
     QuCrypto,
     identity,
     pub,
     xPub,
+    pubUrl,
     /** Discards the stored identity and reloads - the next load generates (and persists) a fresh one. Irreversible: any pubkey already handed to a relay's config becomes unusable by this browser afterward. */
     async regenerate() {
       storage.removeItem(IDENTITY_STORAGE_KEY);
@@ -63,6 +78,8 @@ export async function initDevConsole({ storage = globalThis.localStorage, doc = 
   if (pubEl) pubEl.textContent = pub;
   const xPubEl = doc?.querySelector('[data-qu-xpub]');
   if (xPubEl) xPubEl.textContent = xPub;
+  const pubUrlEl = doc?.querySelector('[data-qu-pub-url]');
+  if (pubUrlEl) pubUrlEl.textContent = pubUrl;
 
   doc?.dispatchEvent(new (win.CustomEvent ?? CustomEvent)('qu-dev-console-ready', { detail: api }));
   return api;
