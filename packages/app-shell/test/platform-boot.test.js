@@ -147,7 +147,7 @@ test('the built-in admin console is genuine installed content in the SAME main S
     await waitUntil(() => mountEl.textContent.includes('Relay-Admin'));
     assert.ok(mountEl.querySelector('form[data-qu-action="register-app"]'), 'the console is rendered from installed content, not hardcoded DOM-building');
 
-    const form = mountEl.querySelector('form');
+    const form = mountEl.querySelector('form[data-qu-action="register-app"]');
     form.querySelector('input[name="prefix"]').value = 'calendar';
     form.querySelector('input[name="appAdminPub"]').value = QuCrypto.toBase64(calendarAdmin.signingPub);
     form.querySelector('input[name="name"]').value = 'Kalender';

@@ -229,7 +229,7 @@ export const platformAppsKind = publicMeta(
   defineKind('qu-platform-apps', {
     fields: {
       /**
-       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser'}>`
+       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser', sharedLists?: string[]}>`
        * - see `dev.js`'s `registerApp()`/`setAppMode()`, `platform.js`'s
        * `PlatformRuntime`. `realm: 'global'` entries (`appAdminPub: null`)
        * route into content ANY configured relay-admin collectively
@@ -509,6 +509,16 @@ export const viewKind = defineKind('qu-view', {
     sortOrder: { shape: 'atomic', visibility: 'public' }, // 'asc'|'desc'
     limit: { shape: 'atomic', visibility: 'public' }, // number|null
     itemTemplate: { shape: 'text', visibility: 'public' },
+    // `route`/`template` are PURELY DESCRIPTIVE bookkeeping - `null` for an embed-only View
+    // (`<div data-qu-view="name">` inside some other page's own content, unchanged from before
+    // these existed). `dev.js`'s `createView()` is what actually MAKES a View visitable at `route`
+    // (auto-creating a plain wrapper `qu-page` there) - this Kind itself has no routing behavior of
+    // its own, same "Kind-Schema is just data, the App layer interprets it" posture every other
+    // Kind here already has. Stored here (rather than only ever passed to `createView()` and
+    // forgotten) purely so `resolveView()` can tell a caller (the CMS editor, primarily) whether -
+    // and where - a given View is already visitable, without it having to separately guess/remember.
+    route: { shape: 'atomic', visibility: 'public' },
+    template: { shape: 'atomic', visibility: 'public' },
   },
   acl: { write: 'content' },
 });

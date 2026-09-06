@@ -560,6 +560,19 @@ on exactly these two primitives - a Guestbook, a Blog, a Forum (topics +
 per-topic replies), and a simple public Chat - none of which need a new
 Kind-Schema.
 
+**Guestbook, Blog, and Forum are installable apps, not just Dev API
+sketches** - the admin console's own "Beispiel-App installieren" form
+(`#/admin`) seeds a fully working instance of any of the three under a
+prefix you choose (`admin-actions.js`'s `APP_INSTALLERS`), live at
+`#/<prefix>/` immediately. The content lives in `packages/app-shell/`'s
+`guestbook-bundle.js`/`blog-bundle.js`/`forum-bundle.js`; the interactivity
+(signing the guestbook, publishing a post, starting a topic/replying) in
+the matching `src/guestbook-actions.js`/`src/blog-actions.js`/
+`src/forum-actions.js`, aggregated by `src/installed-apps-actions.js` so
+`boot.js` only needs one call per render site regardless of how many such
+apps exist. `packages/app-shell/test/installed-apps.test.js` proves all
+three end to end, plus the installer form itself.
+
 ## Deploying the legacy chat relay
 
 The OLD, hardcoded chat demo relay (`@qu/space-transport`'s own

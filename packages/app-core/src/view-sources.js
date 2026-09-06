@@ -71,9 +71,9 @@ export const VIEW_SOURCE_ADAPTERS = {
     },
   },
   /**
-   * @param {{name: string}} params - which named shared list (`dev.js`'s
-   * `pushToSharedList()`) - required, no default: unlike `'pages'`, there
-   * is no single "every shared list" enumeration to fall back to.
+   * @param {{name: string, filter?: Record<string, *>}} params - `name`: which named shared list
+   * (`dev.js`'s `pushToSharedList()`) - required, no default: unlike `'pages'`, there is no single
+   * "every shared list" enumeration to fall back to.
    *
    * `name`/`message`/`ts` is a CONVENTION, not a schema `sharedListKind`
    * itself enforces (its own doc comment: entries are caller-defined plain
@@ -89,6 +89,17 @@ export const VIEW_SOURCE_ADAPTERS = {
    * provides, so an `itemTemplate`'s `<a data-qu-view-link>` (`@qu/app-shell`'s
    * `view-actions.js`) works identically regardless of which source
    * produced a given item.
+   *
+   * `filter` (optional) - a plain `{key: value}` equality match applied to
+   * each entry's OWN raw object (`Object.entries(filter).every(([k, v]) =>
+   * entry[k] === v)`) BEFORE normalizing - what lets MANY logically
+   * separate feeds share ONE physical shared list (and therefore one
+   * pre-registered name, see `dev.js`'s `registerApp()` own `sharedLists`
+   * doc comment) instead of needing a new, unregistered list name per
+   * feed: a Forum's per-topic reply View (`docs/example-apps.md`) filters
+   * ONE `<prefix>:replies` list down to `{topicId}`, rather than creating
+   * an unpredictable `<prefix>:topic:<id>` list name per topic that the
+   * relay was never told to expect.
    */
   'shared-list': {
     async open(space, _ctx, params) {
@@ -96,9 +107,11 @@ export const VIEW_SOURCE_ADAPTERS = {
       const id = await deriveOwnerNodeId(anchor, sharedListKind.kind);
       const { node, release } = await space.useNode(id, sharedListKind);
       const field = node.field('entries');
+      const matchesFilter = (e) => !params.filter || Object.entries(params.filter).every(([key, value]) => e[key] === value);
       const read = async () =>
         (await field.toArray())
           .filter(Boolean)
+          .filter(matchesFilter)
           .map((e) => normalize({ title: e.name ?? '', excerpt: e.message ?? '', route: e.route ?? null, timestamp: e.ts ?? null, raw: e }));
       return { id, read, observe: (cb) => field.observe(cb), release };
     },
