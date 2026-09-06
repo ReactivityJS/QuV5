@@ -8,6 +8,9 @@ export {
   styleKind,
   groupKind,
   privatePageKind,
+  sharedListKind,
+  sharedListAnchor,
+  viewKind,
   platformAppsKind,
   PLATFORM_REGISTRY_ANCHOR,
   adminAppManifestKind,
@@ -51,5 +54,9 @@ export {
   editGroup,
   createPrivatePage,
   editPrivatePage,
+  pushToSharedList,
+  createView,
+  editView,
 } from './dev.js';
 export { createAppResolveKindSchema } from './relay-resolver.js';
+export { openLiveView, VIEW_SOURCE_ADAPTERS } from './view-sources.js';

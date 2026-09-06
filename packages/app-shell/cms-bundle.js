@@ -88,6 +88,26 @@ export const cmsBundle = {
     <button type="button" data-qu-cms-reset="page">Neue Seite</button>
     <p data-qu-status></p>
   </form>
+</section>
+
+<section>
+  <h2>Views (live Feeds)</h2>
+  <p>Kombiniert mehrere Inhaltsquellen (Seiten, Gästebuch, ...) zu einem live aktualisierten Feed -
+    einbinden mit <code>&lt;div data-qu-view="NAME"&gt;&lt;/div&gt;</code> auf einer Seite.</p>
+  <form data-qu-action="cms-view-form">
+    <input type="hidden" name="mode" value="create">
+    <label>Name: <input name="name" required> <button type="button" data-qu-action="cms-view-load">Laden</button></label><br>
+    <label>Quellen (JSON, z.B. <code>[{"type":"pages","prefix":"/blog/"},{"type":"shared-list","name":"guestbook"}]</code>):<br>
+      <textarea name="sources" rows="3" cols="60" placeholder='[{"type":"pages","prefix":"/blog/"}]'></textarea></label><br>
+    <label>Sortieren nach: <select name="sortBy"><option value="">(Reihenfolge der Quellen)</option><option value="title">Titel</option><option value="timestamp">Zeitstempel</option></select></label><br>
+    <label>Reihenfolge: <select name="sortOrder"><option value="asc">aufsteigend</option><option value="desc" selected>absteigend</option></select></label><br>
+    <label>Limit (optional): <input name="limit" type="number" min="1"></label><br>
+    <label>Item-Template (HTML, <code>&lt;qu-slot name="title"&gt;</code>/<code>"excerpt"</code>, Link via <code>&lt;a data-qu-view-link&gt;</code>):<br>
+      <textarea name="itemTemplate" rows="4" cols="60"></textarea></label><br>
+    <button type="submit">Speichern</button>
+    <button type="button" data-qu-cms-reset="view">Neue View</button>
+    <p data-qu-status></p>
+  </form>
 </section>`,
   },
 };

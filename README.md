@@ -505,6 +505,57 @@ instead. See architecture.md's own "Groups and private/shared content"
 section and `packages/app-core/test/group-private-content.test.js` for the
 full design rationale and an end-to-end proof over a real relay.
 
+## Guestbooks and live Views (combined feeds)
+
+A genuine guestbook (many different visitors each posting their own entry
+to one shared list) needs `acl.write: 'members'`, not the `'content'`-ACL
+`defineCollectionKind()` already provides (that's for one owner curating
+many items it each individually owns - e.g. your own blog posts, which
+need no new Kind at all: a post is just an ordinary page, the index is
+just `resolveRoutes()` filtered by a route prefix). `sharedListKind`
+closes that specific gap:
+
+```js
+import { pushToSharedList } from '@qu/app-core';
+
+// any CURRENT Space member may call this, for any name, with no "create
+// the list" step first:
+await pushToSharedList(space, 'guestbook', { name: 'Alice', message: 'Hi!' });
+const entries = await resolver.resolveSharedList('guestbook'); // [] if never used, not a timeout
+```
+
+**Views** (`viewKind`) combine several content sources - pages, a shared
+list, ... - into one live, sorted feed, à la Drupal Views:
+
+```js
+import { createView } from '@qu/app-core';
+
+await createView(space, {
+  name: 'user-feed',
+  sources: [
+    { type: 'pages', prefix: '/blog/' },
+    { type: 'shared-list', name: 'guestbook' },
+  ],
+  sortBy: 'title', sortOrder: 'desc',
+  itemTemplate: '<a data-qu-view-link><qu-slot name="title"></qu-slot></a>',
+});
+```
+
+Embed it on any page with `<div data-qu-view="user-feed"></div>` -
+`@qu/app-shell`'s `view-actions.js` wires it up automatically after every
+render, live: a new blog post or guestbook entry appears with no reload.
+Both primitives are deliberately GENERIC, not CMS-specific - a future
+Forum, Live-Ticker, or other app built on `@qu/app-core` can use the exact
+same `createView()`/`pushToSharedList()` Dev API and `wireViews()`
+rendering from its own pages; the CMS's own "Views" form
+(`cms-actions.js`'s `wireViewEditor()`) is one reference editor among
+possibly several ("editors as plugins"), not the only way to author one.
+See architecture.md's own "Shared lists ... and Views" section for the
+full design (including what's deliberately not built yet - a `'collection'`
+source adapter, and watching a View's own definition live) and
+`packages/app-core/test/{shared-list,views}.test.js` /
+`packages/app-shell/test/{view-actions,view-editor}.test.js` for proof.
+
 ## Deploying the legacy chat relay
 
 The OLD, hardcoded chat demo relay (`@qu/space-transport`'s own

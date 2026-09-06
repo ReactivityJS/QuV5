@@ -28,6 +28,9 @@ import {
   styleKind,
   groupKind,
   privatePageKind,
+  sharedListKind,
+  sharedListAnchor,
+  viewKind,
   platformAppsKind,
   PLATFORM_REGISTRY_ANCHOR,
   adminAppManifestKind,
@@ -401,6 +404,66 @@ export async function editPrivatePage(space, { route, title, template, content, 
   if (template !== undefined) await node.field('template').set(template, { recipients });
   if (content !== undefined) replaceText(node.field('content'), content, { recipients });
   if (data !== undefined) await node.field('data').set(data, { recipients });
+  release();
+  return node;
+}
+
+/**
+ * Appends ONE entry to a NAMED shared list (`kinds.js`'s own `sharedListKind`
+ * doc comment - a guestbook is the reference use case) - any CURRENT Space
+ * member may call this, for ANY `name`, with no prior "create the list"
+ * step: `getOrSyncRegistryNode()` (this file's own doc comment on it,
+ * already shared by `registerApp()`/`getOrSyncRegistryNode()`'s other
+ * callers) transparently creates the Node the FIRST time anyone writes to
+ * a given `name`, and simply reuses it every time after - the exact "never
+ * blindly `createNode()` over a Node that already exists, just torn down
+ * locally between two calls" protection `registerApp()`'s own doc comment
+ * explains in full, equally necessary here since MANY different visitors
+ * independently calling this for the SAME `name` is the entire point.
+ * `entry` is caller-defined (a guestbook might use `{name, message, ts}`) -
+ * this Kind imposes no shape on it, same as `groupKind.members`/
+ * `platformAppsKind.apps`.
+ * @param {import('@qu/space-core').Space} space
+ * @param {string} name - which named list (e.g. `'guestbook'`) - see `sharedListAnchor()`.
+ * @param {object} entry
+ */
+export async function pushToSharedList(space, name, entry) {
+  const anchor = await sharedListAnchor(name);
+  const node = await getOrSyncRegistryNode(space, sharedListKind, anchor);
+  await node.field('entries').push(entry);
+  return node;
+}
+
+/**
+ * Creates a View at content-addressed id `deriveContentNodeId(space.
+ * identity.signingPub, 'qu-view', name)` - see `createTemplate()`'s own
+ * doc comment (registry-free here too: unlike templates/styles, a View
+ * has no "list every View this owner has" registry yet, since nothing
+ * needs to enumerate them the way a CMS template picker does today - real,
+ * separate future work if that's ever needed, not attempted here).
+ * `kinds.js`'s own `viewKind` doc comment explains `sources`/`itemTemplate`
+ * in full - this is a thin, discoverable wrapper, same shape as every
+ * other `create*()` in this file.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{name: string, sources: Array<{type: string, [k: string]: *}>, sortBy?: string|null, sortOrder?: 'asc'|'desc', limit?: number|null, itemTemplate: string}} params
+ */
+export async function createView(space, { name, sources, sortBy = null, sortOrder = 'desc', limit = null, itemTemplate }) {
+  return space.createNode(viewKind, { sources, sortBy, sortOrder, limit, itemTemplate }, { path: name });
+}
+
+/** Updates an existing View - see `editTemplate()`'s own doc comment (including `ownerPub`) for the full "why never re-`createNode()`" reasoning, identical here. `fields` is a PARTIAL update, same convention `editCollectionItem()` already uses - only keys actually present are written. */
+export async function editView(space, { name, ownerPub = space.identity.signingPub, timeout, ...fields } = {}) {
+  const id = await deriveContentNodeId(ownerPub, viewKind.kind, name);
+  const { node, release } = await space.useNode(id, viewKind);
+  const synced = await waitForSync(() => node.field('itemTemplate').get() !== '', { timeout });
+  if (!synced) {
+    release();
+    throw new Error(`editView: view "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createView() for a genuinely new one`);
+  }
+  for (const [key, value] of Object.entries(fields)) {
+    if (key === 'itemTemplate') replaceText(node.field('itemTemplate'), value);
+    else await node.field(key).set(value);
+  }
   release();
   return node;
 }

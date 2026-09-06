@@ -12,16 +12,28 @@
  * them and hand it here - this function knows nothing about HOW it was
  * built, only that it behaves like one.
  */
-import { AppRuntime, HashRouter, PlatformRuntime, ContentResolver, createApp, appManifestKind, adminAppManifestKind, adminPageKind, adminTemplateKind, adminStyleKind, globalAppAnchor } from '@qu/app-core';
+import { AppRuntime, HashRouter, PlatformRuntime, ContentResolver, createApp, appManifestKind, adminAppManifestKind, adminPageKind, adminTemplateKind, adminStyleKind, adminRouteRegistryKind, globalAppAnchor } from '@qu/app-core';
 import { QuCrypto } from '@qu/core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { renderPage } from '@qu/app-renderer';
 import { wireAdminConsole } from './admin-actions.js';
 import { wireCms } from './cms-actions.js';
+import { wireViews } from './view-actions.js';
 import { installCms } from '../cms-bundle.js';
 
-/** Passed as `AppRuntime`'s `kinds` override for `realm: 'global'` routes - see `resolver.js`'s own doc comment on what this parametrizes. Shared by EVERY global app (they all use the SAME Kind set, told apart only by their anchor - see kinds.js's own "GLOBAL APP CONTENT" doc comment). No `routeRegistryKind` entry: `AppRuntime.resolveRoute()` (the only method `startPlatform()` calls) never touches it - see `runtime.js`. */
-const GLOBAL_KINDS = { appManifestKind: adminAppManifestKind, pageKind: adminPageKind, templateKind: adminTemplateKind, styleKind: adminStyleKind };
+/**
+ * Passed as `AppRuntime`'s `kinds` override for `realm: 'global'` routes -
+ * see `resolver.js`'s own doc comment on what this parametrizes. Shared by
+ * EVERY global app (they all use the SAME Kind set, told apart only by
+ * their anchor - see kinds.js's own "GLOBAL APP CONTENT" doc comment).
+ * `routeRegistryKind: adminRouteRegistryKind` was added specifically for
+ * `wireViews()`'s own `'pages'` source adapter (`@qu/app-core`'s
+ * `view-sources.js`) - a global app's OWN Views need to resolve routes
+ * against ITS OWN registry Kind, not the default `qu-route-registry`
+ * (wrong ACL mode entirely for a global app); `AppRuntime.resolveRoute()`
+ * itself still never touches this key.
+ */
+const GLOBAL_KINDS = { appManifestKind: adminAppManifestKind, pageKind: adminPageKind, templateKind: adminTemplateKind, styleKind: adminStyleKind, routeRegistryKind: adminRouteRegistryKind };
 
 /** @param {{mountEl: Element, doc: Document, platform: PlatformRuntime, space: import('@qu/space-core').Space}} params - shown when no registered app's prefix (nor a well-formed owner id) matches the current route. The one piece of `startPlatform()` UI that ISN'T Qu content: by definition nothing here resolved, so there is no content to fetch it from - same "Framework Default" posture `@qu/app-renderer` already takes for a single app's own unresolved routes. */
 async function renderLandingPage({ mountEl, doc, platform, space }) {
@@ -246,6 +258,7 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   // and their save simply fails cleanly (cms-actions.js's own verifyWritesAcked()) unless that
   // owner actually granted them access.
   await wireCms({ mountEl, doc: window.document, space, appAdminPub: ownerPub });
+  await wireViews({ mountEl, doc: window.document, space, appAdminPub: ownerPub });
 }
 
 /**
@@ -270,6 +283,7 @@ async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeo
   mountEl.quSpace = space;
   renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
   await wireCms({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), global: true, prefix });
+  await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
 }
 
 /**
@@ -290,6 +304,7 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
       const plan = await runtime.resolveRoute(route, resolveTimeout ? { timeout: resolveTimeout } : undefined);
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub });
+      await wireViews({ mountEl, doc: window.document, space, appAdminPub });
     },
   });
   router.start();
@@ -418,6 +433,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
         mountEl.quSpace = space;
         renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
         wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
+        await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor('admin'), kinds: GLOBAL_KINDS });
         return;
       }
 
@@ -458,6 +474,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
       mountEl.quSpace = space;
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
+      await wireViews({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
     },
   });
   router.start();

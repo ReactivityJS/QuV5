@@ -418,6 +418,102 @@ export const privatePageKind = defineKind('qu-private-page', {
 });
 
 /**
+ * A NAMED, SHARED, APPEND-ONLY LIST any Space member may write to directly -
+ * the missing primitive a genuine guestbook needs: many DIFFERENT visitors
+ * each contributing their OWN entry to ONE common list, as opposed to
+ * `defineCollectionKind()`'s shape (`acl.write: 'content'`, one identity
+ * curating many items it each individually owns - right for "an app-admin's
+ * own blog posts," wrong for "any visitor signs the guestbook"). `entries`
+ * is `acl.write: 'members'` (kind-schema.js's own doc comment on the mode) -
+ * a flat, symmetric "any current Space member may write" check, the SAME
+ * mode `Space`'s own `presenceKind` already uses for exactly this reason -
+ * with NO per-item ownership/grant concept at all: nobody "owns" one entry
+ * more than another, matching a real guestbook's own social contract.
+ *
+ * `entries` is a single `'list'`-shape field of caller-defined plain
+ * objects (`Array<object>`, e.g. `{name, message, ts}` for a guestbook) -
+ * the SAME "no separate per-item Kind-Schema" shape `groupKind.members`/
+ * `platformAppsKind.apps` already use, deliberately NOT wrapping each entry
+ * in its own Node the way a Collection's items are: a Y.Array's own CRDT
+ * merge already handles many DIFFERENT authors concurrently `.push()`ing
+ * without a conflict (each insert lands independently, no last-write-wins
+ * clobbering, no relay-side coordination needed) - exactly the property
+ * "many strangers write to the same list at once" needs, and exactly why
+ * this does NOT need `defineCollectionKind()`'s per-item content-addressing
+ * at all. No removal/edit primitive by design (same "ONLY ADDITIVE" choice
+ * `platformAppsKind`'s own doc comment makes, for the same reason: a
+ * guestbook entry, once posted, is not normally something ITS OWN AUTHOR
+ * can silently rewrite later) - moderation (an admin removing an entry) is
+ * real, separate future work, not attempted here.
+ *
+ * ONE Kind, MANY independent lists: `sharedListAnchor(name)` below derives
+ * a fixed, non-cryptographic, per-NAME anchor (the exact same "no real
+ * keypair behind this id, purely a stable hash input" idea
+ * `globalAppAnchor(prefix)` already uses one section up) - `deriveOwnerNodeId
+ * (await sharedListAnchor('guestbook'), sharedListKind.kind)` is a
+ * well-known id EVERY member can independently compute from just the name
+ * string, no discovery/registration step needed - so a deployment can run
+ * as many named shared lists (a guestbook, a feedback box, a simple poll's
+ * vote log, ...) as it wants, each isolated from the others by name alone.
+ */
+export async function sharedListAnchor(name) {
+  return QuCrypto.sha256(new TextEncoder().encode(`qu-shared-list:${name}`));
+}
+
+export const sharedListKind = publicMeta(
+  defineKind('qu-shared-list', {
+    fields: {
+      entries: { shape: 'list', visibility: 'public' },
+    },
+    acl: { write: 'members' },
+  })
+);
+
+/**
+ * A VIEW — a Drupal-Views-style CONFIGURATION for a live, aggregated feed
+ * pulled from one or more OTHER content sources (`@qu/app-core`'s own
+ * `view-sources.js` interprets it) - "user-feed combines Blog + Gästebuch"
+ * (the user's own framing) is exactly what this is for: a page never has
+ * to hardcode "read routeRegistryKind, then also read this shared list,
+ * merge, sort" logic itself - a View Node holds that recipe as ordinary
+ * Kind-Schema data, resolved and kept LIVE by `openLiveView()`.
+ *
+ * DELIBERATELY GENERIC, not a CMS-only concept: `acl.write: 'content'`
+ * (self-owned, many-per-owner - the SAME shape `qu-template`/`qu-style`
+ * already use) means ANY app built on `@qu/app-core` - a Forum, a
+ * Live-Ticker, a future GeoChase - can `createView()`/`editView()` its own
+ * feeds the exact same way, through the exact same Dev API, with no
+ * dependency on the built-in CMS whatsoever; the CMS editor is simply ONE
+ * caller among possibly several (see `@qu/app-shell`'s `cms-actions.js`
+ * own doc comment on why it stays a thin, replaceable "reference editor,"
+ * not the only possible one).
+ *
+ * `sources` is `Array<{type: string, ...params}>` - PLAIN data, the same
+ * "no separate per-item Kind-Schema, just plain objects in a field"
+ * shape `groupKind.members`/`platformAppsKind.apps` already use - each
+ * entry's `type` is looked up in `view-sources.js`'s own
+ * `VIEW_SOURCE_ADAPTERS` registry at RESOLVE time (never at write time -
+ * writing a View never needs to import/know about the Kind-Schemas its
+ * OWN sources happen to use, only their `type` name and params).
+ * `itemTemplate` is ordinary Template-shaped HTML (`<qu-slot name="...">`
+ * placeholders, the EXACT SAME mechanism `@qu/app-renderer`'s `slots.js`
+ * already fills for a Page's own template) stamped ONCE PER RESOLVED
+ * ITEM, not once per View - see `view-sources.js`'s own doc comment for
+ * which slot names a given source type fills (`title`/`excerpt`/`route`/
+ * `timestamp` for the two built-in adapters).
+ */
+export const viewKind = defineKind('qu-view', {
+  fields: {
+    sources: { shape: 'atomic', visibility: 'public' }, // Array<{type: string, ...params}> - see view-sources.js.
+    sortBy: { shape: 'atomic', visibility: 'public' }, // 'title'|'timestamp'|null - null means "source order, sources in list order".
+    sortOrder: { shape: 'atomic', visibility: 'public' }, // 'asc'|'desc'
+    limit: { shape: 'atomic', visibility: 'public' }, // number|null
+    itemTemplate: { shape: 'text', visibility: 'public' },
+  },
+  acl: { write: 'content' },
+});
+
+/**
  * GLOBAL APP CONTENT (architecture.md §7, REVISED TWICE — first "One relay
  * Space, not two" folded the built-in admin console into the ordinary main
  * Space instead of a separate confidential realm; this revision

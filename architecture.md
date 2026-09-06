@@ -1750,3 +1750,128 @@ very first write. See `packages/app-core/test/group-private-content.test.js`
 for all of the above proven end-to-end over a real in-process relay
 (genuine ACL/encryption enforcement, not a local simulation), and
 `dev.js`'s own `editPrivatePage()` doc comment for the full "why" inline.
+
+**Shared lists (a guestbook) and Views (a Drupal-Views-style live feed
+combining several content sources) - both deliberately REUSABLE by ANY
+app, not CMS-specific:** two more content primitives, prompted by "wäre
+ein Gästebuch/Blog überhaupt eine eigene App, oder nur Pages mit
+Templates?" (the user's own question) and "CMS-Infrastruktur und Views
+sollen auch in Apps wiederverwendbar sein - später auch ein Forum, ein
+Live-Ticker, GeoChase" (the user's own stated direction). Both answers
+turned out to be "no new app-execution mechanism needed at all" - the
+missing pieces were two small, generic Kind-Schemas plus a way to merge
+several of them, not a bigger "app modules" architecture (see this
+document's own still-open question on that below).
+
+- **A genuine guestbook needs `acl.write: 'members'`, not `'content'`**:
+  `defineCollectionKind()` (this document's own "Structured page data and
+  Collections" section, above) is `acl.write: 'content'` - ONE identity
+  curating MANY items it each individually owns (right for "an app-admin's
+  own blog posts," the user's own insight that "Blog wäre ggf. nur der
+  Klebstoff" over ordinary Pages + a route-registry-filtered `<qu-list>`,
+  no new Kind needed at all). A guestbook is the opposite shape: MANY
+  DIFFERENT visitors each contributing their OWN entry to ONE shared list.
+  `@qu/app-core`'s new `sharedListKind` (`kinds.js`) is `acl.write:
+  'members'` with a single append-only `entries` list field of
+  caller-defined plain objects (the SAME "no separate per-item Kind-Schema"
+  shape `groupKind.members`/`platformAppsKind.apps` already use) - Yjs
+  arrays merge concurrent inserts from DIFFERENT authors natively, so many
+  strangers `.push()`ing at once needs no relay-side coordination at all.
+  ONE Kind, MANY independent lists: `sharedListAnchor(name)` derives a
+  fixed, per-NAME, non-cryptographic anchor (the same idea
+  `globalAppAnchor(prefix)` already uses one section up) so a deployment
+  can run as many named lists as it wants (a guestbook, a feedback box, ...)
+  without colliding. `dev.js`'s `pushToSharedList(space, name, entry)` is
+  the whole write-side API; `ContentResolver.resolveSharedList(name)` reads
+  it back, `[]` both for "genuinely empty" and "never used" (unlike every
+  OTHER resolver here, an empty list is a valid final answer, not a "not
+  synced yet" signal - see its own doc comment on why it gates on
+  `isNodeSynced()` instead of "wait for a non-empty value"). A relay must
+  be told every shared-list NAME it should recognize up front
+  (`createAppResolveKindSchema({sharedListNames: ['guestbook']})`) - unlike
+  every other Kind here, a shared list's id is anchored on a HASH OF THE
+  NAME, not a real signer's own pubkey, so there is no `claimedPub`-based
+  dynamic classification fallback possible for it (see `relay-resolver.js`'s
+  own doc comment).
+- **Views (`viewKind`, `view-sources.js`) - "user-feed combines Blog +
+  Gästebuch" (the user's own example), a Drupal-Views-style live,
+  aggregated feed**: a View Node (`acl.write: 'content'`, the SAME
+  self-owned shape templates/styles already use) holds a small RECIPE -
+  `sources` (`Array<{type, ...params}>`, PLAIN data), `sortBy`/`sortOrder`/
+  `limit`, and an `itemTemplate` (ordinary `<qu-slot>`-based HTML, the
+  EXACT SAME mechanism `@qu/app-renderer`'s `slots.js` already fills for a
+  Page's own template, stamped once PER RESOLVED ITEM). `view-sources.js`'s
+  `VIEW_SOURCE_ADAPTERS` maps a source `type` string to the actual
+  `@qu/space-core` calls needed to read + observe it, normalizing EVERY
+  source to the same `{title, excerpt, route, timestamp, raw}` shape so
+  totally different Kinds (a `qu-route-registry` entry, a `sharedListKind`
+  entry) can be merged into one feed. Two adapters ship for now - `'pages'`
+  (routes under an optional `prefix` - "a blog is just pages under
+  `/blog/`") and `'shared-list'` (any named `sharedListKind`); a
+  `'collection'` adapter is real, natural, NOT-YET-BUILT future work - a
+  Collection's `itemKind`/`registryKind` are actual Kind-Schema OBJECTS a
+  View's own plain-data `sources` field cannot reference by name alone,
+  needing a caller-supplied lookup table, a separate piece of plumbing.
+  `view-sources.js`'s `openLiveView(space, config)` is what makes this
+  LIVE, not a one-time snapshot (the user's own explicit choice for v1,
+  over a simpler snapshot-on-load alternative): it opens every source's
+  own `Space.useNode()`+field subscription and keeps them ALL open,
+  recomputing the merged/sorted/limited result whenever ANY ONE fires,
+  returning `{toArray, observe, close}` - deliberately the EXACT interface
+  `@qu/space-core`'s own `ListField` already exposes, so `@qu/space-ui`'s
+  existing `bindList()` (unmodified) can bind straight to it with zero
+  adapter code, as if it were one ordinary list Field. NOT watched live: the
+  View's OWN definition Node - editing a View's `sources`/`itemTemplate`
+  only takes effect on the NEXT resolve, same as any other Space content
+  edit never hot-reloading an already-rendered page (`openLiveView()`'s own
+  doc comment).
+- **Rendering lives in `@qu/app-shell`, deliberately NOT `@qu/app-renderer`**:
+  `@qu/app-renderer` is a pure "already-resolved plan -> DOM" renderer with
+  ZERO dependency on `@qu/space-core`/`@qu/app-core` (turns plain
+  `{templateHtml, page}` data into markup, nothing more) - giving it its
+  own live Space subscriptions would invert that layering. `@qu/app-shell`'s
+  new `view-actions.js` (`wireViews()`) is the SAME "framework interactivity
+  attaches to inert markup by attribute convention" posture
+  `cms-actions.js`/`admin-actions.js` already use, just for a READ-side
+  concern (`[data-qu-view="name"]` -> a live feed) instead of a write-side
+  one (an editor form) - `boot.js` calls it unconditionally after EVERY
+  `renderPage()`, for every app/realm (a `realm: 'global'` app's `GLOBAL_KINDS`
+  gained a `routeRegistryKind: adminRouteRegistryKind` entry specifically
+  so its OWN Views resolve routes against the right registry) - a correct
+  no-op whenever the rendered page has no `[data-qu-view]` element,
+  regardless of which app produced it. Unlike `wireCms()`'s forms (inert
+  DOM listeners only), `openLiveView()` holds REAL `Space` subscriptions
+  open - `wireViews()` tracks what it opened per `mountEl` and closes that
+  batch FIRST on every re-wiring (a route change), so navigating around
+  never accumulates one leaked subscription set per page visited.
+- **Authoring is a SEPARATE, swappable concern from rendering - "editors
+  as plugins," the user's own stated future direction, not built as a full
+  plugin mechanism yet, but left room for**: `cms-actions.js`'s new
+  `wireViewEditor()` is explicitly documented as ONE REFERENCE editor for
+  `viewKind`, calling the exact same app-agnostic `createView()`/
+  `editView()` Dev API any OTHER app (a future Forum, Live-Ticker,
+  GeoChase) could call from its own UI without touching `cms-actions.js`
+  at all - the same point `kinds.js`'s own `viewKind` doc comment makes
+  from the data side. No browseable list (unlike templates/styles/pages) -
+  a View has no "list every View this owner has" registry yet (real,
+  separate future work), so editing an existing one means typing its exact
+  name and clicking "Laden" rather than picking it off a list. Skipped
+  entirely for `realm: 'global'` apps, the SAME deliberate cut
+  `wireTemplates()`/`wireStyles()` already make for the identical reason:
+  `viewKind` is `acl.write: 'content'`, self-certifying to the CREATING
+  identity - there is no `qu-admin-view` counterpart yet for a global app's
+  `'relay-admins'`-owned content.
+
+**Still an open question, deliberately not decided in this pass**: apps
+whose EXECUTION LOGIC (not just content) lives in the filesystem/repo
+itself (`/packages/app-modules/<Name>/`, administratively enabled via
+`#/admin/*`, like QuV3) - raised by the user alongside the two primitives
+above, then set aside once Blog/Guestbook/a combined feed turned out to
+need no new execution mechanism at all. Structurally this is closer to a
+NEW, "deployment-trusted" tier alongside the docs' existing three-tier
+model (§17-18's Stufe 1 Content / Stufe 2 Trusted Components / Stufe 3
+signed Executable Modules, none of which fit: the code would arrive via
+the relay operator's OWN deployment, never fetched from Space content at
+all, so Stufe 3's whole "Space-writable `qu-security-policy` trust policy"
+premise doesn't apply) than a variant of any of the three - real, open
+design work, not started.
