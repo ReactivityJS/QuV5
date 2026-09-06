@@ -555,6 +555,10 @@ full design (including what's deliberately not built yet - a `'collection'`
 source adapter, and watching a View's own definition live) and
 `packages/app-core/test/{shared-list,views}.test.js` /
 `packages/app-shell/test/{view-actions,view-editor}.test.js` for proof.
+**`docs/example-apps.md`** walks through four full worked examples built
+on exactly these two primitives - a Guestbook, a Blog, a Forum (topics +
+per-topic replies), and a simple public Chat - none of which need a new
+Kind-Schema.
 
 ## Deploying the legacy chat relay
 

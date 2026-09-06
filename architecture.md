@@ -1862,6 +1862,15 @@ document's own still-open question on that below).
   identity - there is no `qu-admin-view` counterpart yet for a global app's
   `'relay-admins'`-owned content.
 
+**See `docs/example-apps.md`** for four full worked examples built on
+exactly `sharedListKind`/`viewKind`/ordinary pages - a Guestbook, a Blog,
+a Forum (topics + one more named shared list per topic for its replies),
+and a simple public Chat - proving none of the four need a new Kind-Schema
+or any app-specific execution logic at all, the concrete evidence behind
+this document's own still-open "app modules" question just below: that
+question is about apps that DO need real execution logic (game rules, a
+Live-Ticker's own scoring), a genuinely different class from these four.
+
 **Still an open question, deliberately not decided in this pass**: apps
 whose EXECUTION LOGIC (not just content) lives in the filesystem/repo
 itself (`/packages/app-modules/<Name>/`, administratively enabled via
