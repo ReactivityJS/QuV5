@@ -16,7 +16,7 @@ export async function installBlog(space, { prefix }) {
     content: `<h1>Blog</h1>
 <form data-qu-action="blog-post-form">
   <label>Titel: <input name="title" required></label><br>
-  <label>Route (z.B. "erster-post", nur Kleinbuchstaben/Zahlen/Bindestriche): <input name="slug" required pattern="[a-z0-9-]+"></label><br>
+  <label>Route (z.B. "erster-post", nur Kleinbuchstaben/Zahlen/Bindestriche): <input name="slug" required pattern="[a-z0-9\-]+"></label><br>
   <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required></textarea></label><br>
   <button type="submit">Veröffentlichen</button>
   <p data-qu-status></p>
