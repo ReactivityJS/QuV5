@@ -12,7 +12,7 @@
  * them and hand it here - this function knows nothing about HOW it was
  * built, only that it behaves like one.
  */
-import { AppRuntime, HashRouter, PlatformRuntime, ContentResolver, createApp, appManifestKind, adminAppManifestKind, adminPageKind, adminTemplateKind, adminStyleKind, adminRouteRegistryKind, globalAppAnchor } from '@qu/app-core';
+import { AppRuntime, HashRouter, PlatformRuntime, ContentResolver, createApp, appManifestKind, adminAppManifestKind, adminPageKind, adminTemplateKind, adminStyleKind, adminRouteRegistryKind, adminViewKind, globalAppAnchor } from '@qu/app-core';
 import { QuCrypto } from '@qu/core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { renderPage } from '@qu/app-renderer';
@@ -34,7 +34,14 @@ import { installCms } from '../cms-bundle.js';
  * (wrong ACL mode entirely for a global app); `AppRuntime.resolveRoute()`
  * itself still never touches this key.
  */
-const GLOBAL_KINDS = { appManifestKind: adminAppManifestKind, pageKind: adminPageKind, templateKind: adminTemplateKind, styleKind: adminStyleKind, routeRegistryKind: adminRouteRegistryKind };
+const GLOBAL_KINDS = {
+  appManifestKind: adminAppManifestKind,
+  pageKind: adminPageKind,
+  templateKind: adminTemplateKind,
+  styleKind: adminStyleKind,
+  routeRegistryKind: adminRouteRegistryKind,
+  viewKind: adminViewKind,
+};
 
 /** @param {{mountEl: Element, doc: Document, platform: PlatformRuntime, space: import('@qu/space-core').Space}} params - shown when no registered app's prefix (nor a well-formed owner id) matches the current route. The one piece of `startPlatform()` UI that ISN'T Qu content: by definition nothing here resolved, so there is no content to fetch it from - same "Framework Default" posture `@qu/app-renderer` already takes for a single app's own unresolved routes. */
 async function renderLandingPage({ mountEl, doc, platform, space }) {

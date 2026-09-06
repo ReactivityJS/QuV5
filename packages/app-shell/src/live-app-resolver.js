@@ -154,10 +154,19 @@ export function createLiveAppResolveKindSchema({ collectionRegistryKinds = [] } 
         .map((a) => a.appAdminPub)
         .filter(Boolean)
         .map((b64) => QuCrypto.fromBase64(b64));
+      // `globalViewNames`, unlike `pageRoutes` above, has no registry of its own to watch live
+      // (`dev.js`'s `registerApp()` own doc comment on why) - it's read straight off each app's
+      // OWN `qu-platform-apps` entry instead, same as `sharedLists` below. Last entry per prefix
+      // wins, same "last write wins" convention `platform.js`'s `resolveApps()` already uses.
+      const globalViewNamesByPrefix = new Map();
+      for (const app of apps) {
+        if (app?.realm === 'global' && app.globalViewNames?.length) globalViewNamesByPrefix.set(app.prefix, app.globalViewNames);
+      }
       const globalApps = [...watchedPrefixes].map((prefix) => ({
         prefix,
         templateNames: KNOWN_GLOBAL_TEMPLATE_NAMES[prefix] ?? [],
         pageRoutes: (globalPageRoutesByPrefix.get(prefix) ?? []).filter(Boolean).map((r) => r.route),
+        viewNames: globalViewNamesByPrefix.get(prefix) ?? [],
       }));
       // See `dev.js`'s `registerApp()` own doc comment on `sharedLists` - the SAME "no relay
       // restart needed" fix `appAdminPubs`/`globalApps` above already give `'named'`/`'relay-admins'`

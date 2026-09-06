@@ -27,6 +27,9 @@
  *     re-rendered after every mode change (`renderList()` below, not just
  *     once at wiring time any more - a mode toggle needs to visibly reflect
  *     its own effect without a full page reload).
+ *   - A "Besuchen" link (`#/<prefix>/`) on EVERY entry, main or global -
+ *     visiting the bare prefix already works regardless of realm, this is
+ *     just a discoverable shortcut instead of typing the URL by hand.
  *   - PER-APP CONTROLS, `realm: 'global'` entries only (kinds.js's own doc
  *     comment on the three administrable states - `mode` has no meaning for
  *     a `realm: 'main'` app, single-owner apps were never relay-toggleable
@@ -52,10 +55,12 @@
  * gate keeps `#/admin/...` from rendering for them at all.
  */
 import { QuCrypto } from '@qu/core';
-import { registerApp, setAppMode } from '@qu/app-core';
+import { registerApp, setAppMode, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
+import { deriveOwnerNodeId } from '@qu/space-core';
 import { installGuestbook } from '../guestbook-bundle.js';
 import { installBlog } from '../blog-bundle.js';
 import { installForum } from '../forum-bundle.js';
+import { verifyWritesAcked } from './verify-writes.js';
 
 const MODE_LABELS = { off: 'Aus', global: 'Global', multiuser: 'Multi-User' };
 
@@ -67,24 +72,32 @@ const MODE_LABELS = { off: 'Aus', global: 'Global', multiuser: 'Multi-User' };
  * why: a `'members'`-ACL shared list's name has to be known to the relay
  * BEFORE any write to it can be classified, and these apps' shared lists
  * are only chosen here, at install time, under a relay-admin-picked
- * prefix - unlike `pageKind`/`viewKind`, which are self-certifying and need
- * no such registration). `label` doubles as the registered app's `name`.
+ * prefix). `label` doubles as the registered app's `name`.
  *
- * Installs into `mainSpace` - the SAME identity/Space this admin console
- * itself runs as (`wireAdminConsole()`'s own `mainSpace` param) - never a
- * fresh, bespoke identity per app: `createPage()`/`createView()`/
- * `pushToSharedList()` are all self-certified against WHOEVER calls them
- * (`'content'`-ACL) or ACL-gated only by relay-side group membership
- * (`'members'`-ACL), never by a specific "this app's own identity" concept -
- * exactly the same posture `ensureSelfProvisioned()` (`boot.js`) already
- * takes for a visitor's own self-provisioned space. `realm: 'main'`
- * (`registerApp()`'s own default) - these are ordinary single-owner apps,
- * not relay-toggleable `mode`-bearing `realm: 'global'` ones.
+ * `realm: 'global'`, NOT the default `realm: 'main'` - the SAME identity
+ * (whoever is currently signed in as a relay-admin, running this form) is
+ * what would otherwise install EVERY one of these reference apps, and a
+ * `realm: 'main'` app is content-addressed by (owner identity, kind, path)
+ * alone - installing Gästebuch, Blog, AND Forum this way would derive the
+ * EXACT SAME id for every one of their own index pages, each install
+ * silently clobbering the last (a real, observed bug: all three prefixes
+ * ending up showing whichever app's write happened to win). `realm:
+ * 'global'` apps are anchored on their own PREFIX instead
+ * (`globalAppAnchor()`, `guestbook-bundle.js`'s own top doc comment has the
+ * full story) - collision-free by construction, no matter how many are
+ * installed from the same session - and, as a bonus, they get the SAME
+ * mode toggle (`MODE_LABELS` below) and "Verwalten"/"Besuchen" links every
+ * other global app already has, for free.
  */
 const APP_INSTALLERS = {
-  guestbook: { label: 'Gästebuch', install: installGuestbook, sharedLists: (prefix) => [prefix] },
-  blog: { label: 'Blog', install: installBlog, sharedLists: () => [] },
-  forum: { label: 'Forum', install: installForum, sharedLists: (prefix) => [`${prefix}:topics`, `${prefix}:replies`] },
+  guestbook: { label: 'Gästebuch', install: installGuestbook, sharedLists: (prefix) => [prefix], viewNames: (prefix) => [`${prefix}-feed`] },
+  blog: { label: 'Blog', install: installBlog, sharedLists: () => [], viewNames: (prefix) => [`${prefix}-index`] },
+  forum: {
+    label: 'Forum',
+    install: installForum,
+    sharedLists: (prefix) => [`${prefix}:topics`, `${prefix}:replies`],
+    viewNames: (prefix) => [`${prefix}-topics`],
+  },
 };
 
 /** @param {{mountEl: Element, doc: Document, mainSpace: import('@qu/space-core').Space, platform: import('@qu/app-core').PlatformRuntime}} params */
@@ -108,6 +121,15 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
       const owner = isGlobal ? `Global (${MODE_LABELS[app.mode ?? 'global']})` : `${QuCrypto.toBase64(app.appAdminPub).slice(0, 20)}…`;
       info.textContent = `#/${app.prefix} — ${app.name ?? '(unbenannt)'} (${owner}) `;
       li.appendChild(info);
+
+      // Direct link to the app itself, for EVERY entry, main or global - visiting the bare prefix
+      // already works regardless of realm (`boot.js`'s own dispatch never special-cases either),
+      // this was previously only ever reachable by typing the URL by hand.
+      const visitLink = doc.createElement('a');
+      visitLink.href = `#/${app.prefix}/`;
+      visitLink.textContent = 'Besuchen';
+      visitLink.style.marginRight = '0.5rem';
+      li.appendChild(visitLink);
 
       if (isGlobal) {
         const manageLink = doc.createElement('a');
@@ -182,13 +204,26 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
       status.textContent = '';
       try {
         const prefix = form.querySelector('input[name="prefix"]').value.trim();
+        // REGISTER FIRST, THEN INSTALL - never the other way round: the relay only classifies THIS
+        // app's own `adminPage`/`adminView`/shared-list writes correctly (`'relay-admins'`/`'members'`
+        // -ACL) once its live resolver has observed this `qu-platform-apps` entry
+        // (`@qu/app-shell`'s `live-app-resolver.js`) - installing first would have every one of
+        // `installer.install()`'s own writes silently misclassified against the generic
+        // `pageKind`('content'-ACL, grant-only) fallback and rejected, exactly the same
+        // "register/publish before seeding" ordering `bin/bootstrap-platform.mjs` already uses for
+        // the built-in admin console/cms apps themselves.
+        const platformId = await deriveOwnerNodeId(PLATFORM_REGISTRY_ANCHOR, platformAppsKind.kind);
+        await verifyWritesAcked(mainSpace, platformId, () =>
+          registerApp(mainSpace, {
+            prefix,
+            realm: 'global',
+            name: installer.label,
+            sharedLists: installer.sharedLists(prefix),
+            globalViewNames: installer.viewNames(prefix),
+          })
+        );
+        await new Promise((resolve) => setTimeout(resolve, 400)); // let the relay's live resolver start watching this app's own route registry/shared lists/View names.
         await installer.install(mainSpace, { prefix });
-        await registerApp(mainSpace, {
-          prefix,
-          appAdminPub: mainSpace.identity.signingPub,
-          name: installer.label,
-          sharedLists: installer.sharedLists(prefix),
-        });
         status.textContent = `${installer.label} installiert - erreichbar unter #/${prefix}/.`;
         form.reset();
         await renderList();

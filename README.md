@@ -564,14 +564,26 @@ Kind-Schema.
 sketches** - the admin console's own "Beispiel-App installieren" form
 (`#/admin`) seeds a fully working instance of any of the three under a
 prefix you choose (`admin-actions.js`'s `APP_INSTALLERS`), live at
-`#/<prefix>/` immediately. The content lives in `packages/app-shell/`'s
+`#/<prefix>/` immediately, with a "Besuchen" link and the SAME
+Aus/Global/Multi-User mode toggle every other global app gets ("Three
+administrable states," above) - all three are `realm: 'global'` apps,
+anchored on their own prefix (`globalAppAnchor()`, `kinds.js`'s own
+`adminViewKind` doc comment), never a `realm: 'main'` one owned by a single
+identity: installing several of these from the SAME admin session that way
+used to collide at one shared content-addressed id per index page, a real,
+fixed bug. The content lives in `packages/app-shell/`'s
 `guestbook-bundle.js`/`blog-bundle.js`/`forum-bundle.js`; the interactivity
 (signing the guestbook, publishing a post, starting a topic/replying) in
 the matching `src/guestbook-actions.js`/`src/blog-actions.js`/
 `src/forum-actions.js`, aggregated by `src/installed-apps-actions.js` so
 `boot.js` only needs one call per render site regardless of how many such
-apps exist. `packages/app-shell/test/installed-apps.test.js` proves all
-three end to end, plus the installer form itself.
+apps exist. Forum's topics/replies are `'members'`-ACL shared-list entries
+only, never a separate page per topic - any Space member can start one and
+reply, rendered as in-page client state rather than a bookmarkable
+per-topic route (`forum-bundle.js`'s own top doc comment has the full "why
+not a `qu-page`" reasoning). `packages/app-shell/test/installed-apps.test.js`
+proves all three end to end through the real admin-console installer over
+a real relay, plus the installer form itself.
 
 ## Deploying the legacy chat relay
 

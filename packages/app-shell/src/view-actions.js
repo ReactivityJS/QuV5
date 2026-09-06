@@ -67,8 +67,22 @@ function renderItem(item, itemTemplate, doc) {
   // and this framework code (never content-authored `onclick`, so Stufe 1 is untouched) sets its
   // `href` directly, same "trusted code wires a plain element a content author declared by
   // attribute" posture as every other framework-provided interactivity in this package.
+  const links = wrapper.querySelectorAll('[data-qu-view-link]');
   if (item.route) {
-    for (const link of wrapper.querySelectorAll('[data-qu-view-link]')) link.setAttribute('href', `#${item.route}`);
+    for (const link of links) link.setAttribute('href', `#${item.route}`);
+  }
+  // Every SCALAR field of the source's own raw item (e.g. a shared-list entry's own `topicId`) is
+  // ALSO exposed as a `data-*` attribute on `[data-qu-view-link]` - not just `title`/`excerpt`/
+  // `route`. Needed for an item that has no meaningful ROUTE of its own (`@qu/app-shell`'s
+  // `forum-actions.js` own doc comment: a Forum topic is `'members'`-ACL shared-list data, not a
+  // `'content'`-ACL page any member could actually own - so it can never be a real, resolvable
+  // route) but still needs its OWN identifying key back once a visitor clicks it, for whatever
+  // framework-provided interactivity (never content-authored `onclick`) reads it from there.
+  if (item.raw && typeof item.raw === 'object') {
+    for (const [key, value] of Object.entries(item.raw)) {
+      if (value === null || typeof value === 'object') continue; // lists/objects have no single attribute-string form worth exposing this way.
+      for (const link of links) link.dataset[key] = String(value);
+    }
   }
   return wrapper;
 }

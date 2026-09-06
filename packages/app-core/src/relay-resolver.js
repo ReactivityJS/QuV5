@@ -106,13 +106,14 @@ import {
   adminTemplateKind,
   adminStyleKind,
   adminRouteRegistryKind,
+  adminViewKind,
   globalAppAnchor,
   sharedListKind,
   sharedListAnchor,
 } from './kinds.js';
 
 /**
- * @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], collectionRegistryKinds?: object[], globalApps?: Array<{prefix: string, templateNames?: string[], pageRoutes?: string[], styleNames?: string[]}>, sharedListNames?: string[]}} params
+ * @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], collectionRegistryKinds?: object[], globalApps?: Array<{prefix: string, templateNames?: string[], pageRoutes?: string[], styleNames?: string[], viewNames?: string[]}>, sharedListNames?: string[]}} params
  *   `appAdminPub` (singular) is a convenience alias for `appAdminPubs: [appAdminPub]`.
  *   `collectionRegistryKinds` - every Collection's `registryKind` this relay
  *   should recognize (see this file's own top doc comment on "COLLECTIONS") -
@@ -128,7 +129,15 @@ import {
  *   name a deployment actually uses must be listed here explicitly, or its
  *   writes silently fall through to the generic `pageKind` ('content'-ACL,
  *   grant-only) fallback below and get rejected outright (no grant exists,
- *   because 'members'-ACL never needed one).
+ *   because 'members'-ACL never needed one). A `globalApps` entry's own
+ *   `viewNames` (optional) is the SAME idea one Kind over, for
+ *   `adminViewKind` (`kinds.js`'s own doc comment on it): a global app's
+ *   View has no registry of its own to enumerate it FROM (unlike
+ *   `pageRoutes`, discoverable live via `adminRouteRegistryKind`), so its
+ *   name must be told here explicitly too - `dev.js`'s `registerApp()` own
+ *   `globalViewNames` param is where a caller supplies it,
+ *   `@qu/app-shell`'s `live-app-resolver.js` threading it through from
+ *   there into this same `globalApps` shape.
  * @returns {Promise<(nodeId: string) => object>}
  */
 export async function createAppResolveKindSchema({
@@ -150,13 +159,15 @@ export async function createAppResolveKindSchema({
   const globalPageIds = new Set();
   const globalStyleIds = new Set();
   const globalRouteRegistryIds = new Set();
-  for (const { prefix, templateNames = [], pageRoutes = [], styleNames = [] } of globalApps) {
+  const globalViewIds = new Set();
+  for (const { prefix, templateNames = [], pageRoutes = [], styleNames = [], viewNames = [] } of globalApps) {
     const anchor = await globalAppAnchor(prefix);
     globalManifestIds.add(await deriveOwnerNodeId(anchor, adminAppManifestKind.kind));
     globalRouteRegistryIds.add(await deriveOwnerNodeId(anchor, adminRouteRegistryKind.kind));
     for (const name of templateNames) globalTemplateIds.add(await deriveContentNodeId(anchor, adminTemplateKind.kind, name));
     for (const route of pageRoutes) globalPageIds.add(await deriveContentNodeId(anchor, adminPageKind.kind, route));
     for (const name of styleNames) globalStyleIds.add(await deriveContentNodeId(anchor, adminStyleKind.kind, name));
+    for (const name of viewNames) globalViewIds.add(await deriveContentNodeId(anchor, adminViewKind.kind, name));
   }
 
   const collectionRegistryById = new Map();
@@ -176,6 +187,7 @@ export async function createAppResolveKindSchema({
     if (globalTemplateIds.has(nodeId)) return adminTemplateKind;
     if (globalPageIds.has(nodeId)) return adminPageKind;
     if (globalStyleIds.has(nodeId)) return adminStyleKind;
+    if (globalViewIds.has(nodeId)) return adminViewKind;
     if (manifestIds.has(nodeId)) return appManifestKind;
     if (registryIds.has(nodeId)) return routeRegistryKind;
     if (templateRegistryIds.has(nodeId)) return templateRegistryKind;

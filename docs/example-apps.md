@@ -47,6 +47,29 @@ features as reusable building blocks" - the reason the View-rendering code
 lives in `@qu/app-shell` rather than baked into the CMS). Chat (§4) remains a
 sketch only - no installable bundle exists for it yet.
 
+**Two corrections the SHIPPED bundles make that the sketches below still
+predate:**
+- **All three are `realm: 'global'` apps, anchored on their own prefix
+  (`globalAppAnchor()`, `kinds.js`'s own `adminViewKind` doc comment), NOT
+  self-owned `realm: 'main'` ones.** Installing several of these reference
+  apps from the SAME admin session (the relay-admin's own identity) as
+  `realm: 'main'` apps used to derive the exact SAME content-addressed id
+  for every one of their own index pages - a real, observed bug (every
+  prefix silently showing whichever app's write won that shared slot).
+  Anchoring on the prefix instead gives each install its own, collision-free
+  namespace, and comes with the admin console's existing mode toggle
+  (Aus/Global/Multi-User) and "Verwalten"/"Besuchen" links for free.
+- **Forum's topics/replies (§3) are `'members'`-ACL shared-list entries
+  ONLY - never a separate `qu-page` per topic**, unlike the sketch below.
+  A `qu-page` (self-owned or `'relay-admins'`-owned) can only ever be
+  written by its own owner or a relay-admin - "any Space member can start a
+  topic," a forum's whole point, is impossible to build on it. The shipped
+  `forum-bundle.js`/`forum-actions.js` store a topic's full title/author/body
+  directly in its own `${prefix}:topics` entry and render "open topic X" as
+  in-page client state (no separate route) - see `forum-bundle.js`'s own top
+  doc comment for the full reasoning and the resulting trade-off (no
+  bookmarkable per-topic URL).
+
 ## 1. Guestbook
 
 The reference case `sharedListKind` was built for - see architecture.md's

@@ -112,8 +112,11 @@ import {
   adminRouteRegistryKind,
   globalAppAnchor,
   viewKind,
+  adminViewKind,
   createView,
   editView,
+  createGlobalView,
+  editGlobalView,
 } from '@qu/app-core';
 import { verifyWritesAcked } from './verify-writes.js';
 import { deriveOwnerNodeId } from '@qu/space-core';
@@ -516,22 +519,27 @@ async function wirePages({ mountEl, doc, space, resolver, global = false, prefix
  * `sources` is edited as raw JSON text (`[{"type":"pages","prefix":"/blog/"},
  * {"type":"shared-list","name":"guestbook"}]`) - the SAME "structured data
  * as a JSON textarea" convention `wirePages()`'s own `data` field already
- * uses below, not a new UI paradigm. GLOBAL apps are skipped entirely
- * (`if (global) return;`), the SAME deliberate cut `wireTemplates()`/
- * `wireStyles()` already make: `viewKind` is `acl.write: 'content'`
- * (self-certifying to the CREATING identity, `Space.createNode()`'s own
- * doc comment on why that mode never takes an external owner anchor) -
- * there is no `qu-admin-view` counterpart yet for a global app's
- * `'relay-admins'`-owned content, real future work if ever needed.
+ * uses below, not a new UI paradigm.
+ *
+ * GLOBAL MODE uses `adminViewKind`/`createGlobalView()`/`editGlobalView()`
+ * (`kinds.js`'s own `adminViewKind` doc comment on why that Kind exists at
+ * all) instead of the self-owned `viewKind`/`createView()`/`editView()` -
+ * the SAME `pageKind`-vs-`adminPageKind` branch `wirePages()` already makes,
+ * mirrored here now that a global counterpart exists (previously a
+ * documented, deliberate no-op - `if (global) return;` - not any more).
+ * Creating a NEW, routed View in global mode follows `wirePages()`'s own
+ * "publish the route, THEN create the page" ordering too - `createGlobalView()`
+ * already bakes that in, see its own doc comment.
  */
-async function wireViewEditor({ mountEl, doc, space, global, ownerPub }) {
-  if (global) return;
+async function wireViewEditor({ mountEl, doc, space, global = false, prefix, ownerPub }) {
   const form = mountEl.querySelector('form[data-qu-action="cms-view-form"]');
   if (!form) return;
   const loadBtn = mountEl.querySelector('[data-qu-action="cms-view-load"]');
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="view"]');
-  const resolver = new ContentResolver(space, { appAdminPub: ownerPub });
+  const resolver = new ContentResolver(space, { appAdminPub: ownerPub, kinds: global ? { viewKind: adminViewKind } : undefined });
+  const viewKindHere = global ? adminViewKind : viewKind;
   let activeEdit = null;
+  let anchor; // assigned below, after every listener is attached - see wirePages()'s own top doc comment on why.
 
   if (loadBtn) {
     loadBtn.addEventListener('click', async () => {
@@ -543,7 +551,7 @@ async function wireViewEditor({ mountEl, doc, space, global, ownerPub }) {
         setStatus(form, `Keine View namens "${name}" gefunden.`);
         return;
       }
-      activeEdit = await holdEdit(space, viewKind, name, activeEdit, ownerPub);
+      activeEdit = await holdEdit(space, viewKindHere, name, activeEdit, anchor);
       enterEditMode(form, {
         keyFieldName: 'name',
         keyValue: name,
@@ -574,8 +582,14 @@ async function wireViewEditor({ mountEl, doc, space, global, ownerPub }) {
       const limitRaw = form.querySelector('[name="limit"]').value.trim();
       const limit = limitRaw ? Number(limitRaw) : null;
       const itemTemplate = form.querySelector('[name="itemTemplate"]').value;
-      const id = await deriveContentNodeId(ownerPub, viewKind.kind, name);
-      if (mode === 'edit') {
+      const id = await deriveContentNodeId(anchor, viewKindHere.kind, name);
+      if (global) {
+        if (mode === 'edit') {
+          await verifyWritesAcked(space, id, () => editGlobalView(space, prefix, { name, route, template, sources, sortBy, sortOrder, limit, itemTemplate, timeout: 2000 }));
+        } else {
+          await verifyWritesAcked(space, id, () => createGlobalView(space, prefix, { name, route, template, sources, sortBy, sortOrder, limit, itemTemplate }));
+        }
+      } else if (mode === 'edit') {
         await verifyWritesAcked(space, id, () => editView(space, { name, ownerPub, route, template, sources, sortBy, sortOrder, limit, itemTemplate, timeout: 2000 }));
       } else {
         await verifyWritesAcked(space, id, () => createView(space, { name, route, template, sources, sortBy, sortOrder, limit, itemTemplate }));
@@ -593,6 +607,10 @@ async function wireViewEditor({ mountEl, doc, space, global, ownerPub }) {
       resetForm(form, 'name');
     });
   }
+
+  // See wirePages()'s own top doc comment for why this AWAIT happens down here, after every
+  // listener above is already attached, not before.
+  anchor = global ? await globalAppAnchor(prefix) : ownerPub;
 }
 
 /**
@@ -611,7 +629,7 @@ async function wireViewEditor({ mountEl, doc, space, global, ownerPub }) {
  *   own doc comment.
  */
 export async function wireCms({ mountEl, doc, space, appAdminPub, global = false, prefix }) {
-  const resolver = new ContentResolver(space, { appAdminPub, kinds: global ? { pageKind: adminPageKind, routeRegistryKind: adminRouteRegistryKind } : undefined });
+  const resolver = new ContentResolver(space, { appAdminPub, kinds: global ? { pageKind: adminPageKind, routeRegistryKind: adminRouteRegistryKind, viewKind: adminViewKind } : undefined });
   // Non-global only - a global app's writes already target the right id through `prefix`/
   // `globalAppAnchor()` (createGlobalPage()/etc. take no ownerPub at all), so passing appAdminPub
   // (there, `globalAppAnchor(prefix)` - not a real identity) down as `ownerPub` too would be
@@ -621,6 +639,6 @@ export async function wireCms({ mountEl, doc, space, appAdminPub, global = false
     wireTemplates({ mountEl, doc, space, resolver, global, ownerPub }),
     wireStyles({ mountEl, doc, space, resolver, global, ownerPub }),
     wirePages({ mountEl, doc, space, resolver, global, prefix, ownerPub }),
-    wireViewEditor({ mountEl, doc, space, global, ownerPub }),
+    wireViewEditor({ mountEl, doc, space, global, prefix, ownerPub }),
   ]);
 }
