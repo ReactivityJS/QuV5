@@ -38,6 +38,7 @@ import {
   adminTemplateKind,
   adminStyleKind,
   adminRouteRegistryKind,
+  adminViewKind,
   globalAppAnchor,
 } from './kinds.js';
 
@@ -695,7 +696,7 @@ export async function installAppBundle(space, bundle) {
  *   to change it later for an app already registered.
  */
 /**
- * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'global', mode?: string, sharedLists?: string[]}} params
+ * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'global', mode?: string, sharedLists?: string[], globalViewNames?: string[]}} params
  *   `sharedLists` (optional) - every `sharedListKind` NAME (`kinds.js`'s
  *   own doc comment, `pushToSharedList()`) this app's own content uses
  *   (e.g. a Guestbook app registers `[prefix]`, a Forum app registers
@@ -709,8 +710,19 @@ export async function installAppBundle(space, bundle) {
  *   classify a name it was never told about, even dynamically. Omit
  *   entirely for an app that uses no shared lists at all (unchanged
  *   behavior - every existing caller of this function keeps working).
+ *
+ *   `globalViewNames` (optional, `realm: 'global'` only) - every
+ *   `adminViewKind` NAME this global app's own content uses (e.g. a
+ *   Guestbook app registers `[prefix + '-feed']`) - the SAME reasoning as
+ *   `sharedLists` above, one Kind over: unlike `pageRoutes` (discovered
+ *   LIVE by `live-app-resolver.js` watching the app's own route registry,
+ *   `kinds.js`'s own `adminRouteRegistryKind` doc comment), a View has no
+ *   registry of its own to watch (`createView()`'s own doc comment: "no
+ *   'list every View this owner has' registry yet") - so its name has to be
+ *   told to the relay up front, right here, the one place it's already
+ *   known (the installer choosing this app's own fixed set of View names).
  */
-export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode, sharedLists }) {
+export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode, sharedLists, globalViewNames }) {
   // getOrSyncRegistryNode(), not a blind `space.getNode(id) ?? createNode()` - the SAME "never
   // re-createNode() over a Node that already exists, just torn down locally between two calls"
   // reasoning that function's own doc comment already documents for an app's per-owner registries -
@@ -726,6 +738,7 @@ export async function registerApp(space, { prefix, appAdminPub, name, realm = 'm
   const entry = { prefix, appAdminPub: appAdminPub ? QuCrypto.toBase64(appAdminPub) : null, name, realm };
   if (realm === 'global' && mode) entry.mode = mode;
   if (sharedLists?.length) entry.sharedLists = sharedLists;
+  if (realm === 'global' && globalViewNames?.length) entry.globalViewNames = globalViewNames;
   await node.field('apps').push(entry);
   return node;
 }
@@ -909,5 +922,56 @@ export async function publishGlobalRoute(space, prefix, { route, title }) {
   const node = await getOrSyncRegistryNode(space, adminRouteRegistryKind, anchor);
   const existing = await node.field('routes').toArray();
   if (!existing.some((entry) => entry?.route === route)) await node.field('routes').push({ route, title });
+  return node;
+}
+
+/**
+ * Global-app counterpart to `createView()` - `kinds.js`'s own `adminViewKind`
+ * doc comment on why this Kind exists at all (a `realm: 'global'` app's
+ * View, anchored on `globalAppAnchor(prefix)` instead of a real owner
+ * identity, so several independently-installed global apps' Views never
+ * collide the way two `realm: 'main'` apps sharing ONE relay-admin's own
+ * identity would - kinds.js's own doc comment has the full "real, observed
+ * bug" story). Same `route`/`template` auto-wrapper-page behavior as
+ * `createView()`, just through `createGlobalPage()`/`publishGlobalRoute()`
+ * instead of their self-owned counterparts - INCLUDING `wirePages()`'s own
+ * global-mode ORDERING requirement (`@qu/app-shell`'s `cms-actions.js`'s
+ * own doc comment on it, in full): `publishGlobalRoute()` FIRST, a short
+ * settle wait, THEN `createGlobalPage()` - `@qu/app-shell`'s
+ * `live-app-resolver.js` only classifies a global app's page write
+ * correctly once it has observed the route in `adminRouteRegistryKind`;
+ * creating the page first races that reactive rebuild and is silently
+ * rejected (no grant/classification for the id exists yet).
+ * `createView()`'s own "page then route" order is safe ONLY for `realm:
+ * 'main'` apps (self-owned `'content'`-ACL, classified by OWNER alone, no
+ * per-route registration needed) - never copy that order here.
+ */
+export async function createGlobalView(space, prefix, { name, route = null, template = null, sources, sortBy = null, sortOrder = 'desc', limit = null, itemTemplate }) {
+  const anchor = await cachedGlobalAppAnchor(prefix);
+  const id = await deriveContentNodeId(anchor, adminViewKind.kind, name);
+  const node = await space.createNode(adminViewKind, { sources, sortBy, sortOrder, limit, itemTemplate, route, template }, { id });
+  if (route) {
+    await publishGlobalRoute(space, prefix, { route, title: name });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await createGlobalPage(space, prefix, { route, title: name, template, content: `<div data-qu-view="${name}"></div>` });
+  }
+  return node;
+}
+
+/** Global-app counterpart to `editView()` - see `editGlobalTemplate()`'s own doc comment (including the "no rename support"/"never touches the wrapper page" caveats `editView()`'s own doc comment already explains, identical here). */
+export async function editGlobalView(space, prefix, { name, timeout, ...fields } = {}) {
+  const anchor = await cachedGlobalAppAnchor(prefix);
+  const id = await deriveContentNodeId(anchor, adminViewKind.kind, name);
+  const { node, release } = await space.useNode(id, adminViewKind);
+  const synced = await waitForSync(() => node.field('itemTemplate').get() !== '', { timeout });
+  if (!synced) {
+    release();
+    throw new Error(`editGlobalView: view "${name}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalView() for a genuinely new one`);
+  }
+  for (const [key, value] of Object.entries(fields)) {
+    if (key === 'itemTemplate') replaceText(node.field('itemTemplate'), value);
+    else await node.field(key).set(value);
+  }
+  release();
   return node;
 }

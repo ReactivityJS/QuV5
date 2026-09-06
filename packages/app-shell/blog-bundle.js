@@ -1,22 +1,29 @@
 /**
- * THE BLOG APP, AS A PLAIN BUNDLE — `docs/example-apps.md`'s own "§2 Blog"
- * doc comment: no new Kind-Schema at all, a post is an ordinary `qu-page`
- * under `/post/<slug>`, the index is a View over the `'pages'` source
- * adapter (`@qu/app-core`'s `view-sources.js`) filtered to that prefix.
- * `installBlog()` is the "glue" the docs describe - a new-post form plus
- * that index View, nothing more.
+ * THE BLOG APP, AS A PLAIN BUNDLE — `realm: 'global'` (`globalAppAnchor(prefix)`
+ * -anchored), same reasoning as `guestbook-bundle.js`'s own top doc comment
+ * in full: several independently-installed reference apps must never share
+ * one identity's own content namespace. A post is still an ordinary page
+ * (now `qu-admin-page`, `acl.write: 'relay-admins'` instead of the
+ * self-owned `qu-page`) under `/post/<slug>`; the index is still a View
+ * (now `qu-admin-view`) over the `'pages'` source adapter. Practical
+ * consequence of the ACL change: publishing a post is now a RELAY-ADMIN
+ * action (any configured relay-admin, not just whoever ran the installer) -
+ * consistent with every other global app's content, and arguably more
+ * useful than the old "only the exact identity that installed it" default.
  */
-import { createPage, publishRoute, createView } from '@qu/app-core';
+import { createGlobalPage, publishGlobalRoute, createGlobalView } from '@qu/app-core';
 
-/** @param {import('@qu/space-core').Space} space @param {{prefix: string}} params - `prefix` names this install's own View (so several Blog installs under different app prefixes never collide) - it plays no role in post ROUTES themselves (`/post/<slug>` is already app-scoped by `AppRuntime`'s own per-owner namespace). */
+/** @param {import('@qu/space-core').Space} space @param {{prefix: string}} params */
 export async function installBlog(space, { prefix }) {
-  await createPage(space, {
+  await publishGlobalRoute(space, prefix, { route: '/', title: 'Blog' });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  await createGlobalPage(space, prefix, {
     route: '/',
     title: 'Blog',
     content: `<h1>Blog</h1>
-<form data-qu-action="blog-post-form">
+<form data-qu-action="blog-post-form" data-qu-prefix="${prefix}">
   <label>Titel: <input name="title" required></label><br>
-  <label>Route (z.B. "erster-post", nur Kleinbuchstaben/Zahlen/Bindestriche): <input name="slug" required pattern="[a-z0-9\-]+"></label><br>
+  <label>Route (z.B. "erster-post", nur Kleinbuchstaben/Zahlen/Bindestriche): <input name="slug" required pattern="[a-z0-9\\-]+"></label><br>
   <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required></textarea></label><br>
   <button type="submit">Veröffentlichen</button>
   <p data-qu-status></p>
@@ -24,8 +31,7 @@ export async function installBlog(space, { prefix }) {
 <h2>Beiträge</h2>
 <div data-qu-view="${prefix}-index"></div>`,
   });
-  await publishRoute(space, { route: '/', title: 'Blog' });
-  await createView(space, {
+  await createGlobalView(space, prefix, {
     name: `${prefix}-index`,
     sources: [{ type: 'pages', prefix: '/post/' }],
     sortBy: 'title',

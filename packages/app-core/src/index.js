@@ -18,6 +18,7 @@ export {
   adminTemplateKind,
   adminStyleKind,
   adminRouteRegistryKind,
+  adminViewKind,
   globalAppAnchor,
   defineCollectionKind,
 } from './kinds.js';
@@ -48,6 +49,8 @@ export {
   editGlobalStyle,
   editGlobalPage,
   publishGlobalRoute,
+  createGlobalView,
+  editGlobalView,
   createCollectionItem,
   editCollectionItem,
   createGroup,

@@ -229,7 +229,7 @@ export const platformAppsKind = publicMeta(
   defineKind('qu-platform-apps', {
     fields: {
       /**
-       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser', sharedLists?: string[]}>`
+       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser', sharedLists?: string[], globalViewNames?: string[]}>`
        * - see `dev.js`'s `registerApp()`/`setAppMode()`, `platform.js`'s
        * `PlatformRuntime`. `realm: 'global'` entries (`appAdminPub: null`)
        * route into content ANY configured relay-admin collectively
@@ -654,6 +654,41 @@ export const adminRouteRegistryKind = publicMeta(
     fields: {
       /** `Array<{route: string, title: string}>` - see resolver.js's `resolveRoutes()`. */
       routes: { shape: 'list', visibility: 'public' },
+    },
+    acl: { write: 'relay-admins' },
+  })
+);
+
+/**
+ * Global-app counterpart to `viewKind` - same fields, `acl.write:
+ * 'relay-admins'` instead of `'content'`, anchored the same way every other
+ * `qu-admin-*` Kind is (`deriveContentNodeId(globalAppAnchor(prefix),
+ * 'qu-admin-view', name)`). Added specifically so the Guestbook/Blog/Forum
+ * reference apps (`@qu/app-shell`) could become `realm: 'global'` apps
+ * without losing Views: a `realm: 'main'` app's Views/Pages are
+ * content-addressed by (owner identity, kind, path) - `viewKind` fine for
+ * ONE independently-owned app, but fatally wrong for "install as many of
+ * these as you like under different prefixes, all from the SAME
+ * relay-admin session" (every such install would derive the exact SAME
+ * node id for its own index page/View, silently clobbering each other -
+ * the real, observed bug this Kind exists to close). `resolver.js`'s
+ * `resolveView()`/`view-actions.js`'s `wireViews()` accept a `kinds.viewKind`
+ * override the exact same way they already accept one for `pageKind` - see
+ * `dev.js`'s `createGlobalView()`/`editGlobalView()` for the matching
+ * write-side counterparts. Previously left as a documented, deliberate gap
+ * (`@qu/app-shell`'s `cms-actions.js`'s own `wireViewEditor()` used to be a
+ * no-op in global mode) - not any more.
+ */
+export const adminViewKind = publicMeta(
+  defineKind('qu-admin-view', {
+    fields: {
+      sources: { shape: 'atomic', visibility: 'public' },
+      sortBy: { shape: 'atomic', visibility: 'public' },
+      sortOrder: { shape: 'atomic', visibility: 'public' },
+      limit: { shape: 'atomic', visibility: 'public' },
+      itemTemplate: { shape: 'text', visibility: 'public' },
+      route: { shape: 'atomic', visibility: 'public' },
+      template: { shape: 'atomic', visibility: 'public' },
     },
     acl: { write: 'relay-admins' },
   })

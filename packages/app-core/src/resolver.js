@@ -23,7 +23,7 @@ import { deriveOwnerNodeId } from '@qu/space-core';
 import { deriveContentNodeId } from './content-id.js';
 import { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind, groupKind, privatePageKind, sharedListKind, sharedListAnchor, viewKind } from './kinds.js';
 
-const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind };
+const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind, viewKind };
 
 /**
  * Polls `checkFn` until it returns a non-null/non-undefined value, `timeout`
@@ -388,8 +388,9 @@ export class ContentResolver {
    */
   async resolveView(name, { ownerPub, timeout } = {}) {
     const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
-    const id = await deriveContentNodeId(owner, viewKind.kind, name);
-    const { node, release } = await this._space.useNode(id, viewKind);
+    const viewKindHere = this._kinds.viewKind ?? viewKind;
+    const id = await deriveContentNodeId(owner, viewKindHere.kind, name);
+    const { node, release } = await this._space.useNode(id, viewKindHere);
     const view = await waitFor(this._space, id, async () => {
       const itemTemplate = node.field('itemTemplate').get();
       if (!itemTemplate) return null;

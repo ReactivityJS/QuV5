@@ -1,31 +1,47 @@
 /**
- * THE THREE INSTALLABLE REFERENCE APPS, END TO END — Guestbook
- * (`guestbook-bundle.js`/`guestbook-actions.js`), Blog
- * (`blog-bundle.js`/`blog-actions.js`), and Forum
- * (`forum-bundle.js`/`forum-actions.js`), each proven the way an actual
- * visitor would use them: install, render, interact through the real DOM
- * (form fill + `submit` dispatch, exactly like `cms-actions.test.js`'s own
- * pattern), and observe the live result - never calling the Dev API a
- * second time to fake the "and it shows up" half.
+ * THE THREE INSTALLABLE REFERENCE APPS, END TO END, THROUGH THE REAL
+ * ADMIN-CONSOLE INSTALLER — Guestbook/Blog/Forum are `realm: 'global'`
+ * apps now (`guestbook-bundle.js`'s own top doc comment on why: a `realm:
+ * 'main'` app is owned by one identity, and installing several of these
+ * reference apps from the SAME relay-admin session used to collide at the
+ * exact same content-addressed id for every one of their own index pages -
+ * a real, observed bug). This file goes through a REAL WebSocket relay
+ * with `live-app-resolver.js` actually running (`live-app-resolver.test.js`'s
+ * own "WHY A REAL SOCKET" doc comment - an in-process hub cannot serve it),
+ * clicking the admin console's own rendered "Beispiel-App installieren"
+ * buttons via `submit` dispatch - never calling `installGuestbook()`/etc.
+ * directly - so a regression in the REGISTER-THEN-INSTALL ordering, the
+ * `adminViewKind`/`globalViewNames` classification, or the rendered UI
+ * itself would actually be caught here, not just in the Dev API.
  *
- * A 4th test proves the admin console's own "Beispiel-App installieren"
- * form (`admin-console-bundle.js`/`admin-actions.js`'s `APP_INSTALLERS`)
- * actually seeds a working app under an admin-chosen prefix - the
- * `docs`-requested `#/admin/...` installer, exercised through its own
- * rendered UI, not by calling `installGuestbook()` directly.
+ * TWO bugs this file specifically guards against, both real and
+ * previously shipped:
+ *   1. Installing Gästebuch/Blog/Forum under DIFFERENT prefixes from the
+ *      SAME admin session used to make all three resolve to whichever
+ *      one's write won a shared content-addressed slot - the "collision"
+ *      test below installs all three and asserts each shows ITS OWN
+ *      content.
+ *   2. Forum's "start a topic"/"reply" used to be `qu-page`-backed
+ *      (`'content'`-ACL, self-certified) - reachable only for the exact
+ *      identity that happened to install the app, silently broken for any
+ *      OTHER Space member. `forum-bundle.js` now stores topics/replies
+ *      entirely as `'members'`-ACL shared-list entries - the Forum test
+ *      below deliberately uses a THIRD identity (neither the relay-admin
+ *      nor the installer) to start a topic and reply, proving any member
+ *      can actually participate.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import WebSocket, { WebSocketServer } from 'ws';
 import { JSDOM } from 'jsdom';
 import { QuCrypto } from '@qu/core';
 import { Space } from '@qu/space-core';
-import { InProcessTransport, createInProcessHub, createRelayForwarder } from '@qu/space-transport';
+import { createWsServerHub, WsClientTransport, createRelayForwarder } from '@qu/space-transport';
 import { createMemoryStore } from '@qu/space-storage';
-import { createAppResolveKindSchema, installGlobalAppBundle, registerApp } from '@qu/app-core';
-import { startApp, startPlatform } from '../src/boot.js';
-import { installGuestbook } from '../guestbook-bundle.js';
-import { installBlog } from '../blog-bundle.js';
-import { installForum } from '../forum-bundle.js';
+import { installGlobalAppBundle, registerApp, publishGlobalRoute } from '@qu/app-core';
+import { createLiveAppResolveKindSchema } from '../src/live-app-resolver.js';
+import { startPlatform } from '../src/boot.js';
 import { adminConsoleBundle } from '../admin-console-bundle.js';
 
 async function actor() {
@@ -33,7 +49,7 @@ async function actor() {
   return { signingKey: kp.privateKey, signingPub: kp.publicKey, xPrivateKey: kp.xPrivateKey, xPublicKey: kp.xPublicKey };
 }
 
-async function waitUntil(conditionFn, { timeout = 4000, interval = 10 } = {}) {
+async function waitUntil(conditionFn, { timeout = 5000, interval = 20 } = {}) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (await conditionFn()) return true;
@@ -42,26 +58,140 @@ async function waitUntil(conditionFn, { timeout = 4000, interval = 10 } = {}) {
   throw new Error(`waitUntil: condition not met within ${timeout}ms`);
 }
 
-test('Guestbook: installed via installGuestbook(), a visitor signs it through the rendered form, and the entry appears live in the feed', async () => {
-  const admin = await actor();
-  const members = [{ pub: admin.signingPub, xPub: admin.xPublicKey }];
-  const hub = createInProcessHub();
-  const resolveKindSchema = await createAppResolveKindSchema({ appAdminPub: admin.signingPub, sharedListNames: ['guestbook'] });
-  createRelayForwarder({ hub, members, resolveKindSchema, storage: createMemoryStore() });
+/**
+ * Boots a real WS relay with the live app resolver running, and the
+ * built-in admin console installed - the shared fixture every test below
+ * starts from. `extraActors` (identities besides the relay-admin that will
+ * need to write 'members'-ACL content, e.g. a Guestbook visitor or a Forum
+ * topic-starter) MUST be known to the RELAY's own authoritative `members`
+ * list from the moment `createRelayForwarder()` is constructed - unlike a
+ * `Space`'s own LOCAL `members` list (which only affects what IT believes
+ * is valid), the relay never re-reads its own member list later, so an
+ * identity added only to a `connect()`ed Space's own list, after boot,
+ * would have every one of its 'members'-ACL writes rejected regardless.
+ */
+async function bootRelay({ extraActors = [] } = {}) {
+  const relayAdmin = await actor();
+  const relayAdmins = [relayAdmin.signingPub];
+  const members = [relayAdmin, ...extraActors].map((a) => ({ pub: a.signingPub, xPub: a.xPublicKey }));
 
-  async function connect(identity, peerId) {
-    const transport = new InProcessTransport(hub, peerId);
+  const httpServer = createServer();
+  const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: true });
+  const hub = createWsServerHub(wss);
+  const { resolveKindSchema, start } = createLiveAppResolveKindSchema();
+  createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema, storage: createMemoryStore() });
+
+  await new Promise((resolve) => httpServer.listen(0, resolve));
+  const port = httpServer.address().port;
+  const url = `ws://127.0.0.1:${port}`;
+  await start({ url, relayAdmins });
+
+  async function connect(identity) {
+    const transport = new WsClientTransport(url, { WebSocketImpl: WebSocket });
     await transport.connect();
-    return new Space({ identity, members, transport });
+    return new Space({ identity, members, relayAdmins, transport });
   }
 
-  const adminSpace = await connect(admin, 'admin');
-  await installGuestbook(adminSpace, { prefix: 'guestbook' });
+  // ORDER MATTERS - see `bin/install-admin-console.mjs`'s own doc comment in full: registerApp()
+  // FIRST (so the live resolver starts watching "admin"'s own route registry), a settle wait,
+  // THEN publishGlobalRoute() (so the SAME resolver's own globalPageIds actually includes '/'
+  // before any page write follows), another settle wait, THEN the content itself
+  // (installGlobalAppBundle()) - reversing this (a real, once-shipped bug in this file's own
+  // fixture) leaves the admin page's write permanently misclassified against the generic
+  // `pageKind` fallback, silently rejected - `resolvePage('/')` then never finds it, for ANYONE,
+  // not just a same-identity race.
+  const adminSpace = await connect(relayAdmin);
+  await registerApp(adminSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'global' });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await publishGlobalRoute(adminSpace, 'admin', { route: '/', title: 'Relay-Admin' });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await installGlobalAppBundle(adminSpace, 'admin', adminConsoleBundle);
+  await new Promise((resolve) => setTimeout(resolve, 300)); // let the page write itself settle before anything navigates to it.
 
-  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/' });
+  async function close() {
+    wss.clients.forEach((ws) => ws.terminate());
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+
+  return { relayAdmin, members, url, connect, close };
+}
+
+/** Renders `#/admin` for `space` and returns the mounted DOM plus the running router (caller must `router.stop()`). */
+function mountAdmin(space) {
+  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/admin' });
   const mountEl = window.document.querySelector('qu-app-shell');
-  const visitorSpace = await connect(admin, 'visitor');
-  startApp({ space: visitorSpace, appAdminPub: admin.signingPub, mountEl, window, resolveTimeout: 500 });
+  const { router, platform } = startPlatform({ space, mountEl, window, resolveTimeout: 1500 });
+  return { window, mountEl, router, platform };
+}
+
+/** Fills and submits one of the admin console's "Beispiel-App installieren" forms for `appType`, waiting for its own confirmation status. */
+async function installViaForm(mountEl, appType, prefix) {
+  await waitUntil(() => mountEl.querySelector(`form[data-qu-action="install-app"][data-app-type="${appType}"]`));
+  const form = mountEl.querySelector(`form[data-qu-action="install-app"][data-app-type="${appType}"]`);
+  form.querySelector('input[name="prefix"]').value = prefix;
+  form.dispatchEvent(new mountEl.ownerDocument.defaultView.Event('submit', { bubbles: true, cancelable: true }));
+  await waitUntil(() => /installiert/.test(form.querySelector('[data-qu-status]')?.textContent ?? ''), { timeout: 6000 });
+}
+
+test('installing Gästebuch, Blog, and Forum from the SAME admin session under different prefixes never collide - each shows its own content', async () => {
+  const relay = await bootRelay();
+  const adminSpace = await relay.connect(relay.relayAdmin);
+  const { mountEl, router } = mountAdmin(adminSpace);
+
+  await installViaForm(mountEl, 'guestbook', 'gaestebuch');
+  await installViaForm(mountEl, 'blog', 'blog');
+  await installViaForm(mountEl, 'forum', 'forum');
+
+  // Waits for the actual FORM marker, never just matching text - the admin console's OWN page
+  // (still showing right up until the navigate() below actually re-renders) already mentions every
+  // installed app's own name in its "Installierte Apps" list, so a loose text match would pass
+  // immediately regardless of whether the navigation actually happened yet.
+  router.navigate('/gaestebuch/');
+  await waitUntil(() => mountEl.querySelector('form[data-qu-action="guestbook-form"]'));
+  assert.ok(mountEl.querySelector('form[data-qu-action="guestbook-form"]'), 'gaestebuch shows the Guestbook, not something else');
+
+  router.navigate('/blog/');
+  await waitUntil(() => mountEl.querySelector('form[data-qu-action="blog-post-form"]'));
+  assert.ok(mountEl.querySelector('form[data-qu-action="blog-post-form"]'), 'blog shows the Blog, not the Guestbook (the collision bug this test guards against)');
+
+  router.navigate('/forum/');
+  await waitUntil(() => mountEl.querySelector('form[data-qu-action="forum-topic-form"]'));
+  assert.ok(mountEl.querySelector('form[data-qu-action="forum-topic-form"]'), 'forum shows the Forum, not the Guestbook or Blog');
+
+  router.stop();
+  await relay.close();
+});
+
+test('the admin console lists a newly-installed app with its mode toggle and Besuchen/Verwalten links', async () => {
+  const relay = await bootRelay();
+  const adminSpace = await relay.connect(relay.relayAdmin);
+  const { mountEl, router } = mountAdmin(adminSpace);
+
+  await installViaForm(mountEl, 'guestbook', 'gaestebuch');
+  await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="platform-apps-list"] li')].some((li) => li.textContent.includes('#/gaestebuch')));
+  const row = [...mountEl.querySelectorAll('[data-qu-bind="platform-apps-list"] li')].find((li) => li.textContent.includes('#/gaestebuch'));
+
+  assert.ok(row.querySelector('a[href="#/gaestebuch/"]'), 'a direct "Besuchen" link to the app itself is shown');
+  assert.ok(row.querySelector('a[href="#/admin/gaestebuch/"]'), 'a "Verwalten" link to the global shell/editor is shown');
+  const modeButtons = [...row.querySelectorAll('button')].map((b) => b.textContent);
+  assert.ok(['Aus', 'Global', 'Multi-User'].every((label) => modeButtons.includes(label)), `mode toggle buttons are shown: ${modeButtons}`);
+
+  router.stop();
+  await relay.close();
+});
+
+test('Guestbook: a visitor signs it through the rendered form, and the entry appears live in the feed', async () => {
+  const visitor = await actor();
+  const relay = await bootRelay({ extraActors: [visitor] });
+  const adminSpace = await relay.connect(relay.relayAdmin);
+  const { mountEl: adminMountEl, router: adminRouter } = mountAdmin(adminSpace);
+  await installViaForm(adminMountEl, 'guestbook', 'gaestebuch');
+  adminRouter.stop();
+
+  const visitorSpace = await relay.connect(visitor);
+  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/gaestebuch' });
+  const mountEl = window.document.querySelector('qu-app-shell');
+  const { router } = startPlatform({ space: visitorSpace, mountEl, window, resolveTimeout: 1500 });
 
   await waitUntil(() => mountEl.querySelector('form[data-qu-action="guestbook-form"]'));
   const form = mountEl.querySelector('form[data-qu-action="guestbook-form"]');
@@ -70,31 +200,31 @@ test('Guestbook: installed via installGuestbook(), a visitor signs it through th
   form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
 
   await waitUntil(() => /bestätigt/.test(form.querySelector('[data-qu-status]')?.textContent ?? ''));
-  await waitUntil(() => mountEl.querySelector('[data-qu-view="guestbook-feed"]')?.textContent.includes('Hallo aus dem Gästebuch!'));
-  assert.ok(mountEl.querySelector('[data-qu-view="guestbook-feed"]').textContent.includes('Alice'), 'the entry is attributed to its author');
+  await waitUntil(() => mountEl.querySelector('[data-qu-view="gaestebuch-feed"]')?.textContent.includes('Hallo aus dem Gästebuch!'));
+  assert.ok(mountEl.querySelector('[data-qu-view="gaestebuch-feed"]').textContent.includes('Alice'));
+
+  router.stop();
+  await relay.close();
 });
 
-test('Blog: installed via installBlog(), a post is published through the rendered form, appears in the index, and its own page renders', async () => {
-  const admin = await actor();
-  const members = [{ pub: admin.signingPub, xPub: admin.xPublicKey }];
-  const hub = createInProcessHub();
-  const resolveKindSchema = await createAppResolveKindSchema({ appAdminPub: admin.signingPub });
-  createRelayForwarder({ hub, members, resolveKindSchema, storage: createMemoryStore() });
+test('Blog: a relay-admin publishes a post through the rendered form, it appears in the index, and its own page renders', async () => {
+  const relay = await bootRelay();
+  const installerSpace = await relay.connect(relay.relayAdmin);
+  const { mountEl: adminMountEl, router: adminRouter } = mountAdmin(installerSpace);
+  await installViaForm(adminMountEl, 'blog', 'blog');
+  adminRouter.stop();
 
-  async function connect(identity, peerId) {
-    const transport = new InProcessTransport(hub, peerId);
-    await transport.connect();
-    return new Space({ identity, members, transport });
-  }
+  // A FRESH connection (same relay-admin identity, but never having touched this content before)
+  // browses and publishes - not `installerSpace` itself. Reusing the exact Space that JUST wrote
+  // the page tears down its own local cache on the very first read-back (a documented, accepted
+  // cost elsewhere in this codebase - `boot.js`'s `ensureSelfProvisioned()` own "REAL RACE" doc
+  // comment) and needs a genuine relay round trip to resync - usually fast, but a real,
+  // occasionally-slow cost under load, not something to paper over with an ever-larger timeout.
+  // Guestbook's/Forum's own tests already avoid this by using a separate visitor identity/connection.
+  const authorSpace = await relay.connect(relay.relayAdmin);
+  const { window, mountEl, router } = mountAdmin(authorSpace);
 
-  const adminSpace = await connect(admin, 'admin');
-  await installBlog(adminSpace, { prefix: 'blog' });
-
-  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/' });
-  const mountEl = window.document.querySelector('qu-app-shell');
-  const visitorSpace = await connect(admin, 'visitor');
-  const { router } = startApp({ space: visitorSpace, appAdminPub: admin.signingPub, mountEl, window, resolveTimeout: 500 });
-
+  router.navigate('/blog/');
   await waitUntil(() => mountEl.querySelector('form[data-qu-action="blog-post-form"]'));
   const form = mountEl.querySelector('form[data-qu-action="blog-post-form"]');
   form.querySelector('[name="title"]').value = 'Erster Beitrag';
@@ -102,93 +232,72 @@ test('Blog: installed via installBlog(), a post is published through the rendere
   form.querySelector('[name="content"]').value = '<p>Mein erster Blog-Post.</p>';
   form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
 
-  await waitUntil(() => /bestätigt/.test(form.querySelector('[data-qu-status]')?.textContent ?? ''));
+  await waitUntil(() => /bestätigt/.test(form.querySelector('[data-qu-status]')?.textContent ?? ''), { timeout: 6000 });
   await waitUntil(() => mountEl.querySelector('[data-qu-view] a[data-qu-view-link]'));
   const link = mountEl.querySelector('[data-qu-view] a[data-qu-view-link]');
   assert.equal(link.textContent, 'Erster Beitrag');
   assert.equal(link.getAttribute('href'), '#/post/erster-beitrag');
 
-  router.navigate('/post/erster-beitrag');
-  await waitUntil(() => mountEl.textContent.includes('Mein erster Blog-Post.'));
+  // Prefixed with the app's own "blog" - unlike routed-view.test.js's own startApp()-based test
+  // (single app, no prefix stripping), startPlatform() treats the FIRST path segment as the
+  // registered app prefix (PlatformRuntime.resolveForPath()) - navigating to the bare
+  // "/post/erster-beitrag" would be interpreted as prefix "post", not routed within "blog" at all.
+  router.navigate('/blog/post/erster-beitrag');
+  await waitUntil(() => mountEl.textContent.includes('Mein erster Blog-Post.'), { timeout: 8000 });
+
+  router.stop();
+  await relay.close();
 });
 
-test('Forum: installed via installForum(), a topic is started and replied to through the rendered forms, both visible live', async () => {
-  const admin = await actor();
-  const members = [{ pub: admin.signingPub, xPub: admin.xPublicKey }];
-  const hub = createInProcessHub();
-  const resolveKindSchema = await createAppResolveKindSchema({
-    appAdminPub: admin.signingPub,
-    sharedListNames: ['forum:topics', 'forum:replies'],
-  });
-  createRelayForwarder({ hub, members, resolveKindSchema, storage: createMemoryStore() });
+test('Forum: a topic is started by one Space member and replied to by a DIFFERENT one - neither the relay-admin nor the installer', async () => {
+  const starter = await actor();
+  const replier = await actor();
+  const relay = await bootRelay({ extraActors: [starter, replier] });
 
-  async function connect(identity, peerId) {
-    const transport = new InProcessTransport(hub, peerId);
-    await transport.connect();
-    return new Space({ identity, members, transport });
-  }
+  const adminSpace = await relay.connect(relay.relayAdmin);
+  const { mountEl: adminMountEl, router: adminRouter } = mountAdmin(adminSpace);
+  await installViaForm(adminMountEl, 'forum', 'forum');
+  adminRouter.stop();
 
-  const adminSpace = await connect(admin, 'admin');
-  await installForum(adminSpace, { prefix: 'forum' });
+  // A visitor who is NEITHER the relay-admin NOR the identity that ran the installer starts a
+  // topic - the exact scenario an earlier, `qu-page`-backed version of this bundle silently broke.
+  const starterSpace = await relay.connect(starter);
+  const { window: starterWindow } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/forum' });
+  const starterMountEl = starterWindow.document.querySelector('qu-app-shell');
+  const { router: starterRouter } = startPlatform({ space: starterSpace, mountEl: starterMountEl, window: starterWindow, resolveTimeout: 1500 });
 
-  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/' });
-  const mountEl = window.document.querySelector('qu-app-shell');
-  const visitorSpace = await connect(admin, 'visitor');
-  startApp({ space: visitorSpace, appAdminPub: admin.signingPub, mountEl, window, resolveTimeout: 500 });
-
-  await waitUntil(() => mountEl.querySelector('form[data-qu-action="forum-topic-form"]'));
-  const topicForm = mountEl.querySelector('form[data-qu-action="forum-topic-form"]');
+  await waitUntil(() => starterMountEl.querySelector('form[data-qu-action="forum-topic-form"]'));
+  const topicForm = starterMountEl.querySelector('form[data-qu-action="forum-topic-form"]');
   topicForm.querySelector('[name="title"]').value = 'Erstes Thema';
-  topicForm.querySelector('[name="author"]').value = 'Bob';
+  topicForm.querySelector('[name="author"]').value = 'Stella';
   topicForm.querySelector('[name="body"]').value = 'Worum geht es hier?';
-  topicForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  topicForm.dispatchEvent(new starterWindow.Event('submit', { bubbles: true, cancelable: true }));
+  await waitUntil(() => /bestätigt/.test(topicForm.querySelector('[data-qu-status]')?.textContent ?? ''));
+  starterRouter.stop();
 
-  // startTopic() navigates the hash straight to the new topic's own route on success.
-  await waitUntil(() => mountEl.textContent.includes('Worum geht es hier?'));
-  assert.ok(mountEl.textContent.includes('von Bob'), 'the topic body page shows its author');
-  assert.ok(mountEl.querySelector('form[data-qu-action="forum-reply-form"]'), 'the topic page carries its own reply form');
+  // A THIRD identity (never the relay-admin, never the topic starter) opens the topic and replies.
+  const replierSpace = await relay.connect(replier);
+  const { window: replierWindow } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/forum' });
+  const replierMountEl = replierWindow.document.querySelector('qu-app-shell');
+  const { router: replierRouter } = startPlatform({ space: replierSpace, mountEl: replierMountEl, window: replierWindow, resolveTimeout: 1500 });
 
-  const replyForm = mountEl.querySelector('form[data-qu-action="forum-reply-form"]');
+  await waitUntil(() => replierMountEl.querySelector(`[data-qu-view="forum-topics"] [data-qu-view-link]`)?.textContent.includes('Erstes Thema'));
+  const topicLink = replierMountEl.querySelector('[data-qu-view="forum-topics"] [data-qu-view-link]');
+  topicLink.dispatchEvent(new replierWindow.Event('click', { bubbles: true, cancelable: true }));
+
+  await waitUntil(() => !replierMountEl.querySelector('[data-qu-forum-detail]').hidden);
+  assert.equal(replierMountEl.querySelector('[data-qu-forum-title]').textContent, 'Erstes Thema');
+  assert.ok(replierMountEl.querySelector('[data-qu-forum-body]').textContent.includes('Worum geht es hier?'));
+
+  const replyForm = replierMountEl.querySelector('form[data-qu-action="forum-reply-form"]');
   replyForm.querySelector('[name="author"]').value = 'Carol';
   replyForm.querySelector('[name="message"]').value = 'Gute Frage!';
-  replyForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  replyForm.dispatchEvent(new replierWindow.Event('submit', { bubbles: true, cancelable: true }));
 
   await waitUntil(() => /bestätigt/.test(replyForm.querySelector('[data-qu-status]')?.textContent ?? ''));
-  await waitUntil(() => mountEl.querySelector('[data-qu-view^="topic-"]')?.textContent.includes('Gute Frage!'));
-  assert.ok(mountEl.querySelector('[data-qu-view^="topic-"]').textContent.includes('Carol'), 'the reply is attributed to its author');
-});
+  await waitUntil(() => replierMountEl.querySelector('[data-qu-forum-replies]')?.textContent.includes('Gute Frage!'));
+  assert.ok(replierMountEl.querySelector('[data-qu-forum-replies]').textContent.includes('Carol'));
 
-test('Admin console: the "Beispiel-App installieren" form seeds a working Guestbook under an admin-chosen prefix', async () => {
-  const relayAdmin = await actor();
-  const members = [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }];
-  const relayAdmins = [relayAdmin.signingPub];
-  const hub = createInProcessHub();
-  const resolveKindSchema = await createAppResolveKindSchema({ sharedListNames: ['gaestebuch'] });
-  createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema, storage: createMemoryStore() });
-
-  async function connect(identity, peerId) {
-    const transport = new InProcessTransport(hub, peerId);
-    await transport.connect();
-    return new Space({ identity, members, relayAdmins, transport });
-  }
-
-  const mainSpace = await connect(relayAdmin, 'relay-admin');
-  await installGlobalAppBundle(mainSpace, 'admin', adminConsoleBundle);
-  await registerApp(mainSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'global' });
-
-  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/admin' });
-  const mountEl = window.document.querySelector('qu-app-shell');
-  const { router } = startPlatform({ space: mainSpace, mountEl, window, resolveTimeout: 500 });
-
-  await waitUntil(() => mountEl.querySelector('form[data-qu-action="install-app"][data-app-type="guestbook"]'));
-  const installForm = mountEl.querySelector('form[data-qu-action="install-app"][data-app-type="guestbook"]');
-  installForm.querySelector('input[name="prefix"]').value = 'gaestebuch';
-  installForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-
-  await waitUntil(() => /installiert/.test(installForm.querySelector('[data-qu-status]')?.textContent ?? ''));
-  await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="platform-apps-list"] li')].some((li) => li.textContent.includes('#/gaestebuch')));
-
-  router.navigate('/gaestebuch/');
-  await waitUntil(() => mountEl.querySelector('form[data-qu-action="guestbook-form"]'));
-  assert.ok(mountEl.textContent.includes('Gästebuch'), 'the installed app actually renders under its chosen prefix');
+  replierRouter.stop();
+  await relay.close();
 });
