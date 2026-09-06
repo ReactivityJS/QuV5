@@ -67,7 +67,11 @@ test('a View merges a pages source and a shared-list source into one live, sorte
   await createPage(ownerSpace, { route: '/blog/erster-post', title: 'Erster Post', content: '<p>Hallo</p>' });
   await publishRoute(ownerSpace, { route: '/blog/erster-post', title: 'Erster Post' });
   await publishRoute(ownerSpace, { route: '/impressum', title: 'Impressum' }); // NOT under /blog/ - must be excluded by the 'pages' source's own prefix filter.
-  await pushToSharedList(ownerSpace, 'guestbook', { name: 'Alice', message: 'Toller Blog!' });
+  // `route` is optional (a plain guestbook entry has none) - included here to prove a
+  // 'shared-list' entry that DOES carry one (e.g. a forum topic linking to its own detail page,
+  // see docs/example-apps.md) passes it through to `item.route`, the SAME key a `'pages'` source
+  // item already exposes.
+  await pushToSharedList(ownerSpace, 'guestbook', { name: 'Alice', message: 'Toller Blog!', route: '/guestbook#alice' });
 
   await createView(ownerSpace, {
     name: 'user-feed',
@@ -96,6 +100,7 @@ test('a View merges a pages source and a shared-list source into one live, sorte
     );
     assert.equal(items.find((i) => i.title === 'Erster Post').route, '/blog/erster-post');
     assert.equal(items.find((i) => i.title === 'Alice').excerpt, 'Toller Blog!');
+    assert.equal(items.find((i) => i.title === 'Alice').route, '/guestbook#alice', "a 'shared-list' entry's own optional route passes through unchanged");
 
     // --- LIVE: a brand-new page published AFTER the View was opened shows up with no re-open. ---
     let notified = false;

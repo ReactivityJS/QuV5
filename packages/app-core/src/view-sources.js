@@ -70,7 +70,26 @@ export const VIEW_SOURCE_ADAPTERS = {
       return { id, read, observe: (cb) => field.observe(cb), release };
     },
   },
-  /** @param {{name: string}} params - which named shared list (`dev.js`'s `pushToSharedList()`) - required, no default: unlike `'pages'`, there is no single "every shared list" enumeration to fall back to. */
+  /**
+   * @param {{name: string}} params - which named shared list (`dev.js`'s
+   * `pushToSharedList()`) - required, no default: unlike `'pages'`, there
+   * is no single "every shared list" enumeration to fall back to.
+   *
+   * `name`/`message`/`ts` is a CONVENTION, not a schema `sharedListKind`
+   * itself enforces (its own doc comment: entries are caller-defined plain
+   * objects) - a guestbook entry's "who signed it"/"what they wrote"/"when"
+   * maps onto it directly, and reusing the SAME three keys for a different
+   * shared list (a forum topic's "title"/"author line"/"posted at," a chat
+   * message's "sender"/"text"/"sent at" - see `docs/example-apps.md`) is
+   * what lets ONE adapter serve all of them without per-list configuration.
+   * An entry MAY also carry its own `route` (e.g. a forum topic linking to
+   * its own detail page, `/forum/topic/<id>`) - passed through as-is,
+   * `null` if absent (a guestbook entry has none, unchanged from before
+   * this existed) - the same `item.route` a `'pages'` source item already
+   * provides, so an `itemTemplate`'s `<a data-qu-view-link>` (`@qu/app-shell`'s
+   * `view-actions.js`) works identically regardless of which source
+   * produced a given item.
+   */
   'shared-list': {
     async open(space, _ctx, params) {
       const anchor = await sharedListAnchor(params.name);
@@ -80,7 +99,7 @@ export const VIEW_SOURCE_ADAPTERS = {
       const read = async () =>
         (await field.toArray())
           .filter(Boolean)
-          .map((e) => normalize({ title: e.name ?? '', excerpt: e.message ?? '', timestamp: e.ts ?? null, raw: e }));
+          .map((e) => normalize({ title: e.name ?? '', excerpt: e.message ?? '', route: e.route ?? null, timestamp: e.ts ?? null, raw: e }));
       return { id, read, observe: (cb) => field.observe(cb), release };
     },
   },
