@@ -107,14 +107,36 @@ import {
   adminStyleKind,
   adminRouteRegistryKind,
   globalAppAnchor,
+  sharedListKind,
+  sharedListAnchor,
 } from './kinds.js';
 
-/** @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], collectionRegistryKinds?: object[], globalApps?: Array<{prefix: string, templateNames?: string[], pageRoutes?: string[], styleNames?: string[]}>}} params - `appAdminPub` (singular) is a convenience alias for `appAdminPubs: [appAdminPub]`. `collectionRegistryKinds` - every Collection's `registryKind` this relay should recognize (see this file's own top doc comment on "COLLECTIONS") - each is checked against every configured owner. `globalApps` - see this file's own top doc comment on "GLOBAL APPS". @returns {Promise<(nodeId: string) => object>} */
+/**
+ * @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], collectionRegistryKinds?: object[], globalApps?: Array<{prefix: string, templateNames?: string[], pageRoutes?: string[], styleNames?: string[]}>, sharedListNames?: string[]}} params
+ *   `appAdminPub` (singular) is a convenience alias for `appAdminPubs: [appAdminPub]`.
+ *   `collectionRegistryKinds` - every Collection's `registryKind` this relay
+ *   should recognize (see this file's own top doc comment on "COLLECTIONS") -
+ *   each is checked against every configured owner. `globalApps` - see this
+ *   file's own top doc comment on "GLOBAL APPS". `sharedListNames` - every
+ *   `sharedListKind` NAME (`kinds.js`'s own doc comment, `dev.js`'s
+ *   `pushToSharedList()`) this relay should recognize, e.g. `['guestbook']` -
+ *   UNLIKE every other Kind here, a shared list's id (`deriveOwnerNodeId
+ *   (await sharedListAnchor(name), sharedListKind.kind)`) is anchored on a
+ *   HASH OF THE NAME, not any real signer's own pubkey, so there is no
+ *   `claimedPub`-based dynamic fallback possible for it (the relay cannot
+ *   invert a hash to recover which name a nodeId was derived from) - every
+ *   name a deployment actually uses must be listed here explicitly, or its
+ *   writes silently fall through to the generic `pageKind` ('content'-ACL,
+ *   grant-only) fallback below and get rejected outright (no grant exists,
+ *   because 'members'-ACL never needed one).
+ * @returns {Promise<(nodeId: string) => object>}
+ */
 export async function createAppResolveKindSchema({
   appAdminPub,
   appAdminPubs,
   collectionRegistryKinds = [],
   globalApps = [{ prefix: 'admin', templateNames: ['main'], pageRoutes: ['/'], styleNames: [] }],
+  sharedListNames = [],
 } = {}) {
   const owners = [...(appAdminPubs ?? []), ...(appAdminPub ? [appAdminPub] : [])];
   const manifestIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, appManifestKind.kind))));
@@ -144,7 +166,11 @@ export async function createAppResolveKindSchema({
     }
   }
 
-  return (nodeId) => {
+  const sharedListIds = new Set(
+    await Promise.all(sharedListNames.map(async (name) => deriveOwnerNodeId(await sharedListAnchor(name), sharedListKind.kind)))
+  );
+
+  return async (nodeId, claimedPub) => {
     if (globalManifestIds.has(nodeId)) return adminAppManifestKind;
     if (globalRouteRegistryIds.has(nodeId)) return adminRouteRegistryKind;
     if (globalTemplateIds.has(nodeId)) return adminTemplateKind;
@@ -156,6 +182,34 @@ export async function createAppResolveKindSchema({
     if (styleRegistryIds.has(nodeId)) return styleRegistryKind;
     if (collectionRegistryById.has(nodeId)) return collectionRegistryById.get(nodeId);
     if (nodeId === platformId) return platformAppsKind;
+    if (sharedListIds.has(nodeId)) return sharedListKind;
+    // DYNAMIC, SELF-CERTIFYING FALLBACK - see relay.js's own doc comment on `resolveKindSchema`'s
+    // `claimedPub` parameter for the full "why this is safe" reasoning. `appManifestKind`/
+    // `routeRegistryKind`/`templateRegistryKind`/`styleRegistryKind` (and any Collection's own
+    // `registryKind`) are ALL per-owner SINGLETONS - `deriveOwnerNodeId(ownerPub, kind)`, no `path`
+    // - so re-deriving from the write/subscribe's own CLAIMED signer (still unverified here; the
+    // caller verifies it independently before actually authorizing anything) classifies them
+    // correctly for ANY owner, not just ones already listed in `appAdminPubs`/`appAdminPub` above.
+    // A REAL, previously-shipped bug this closes: a `mode: 'multiuser'` app's own self-provisioned
+    // participant (`@qu/app-shell`'s `boot.js` `ensureSelfProvisioned()`) is, BY DESIGN, never
+    // `registerApp()`-registered anywhere - `owners` above is permanently empty for them - so
+    // EVERY one of their own 'named'-ACL registry writes (their `qu-app` manifest, their
+    // `qu-route-registry`/`qu-template-registry`/`qu-style-registry`) used to be silently
+    // misclassified against the `pageKind` fallback below and rejected outright (no grant exists
+    // for a Kind their own client never thought it needed one for). Invisible from the CREATING
+    // identity's own already-connected Space (a local write always applies to its own Y.Doc
+    // regardless of what the relay does with it) - only surfaced on a genuine reconnect (a fresh
+    // Space, nothing local to fall back on) or a DIFFERENT peer trying to enumerate that identity's
+    // own routes/templates/styles, which is exactly why it went unnoticed until tested that way.
+    if (claimedPub) {
+      if ((await deriveOwnerNodeId(claimedPub, appManifestKind.kind)) === nodeId) return appManifestKind;
+      if ((await deriveOwnerNodeId(claimedPub, routeRegistryKind.kind)) === nodeId) return routeRegistryKind;
+      if ((await deriveOwnerNodeId(claimedPub, templateRegistryKind.kind)) === nodeId) return templateRegistryKind;
+      if ((await deriveOwnerNodeId(claimedPub, styleRegistryKind.kind)) === nodeId) return styleRegistryKind;
+      for (const registryKind of collectionRegistryKinds) {
+        if ((await deriveOwnerNodeId(claimedPub, registryKind.kind)) === nodeId) return registryKind;
+      }
+    }
     return pageKind;
   };
 }

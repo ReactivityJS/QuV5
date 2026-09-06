@@ -26,6 +26,11 @@ import {
   pageKind,
   templateKind,
   styleKind,
+  groupKind,
+  privatePageKind,
+  sharedListKind,
+  sharedListAnchor,
+  viewKind,
   platformAppsKind,
   PLATFORM_REGISTRY_ANCHOR,
   adminAppManifestKind,
@@ -80,10 +85,10 @@ async function waitForSync(checkFn, { timeout = 3000, interval = 20, settle = 15
 }
 
 /** A `'text'`-shape field (field.js's `TextField`) has no `set()` - only `get()`/`insert()`/`delete()` (real Y.Text, collaborative-editing-shaped) - so "replace the whole value" is delete-everything-then-insert, two ordinary local mutations, not one. Both are synchronous/fire-and-forget on the field itself (see field.js) - the resulting Yjs updates still seal/send exactly like any other write, just as two envelopes instead of one. */
-function replaceText(field, value) {
+function replaceText(field, value, { recipients } = {}) {
   const current = field.get();
-  if (current) field.delete(0, current.length);
-  if (value) field.insert(0, value);
+  if (current) field.delete(0, current.length, { recipients });
+  if (value) field.insert(0, value, { recipients });
 }
 
 /** Creates (or overwrites) this Space identity's App Manifest - see kinds.js's `appManifestKind`. */
@@ -243,6 +248,222 @@ export async function editPage(space, { route, title, template, content, data, o
   if (template !== undefined) await node.field('template').set(template);
   if (content !== undefined) replaceText(node.field('content'), content);
   if (data !== undefined) await node.field('data').set(data);
+  release();
+  return node;
+}
+
+/** `{pub, xPub}` (raw bytes, `Space`'s own `members` shape) -> the SAME shape base64-encoded, `groupKind`'s own storage format (kinds.js's own doc comment on why: readable/comparable as plain JSON, same convention `platformAppsKind`'s entries already use for pubkeys). */
+function toBase64Pair({ pub, xPub }) {
+  return { pub: QuCrypto.toBase64(pub), xPub: QuCrypto.toBase64(xPub) };
+}
+
+/**
+ * Creates a GROUP (kinds.js's own `groupKind` doc comment) - a named,
+ * self-owned, editable member list any `'content'`-ACL Kind can later
+ * encrypt for (`createPrivatePage()`/`editPrivatePage()` below, or a
+ * future app's own equivalent - `@qu/app-core`'s `ContentResolver.resolveGroup()`
+ * resolves a group's CURRENT members back into the raw X25519 pubkeys such
+ * a write actually needs). Node id = `deriveContentNodeId(space.identity.signingPub,
+ * 'qu-group', name)` - many per owner, same as `createPage()`/`createTemplate()`.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{name: string, members: Array<{pub: Uint8Array, xPub: Uint8Array}>}} params -
+ *   include the creator's OWN identity in `members` if they want to see themselves
+ *   listed as a group member later (`Space._effectiveRecipients()` guarantees the
+ *   OWNER can always decrypt their own group-encrypted writes regardless - this is
+ *   only about the group's own membership LISTING, a separate, cosmetic concern).
+ */
+export async function createGroup(space, { name, members }) {
+  return space.createNode(groupKind, { name, members: members.map(toBase64Pair) }, { path: name });
+}
+
+/**
+ * REPLACES a group's ENTIRE member list (kinds.js's own `groupKind` doc
+ * comment on why this is "last write wins," never a merge) - add/remove a
+ * member by reading the CURRENT list first (`ContentResolver.resolveGroup()`),
+ * then calling this with the full, updated array; there is no separate
+ * add/remove primitive. Existing content already encrypted for the group's
+ * PREVIOUS member list is unaffected (its own ciphertext was sealed once,
+ * at write time, for whoever was a member THEN) - only a LATER write
+ * (re-resolving the group's now-current members first) actually reflects
+ * a membership change; this is the exact same "no retroactive re-encryption"
+ * tradeoff any group-messaging system with forward secrecy in mind accepts.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{name: string, members: Array<{pub: Uint8Array, xPub: Uint8Array}>, ownerPub?: Uint8Array, timeout?: number}} params
+ */
+export async function editGroup(space, { name, members, ownerPub = space.identity.signingPub, timeout } = {}) {
+  const id = await deriveContentNodeId(ownerPub, groupKind.kind, name);
+  const { node, release } = await space.useNode(id, groupKind);
+  // Gating on `name !== null` ALONE (as every other `edit*()` here does for its own single-field
+  // check) is not enough for `members`: this Node's `useNode()` call above may have built a BRAND
+  // NEW local Y.Doc (this identity's own earlier read already released it), and `name`/`members`
+  // arrive as SEPARATE envelopes - `name` can already be applied while `members`' own creation
+  // envelope is still in flight. Writing `members` before that lands is a REAL, observed Yjs
+  // hazard, not a cosmetic race: this call's `.set()` builds its new item's causal "left" pointer
+  // from whatever THIS doc currently has for that key - if the original `members` envelope hasn't
+  // landed yet, the new item is built with NO causal link to it at all, so a later reader who
+  // applies BOTH ends up with two genuinely CONCURRENT items for the same key. Yjs's own tie-break
+  // for that case depends on the two writes' random per-Y.Doc clientIDs, not on which one happened
+  // later - an edit can then unpredictably lose to the very value it meant to overwrite, roughly
+  // half the time. `space.isNodeSynced(id)` (gated inside the checkFn itself, not just passed
+  // through to `waitForSync()`'s own separate "give up early" fast-path below) is what closes this:
+  // it only goes true once a subscribed relay confirms EVERY envelope it currently has for this id
+  // - `members`' own creation envelope included - has already been delivered and applied.
+  const synced = await waitForSync(() => space.isNodeSynced(id) && node.field('name').get() !== null, { timeout, space, nodeId: id });
+  if (!synced) {
+    release();
+    throw new Error(`editGroup: group "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGroup() for a genuinely new one`);
+  }
+  await node.field('members').set(members.map(toBase64Pair));
+  release();
+  return node;
+}
+
+/**
+ * Creates a PRIVATE/SHARED page (kinds.js's own `privatePageKind` doc
+ * comment) - same shape as `createPage()`, but every field except `route`
+ * is encrypted for `recipients` instead of every Space member. Omit
+ * `recipients` entirely (it defaults to `[]`, NOT `undefined` - a real,
+ * caught-before-shipping distinction: `space.createNode()`/field.js's own
+ * `recipients ?? this._ctx.recipientXPubKeys()` treats `undefined` as "no
+ * override, use the ordinary full-Space default" - passing `undefined`
+ * through here would silently encrypt for EVERY Space member instead of
+ * the genuinely-private page this function's own name promises) for a
+ * genuinely PRIVATE, single-user page - `Space._effectiveRecipients()`
+ * always includes the owner's own key regardless, so "shared with
+ * nobody" still means "readable by me."
+ * @param {import('@qu/space-core').Space} space
+ * @param {{route: string, title: string, template?: string, content?: string, data?: object, recipients?: Array<Uint8Array>}} params -
+ *   `recipients` are raw X25519 pubkeys (`ContentResolver.resolveGroup()`'s
+ *   own return shape, or an ad-hoc list) - never base64 strings.
+ */
+export async function createPrivatePage(space, { route, title, template = null, content = '', data = null, recipients = [] } = {}) {
+  return space.createNode(privatePageKind, { route, title, template, content, data }, { path: route, recipients });
+}
+
+/**
+ * Private-page counterpart to `editPage()` - see its own doc comment
+ * (including `ownerPub`/the `content` sync-check reasoning, both
+ * unchanged here). UNLIKE `createPrivatePage()`, `recipients` has NO
+ * default here at all and is REQUIRED the moment this call actually
+ * touches an encrypted field (`title`/`template`/`content`/`data`) -
+ * there is no "keep the previous audience automatically" option to fall
+ * back on, because `recipients` is never stored anywhere, only consulted
+ * at WRITE time (`@qu/space-core`'s field.js's own doc comment) - guessing
+ * EITHER direction would be a real bug: defaulting to `[]` would silently
+ * revoke a whole group's access on the next unrelated edit, defaulting to
+ * the full Space membership would silently WIDEN a private page's
+ * audience the instant anyone touches it. Pass the SAME (unchanged) or an
+ * updated recipient list explicitly every time (`ContentResolver.resolveGroup()`
+ * is the usual source). "Does not exist" here is deliberately
+ * indistinguishable from "exists, but you are not an authorized reader"
+ * (`node.field('title').get()` returns `undefined` for a non-recipient,
+ * `null` for genuinely unset - both fail this check the same way) - the
+ * correct, privacy-preserving answer either way.
+ *
+ * NOT RETROACTIVE for a reader who could not decrypt this page's ORIGINAL creation: widening
+ * `recipients` here only re-seals the fields THIS call touches - it can never reach `stampMeta()`'s
+ * own one-time meta envelope (`@qu/space-core`'s `node.js`), sealed once, at creation, for whoever
+ * was a recipient then. A reader outside that original set stays permanently unable to decrypt the
+ * meta envelope, and Yjs itself will not integrate ANY later envelope from this Node's original
+ * author - however newly re-encrypted for them - while an earlier one in that SAME author's
+ * sequence (the meta stamp) stays undecryptable to them (see `@qu/space-core`'s `grant.js`'s own
+ * "WRITE-BEFORE-GRANT IS A TRAP" doc comment for the identical gapless-per-author mechanism).
+ * Concretely: growing a `groupKind` and re-saving an EXISTING `privatePageKind` with the grown
+ * recipient list reaches every member who could ALREADY decrypt that page, live - it does NOT
+ * retroactively unlock that same page for a member who joined the group afterward. This is a
+ * genuine, correct property (the same "no retroactive decryption of history from before you had a
+ * key" guarantee real E2E-encrypted group messaging relies on), not a gap to work around - a new
+ * member gets full access to any page `createPrivatePage()`d AFTER they joined instead, since every
+ * one of THAT page's envelopes (meta included) is sealed for the CURRENT membership from the start.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{route: string, title?: string, template?: string, content?: string, data?: object, ownerPub?: Uint8Array, recipients?: Array<Uint8Array>, timeout?: number}} params
+ */
+export async function editPrivatePage(space, { route, title, template, content, data, ownerPub = space.identity.signingPub, recipients, timeout } = {}) {
+  const touchesEncryptedField = title !== undefined || template !== undefined || content !== undefined || data !== undefined;
+  if (touchesEncryptedField && recipients === undefined) {
+    throw new Error('editPrivatePage: "recipients" is required whenever title/template/content/data changes - there is no automatic "keep the previous audience" (recipients are never stored, only used at write time). Pass the current group\'s members (ContentResolver.resolveGroup()) or whatever list this page should stay visible to, explicitly, every time.');
+  }
+  const id = await deriveContentNodeId(ownerPub, privatePageKind.kind, route);
+  const { node, release } = await space.useNode(id, privatePageKind);
+  // Same "an edit's own causal `left` pointer must be built AFTER the field it's overwriting has
+  // actually landed, or a later reader can see two genuinely CONCURRENT (unpredictably-ordered)
+  // items for that key" hazard `editGroup()`'s own doc comment explains in full - gating on
+  // `space.isNodeSynced(id)` here too means every field this Node had before this edit (`template`/
+  // `data` included, even though this particular call might only touch `content`) is guaranteed
+  // already applied to THIS local doc before any of the writes below run.
+  const synced = await waitForSync(async () => {
+    if (!space.isNodeSynced(id)) return false;
+    const t = await node.field('title').get();
+    return t !== null && t !== undefined && node.field('content').get() !== '';
+  }, { timeout, space, nodeId: id });
+  if (!synced) {
+    release();
+    throw new Error(`editPrivatePage: page "${route}" does not exist, you are not an authorized reader, or it has not synced within ${timeout ?? 3000}ms - use createPrivatePage() for a genuinely new one`);
+  }
+  if (title !== undefined) await node.field('title').set(title, { recipients });
+  if (template !== undefined) await node.field('template').set(template, { recipients });
+  if (content !== undefined) replaceText(node.field('content'), content, { recipients });
+  if (data !== undefined) await node.field('data').set(data, { recipients });
+  release();
+  return node;
+}
+
+/**
+ * Appends ONE entry to a NAMED shared list (`kinds.js`'s own `sharedListKind`
+ * doc comment - a guestbook is the reference use case) - any CURRENT Space
+ * member may call this, for ANY `name`, with no prior "create the list"
+ * step: `getOrSyncRegistryNode()` (this file's own doc comment on it,
+ * already shared by `registerApp()`/`getOrSyncRegistryNode()`'s other
+ * callers) transparently creates the Node the FIRST time anyone writes to
+ * a given `name`, and simply reuses it every time after - the exact "never
+ * blindly `createNode()` over a Node that already exists, just torn down
+ * locally between two calls" protection `registerApp()`'s own doc comment
+ * explains in full, equally necessary here since MANY different visitors
+ * independently calling this for the SAME `name` is the entire point.
+ * `entry` is caller-defined (a guestbook might use `{name, message, ts}`) -
+ * this Kind imposes no shape on it, same as `groupKind.members`/
+ * `platformAppsKind.apps`.
+ * @param {import('@qu/space-core').Space} space
+ * @param {string} name - which named list (e.g. `'guestbook'`) - see `sharedListAnchor()`.
+ * @param {object} entry
+ */
+export async function pushToSharedList(space, name, entry) {
+  const anchor = await sharedListAnchor(name);
+  const node = await getOrSyncRegistryNode(space, sharedListKind, anchor);
+  await node.field('entries').push(entry);
+  return node;
+}
+
+/**
+ * Creates a View at content-addressed id `deriveContentNodeId(space.
+ * identity.signingPub, 'qu-view', name)` - see `createTemplate()`'s own
+ * doc comment (registry-free here too: unlike templates/styles, a View
+ * has no "list every View this owner has" registry yet, since nothing
+ * needs to enumerate them the way a CMS template picker does today - real,
+ * separate future work if that's ever needed, not attempted here).
+ * `kinds.js`'s own `viewKind` doc comment explains `sources`/`itemTemplate`
+ * in full - this is a thin, discoverable wrapper, same shape as every
+ * other `create*()` in this file.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{name: string, sources: Array<{type: string, [k: string]: *}>, sortBy?: string|null, sortOrder?: 'asc'|'desc', limit?: number|null, itemTemplate: string}} params
+ */
+export async function createView(space, { name, sources, sortBy = null, sortOrder = 'desc', limit = null, itemTemplate }) {
+  return space.createNode(viewKind, { sources, sortBy, sortOrder, limit, itemTemplate }, { path: name });
+}
+
+/** Updates an existing View - see `editTemplate()`'s own doc comment (including `ownerPub`) for the full "why never re-`createNode()`" reasoning, identical here. `fields` is a PARTIAL update, same convention `editCollectionItem()` already uses - only keys actually present are written. */
+export async function editView(space, { name, ownerPub = space.identity.signingPub, timeout, ...fields } = {}) {
+  const id = await deriveContentNodeId(ownerPub, viewKind.kind, name);
+  const { node, release } = await space.useNode(id, viewKind);
+  const synced = await waitForSync(() => node.field('itemTemplate').get() !== '', { timeout });
+  if (!synced) {
+    release();
+    throw new Error(`editView: view "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createView() for a genuinely new one`);
+  }
+  for (const [key, value] of Object.entries(fields)) {
+    if (key === 'itemTemplate') replaceText(node.field('itemTemplate'), value);
+    else await node.field(key).set(value);
+  }
   release();
   return node;
 }

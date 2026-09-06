@@ -447,7 +447,16 @@ export class Space {
    *   (e.g. `@qu/app-core`'s `platformAppsKind`, always created at the same well-known id).
    * @returns {Promise<SpaceNode>}
    */
-  async createNode(kindSchema, initialFields = {}, { id = crypto.randomUUID(), path } = {}) {
+  /**
+   * @param {object} kindSchema
+   * @param {object} [initialFields]
+   * @param {{id?: string, path?: string, recipients?: Array<Uint8Array>}} [options] - `recipients`
+   *   (`'content'`-ACL Kinds with `visibility: 'encrypted'` fields only) narrows this Node's
+   *   audience below the Space's own full member list, for EVERY write this call makes (meta
+   *   included) - see field.js's own doc comment on it. Omit for the ordinary, unchanged
+   *   "every Space member" behavior.
+   */
+  async createNode(kindSchema, initialFields = {}, { id = crypto.randomUUID(), path, recipients } = {}) {
     if (kindSchema.acl.write === 'content') {
       if (!path) throw new Error(`createNode: kind "${kindSchema.kind}" is 'content'-ACL - "path" is required`);
       id = await deriveContentNodeId(this._identity.signingPub, kindSchema.kind, path);
@@ -467,11 +476,11 @@ export class Space {
     // grantee writing back - see acl.test.js), since creating a Node is not, by itself, asking to
     // be pushed updates for it. Fire-and-forget, same posture as subscribeNode()'s own request.
     this._sendSubscribeRequest(id);
-    stampMeta(doc, kindSchema, this._identity.signingPub);
+    stampMeta(doc, kindSchema, this._identity.signingPub, { recipients });
     for (const [name, value] of Object.entries(initialFields)) {
       const field = node.field(name);
-      if (typeof field.set === 'function') await field.set(value);
-      else if (typeof field.insert === 'function') field.insert(0, value);
+      if (typeof field.set === 'function') await field.set(value, { recipients });
+      else if (typeof field.insert === 'function') field.insert(0, value, { recipients });
       else throw new Error(`createNode: field "${name}" (shape ${kindSchema.fields[name]?.shape}) has no initial-value setter`);
     }
     return node;
@@ -747,20 +756,42 @@ export class Space {
     return node;
   }
 
+  /**
+   * `recipients` (`field.js`'s own `withWriteContext()` origin, `undefined`
+   * when a write never narrowed it) NARROWED to a SPECIFIC audience below
+   * the Space's own full member list, PLUS this identity's own xPub, ALWAYS
+   * - defensively, not because a caller is expected to remember it: a
+   * `recipients` list that omitted the AUTHOR's own key would permanently
+   * lock them out of their own just-written data (unable to `.get()` it
+   * back, ever, since `decryptEnvelopeFor()` only tries entries actually
+   * present in `envelope.to`) - a real, easy-to-make mistake this exists to
+   * make structurally impossible rather than merely documented as "don't
+   * forget." Falls back to the ordinary full-member list when `recipients`
+   * was never set at all - unchanged behavior for every write that doesn't
+   * use this.
+   */
+  _effectiveRecipients(recipients) {
+    if (!recipients) return this._recipientXPubKeys();
+    const myXPubB64 = QuCrypto.toBase64(this._identity.xPublicKey);
+    if (recipients.some((xPub) => QuCrypto.toBase64(xPub) === myXPubB64)) return recipients;
+    return [...recipients, this._identity.xPublicKey];
+  }
+
   async _handleLocalUpdate(nodeId, node, update, origin) {
     if (origin === REMOTE_ORIGIN || node._skipReSeal) return; // never re-seal/re-broadcast a write we just received or are replaying from storage.
     // A plain object origin is field.js's withWriteContext()/stampMeta()'s carrier for
-    // {notify, visibility} (see those files' own doc comments) - both always set `visibility`
-    // now; `notify` is optional. Anything else (a raw doc.transact() with no origin at all,
-    // which nothing in this codebase does anymore, but a caller reaching straight for Y.Doc
-    // could) defaults to the safe 'encrypted' mode, same as this Space's behavior before
+    // {notify, visibility, recipients} (see those files' own doc comments) - `visibility` is
+    // always set now; `notify`/`recipients` are optional. Anything else (a raw doc.transact() with
+    // no origin at all, which nothing in this codebase does anymore, but a caller reaching straight
+    // for Y.Doc could) defaults to the safe 'encrypted' mode, same as this Space's behavior before
     // visibility existed.
     const notify = origin && typeof origin === 'object' ? origin.notify ?? null : null;
     const visibility = origin && typeof origin === 'object' ? origin.visibility ?? 'encrypted' : 'encrypted';
+    const recipients = origin && typeof origin === 'object' ? origin.recipients ?? null : null;
     const envelope =
       visibility === 'public'
         ? await sealPublicUpdate(update, this._identity, notify)
-        : await sealUpdate(update, this._identity, this._recipientXPubKeys(), notify);
+        : await sealUpdate(update, this._identity, this._effectiveRecipients(recipients), notify);
     await this._storageFor(node.kindSchema)?.append(nodeId, envelope);
     this._transport.send({ nodeId, envelope });
     this._bus?.emit('debug.space.write.local', { nodeId, kind: node.kind, bytes: update.length, notify });

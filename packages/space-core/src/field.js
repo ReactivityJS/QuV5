@@ -36,13 +36,33 @@
  *     way - no bespoke append/cursor scheme needed.
  *
  * WHERE VISIBILITY ACTUALLY TAKES EFFECT ON THE WIRE: every mutating call
- * here wraps its Yjs mutation in `doc.transact(fn, {notify, visibility})` -
- * `Space._handleLocalUpdate()` (space.js) reads `visibility` back off that
- * transaction's origin to decide `sealUpdate()` (encrypted) vs.
- * `sealPublicUpdate()` (public) for the envelope this write produces. A
- * field never talks to envelope.js directly - this is the one, sole
- * mechanism by which a field's declared visibility becomes an actual
- * envelope mode, and it is the SAME mechanism for all three shapes.
+ * here wraps its Yjs mutation in `doc.transact(fn, {notify, visibility,
+ * recipients})` - `Space._handleLocalUpdate()` (space.js) reads
+ * `visibility` back off that transaction's origin to decide `sealUpdate()`
+ * (encrypted) vs. `sealPublicUpdate()` (public) for the envelope this
+ * write produces. A field never talks to envelope.js directly - this is
+ * the one, sole mechanism by which a field's declared visibility becomes
+ * an actual envelope mode, and it is the SAME mechanism for all three
+ * shapes.
+ *
+ * `recipients` (optional, `visibility: 'encrypted'` only) NARROWS who this
+ * ONE write is encrypted for, below the Space's own full member list -
+ * `space.js`'s `_recipientXPubKeys()` stays the default whenever it's
+ * omitted, unchanged from before this existed. This is what lets a
+ * `'content'`-ACL Kind (self-owned - `pageKind`'s sibling
+ * `privatePageKind` is the reference consumer, `kinds.js`'s own doc
+ * comment) be shared with an arbitrary GROUP instead of every Space
+ * member - a group is nothing more than a caller-resolved list of X25519
+ * pubkeys (`@qu/app-core`'s `resolveGroup()`) handed down through
+ * `Space.createNode()`/`editPage()`-shaped Dev API calls, all the way to
+ * here. For `'atomic'`/`'list'` shapes, ALSO narrows the field's own
+ * VALUE-level `encryptForRecipients()` call (defense in depth: the field's
+ * own ciphertext is unreadable to a non-recipient even if they somehow
+ * obtained the outer envelope's plaintext update bytes some other way);
+ * `'text'` has no field-level encryption at all (this file's own doc
+ * comment above) so `recipients` matters there ONLY at the envelope layer
+ * - still fully sufficient, since the envelope is a text field's ONLY
+ * confidentiality boundary regardless.
  *
  * `set()`/`push()`/text edits all accept an optional `{notify}` (atomic/
  * list only - see this file's own git history for why text never grew
@@ -55,30 +75,53 @@
 import * as Y from 'yjs';
 import { QuCrypto } from '@qu/core';
 
+/**
+ * `recipientXPubKeys` PLUS the sender's own key, always - defensively, the
+ * SAME "never let a caller lock themselves out of their own just-written
+ * data" reasoning `space.js`'s own `_effectiveRecipients()` applies at the
+ * ENVELOPE layer (see that method's own doc comment) - a real bug this
+ * exact duplication caught: a Kind-Schema-level default like
+ * `this._ctx.recipientXPubKeys()` (the Space's full member list) already
+ * includes the caller, but a NARROWED, explicit `recipients` list (e.g.
+ * `createPrivatePage()`'s own `recipients = []` for "nobody but me") does
+ * NOT self-include by construction - without this, the field's OWN
+ * ciphertext would be unreadable even to its own owner, while the OUTER
+ * envelope (already defended by `_effectiveRecipients()`) stayed readable
+ * - an inconsistent, confusing half-fix. Local here (not imported from
+ * space.js) - this file has no `Space` instance to call a method on, only
+ * the plain `identity` object `_ctx` already carries.
+ */
+function includingSelf(recipientXPubKeys, selfXPub) {
+  const selfB64 = QuCrypto.toBase64(selfXPub);
+  if (recipientXPubKeys.some((xPub) => QuCrypto.toBase64(xPub) === selfB64)) return recipientXPubKeys;
+  return [...recipientXPubKeys, selfXPub];
+}
+
 async function encryptForRecipients(plainValue, identity, recipientXPubKeys) {
   const bytes = new TextEncoder().encode(JSON.stringify(plainValue));
-  const { iv, ct, to } = await QuCrypto.encrypt(bytes, recipientXPubKeys, identity.xPrivateKey);
+  const { iv, ct, to } = await QuCrypto.encrypt(bytes, includingSelf(recipientXPubKeys, identity.xPublicKey), identity.xPrivateKey);
   return { iv, ct, to, senderXPub: identity.xPublicKey };
 }
 
 /**
  * Validates `notify.topic` (if given) against this Node's Kind-Schema
  * allowlist, then runs `mutateFn` inside a `doc.transact()` call carrying
- * `{notify, visibility}` as the transaction's origin - see this file's own
- * top doc comment for why `visibility` rides here too (it's how
- * `Space._handleLocalUpdate()` picks the right envelope mode).
+ * `{notify, visibility, recipients}` as the transaction's origin - see
+ * this file's own top doc comment for why `visibility`/`recipients` ride
+ * here too (it's how `Space._handleLocalUpdate()` picks the right envelope
+ * mode/audience).
  * @param {Y.Doc} doc @param {() => void} mutateFn
- * @param {{notify?: {topic: string, to?: string[]}, visibility: 'encrypted'|'public'}} writeContext
+ * @param {{notify?: {topic: string, to?: string[]}, visibility: 'encrypted'|'public', recipients?: Array<Uint8Array>}} writeContext
  * @param {object} kindSchema
  */
-function withWriteContext(doc, mutateFn, { notify, visibility }, kindSchema) {
+function withWriteContext(doc, mutateFn, { notify, visibility, recipients }, kindSchema) {
   if (notify) {
     const allowed = kindSchema?.notifyTopics ?? [];
     if (!allowed.includes(notify.topic)) {
       throw new Error(`field write: notify.topic "${notify.topic}" is not declared in Kind-Schema "${kindSchema?.kind}"'s notifyTopics (${allowed.length ? allowed.join(', ') : 'none declared'})`);
     }
   }
-  doc.transact(mutateFn, { notify, visibility });
+  doc.transact(mutateFn, { notify, visibility, recipients });
 }
 
 /** @returns {*|undefined} `undefined` if the caller is not an intended recipient (still ciphertext to them). */
@@ -100,10 +143,10 @@ class AtomicField {
     this._visibility = visibility;
   }
 
-  /** @param {*} value @param {{notify?: {topic: string, to?: string[]}}} [options] - see this file's own doc comment. */
-  async set(value, { notify } = {}) {
-    const stored = this._visibility === 'public' ? value : await encryptForRecipients(value, this._ctx.identity, this._ctx.recipientXPubKeys());
-    withWriteContext(this._doc, () => this._map.set(this._key, stored), { notify, visibility: this._visibility }, this._ctx.kindSchema);
+  /** @param {*} value @param {{notify?: {topic: string, to?: string[]}, recipients?: Array<Uint8Array>}} [options] - see this file's own doc comment on `recipients`. */
+  async set(value, { notify, recipients } = {}) {
+    const stored = this._visibility === 'public' ? value : await encryptForRecipients(value, this._ctx.identity, recipients ?? this._ctx.recipientXPubKeys());
+    withWriteContext(this._doc, () => this._map.set(this._key, stored), { notify, visibility: this._visibility, recipients }, this._ctx.kindSchema);
   }
 
   /** @returns {Promise<*|null|undefined>} `null` = unset. `undefined` = set, but (encrypted-visibility only) this identity is not a recipient. */
@@ -153,12 +196,14 @@ class TextField {
     return this._map.get(this._key)?.toString() ?? '';
   }
 
-  insert(index, text) {
-    withWriteContext(this._doc, () => this.ytext.insert(index, text), { visibility: this._visibility }, this._kindSchema);
+  /** @param {{recipients?: Array<Uint8Array>}} [options] - see this file's own top doc comment on `recipients` - text has no field-level encryption, so this affects only the envelope, which is a text field's ONLY confidentiality boundary. */
+  insert(index, text, { recipients } = {}) {
+    withWriteContext(this._doc, () => this.ytext.insert(index, text), { visibility: this._visibility, recipients }, this._kindSchema);
   }
 
-  delete(index, length) {
-    withWriteContext(this._doc, () => this.ytext.delete(index, length), { visibility: this._visibility }, this._kindSchema);
+  /** @param {{recipients?: Array<Uint8Array>}} [options] - see `insert()`'s own doc comment. */
+  delete(index, length, { recipients } = {}) {
+    withWriteContext(this._doc, () => this.ytext.delete(index, length), { visibility: this._visibility, recipients }, this._kindSchema);
   }
 
   /** @param {(delta: Array<object>) => void} callback - Yjs' own insert/retain/delete delta, for atomic UI patching (see docs/v5-space-core-guide.md's <qu-text>). */
@@ -178,10 +223,10 @@ class ListField {
     this._visibility = visibility;
   }
 
-  /** @param {*} value @param {{notify?: {topic: string, to?: string[]}}} [options] - see this file's own doc comment. */
-  async push(value, { notify } = {}) {
-    const stored = this._visibility === 'public' ? value : await encryptForRecipients(value, this._ctx.identity, this._ctx.recipientXPubKeys());
-    withWriteContext(this._doc, () => this._yarray.push([stored]), { notify, visibility: this._visibility }, this._ctx.kindSchema);
+  /** @param {*} value @param {{notify?: {topic: string, to?: string[]}, recipients?: Array<Uint8Array>}} [options] - see this file's own doc comment on `recipients`. */
+  async push(value, { notify, recipients } = {}) {
+    const stored = this._visibility === 'public' ? value : await encryptForRecipients(value, this._ctx.identity, recipients ?? this._ctx.recipientXPubKeys());
+    withWriteContext(this._doc, () => this._yarray.push([stored]), { notify, visibility: this._visibility, recipients }, this._ctx.kindSchema);
   }
 
   async toArray() {

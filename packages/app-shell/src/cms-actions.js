@@ -111,6 +111,9 @@ import {
   styleRegistryKind,
   adminRouteRegistryKind,
   globalAppAnchor,
+  viewKind,
+  createView,
+  editView,
 } from '@qu/app-core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 
@@ -567,6 +570,101 @@ async function wirePages({ mountEl, doc, space, resolver, global = false, prefix
 }
 
 /**
+ * A REFERENCE editor for `viewKind` (`@qu/app-core`'s `kinds.js` own doc
+ * comment) - ONE possible "editor as plugin" for Views, not the only one
+ * that could exist: any other app built on `@qu/app-core` can call the
+ * exact same `createView()`/`editView()` Dev API from its OWN UI without
+ * touching this file at all (this file's own top doc comment already
+ * makes this point for `view-actions.js`'s RENDERING half; this is the
+ * AUTHORING half of the same "reusable, not CMS-specific" design).
+ *
+ * NO LIST SECTION, unlike templates/styles/pages above - `createView()`'s
+ * own doc comment explains why: there is no "list every View this owner
+ * has" registry yet (real, separate future work, not attempted here), so
+ * editing an EXISTING View means typing its exact name and clicking
+ * "Laden" (`data-qu-action="cms-view-load"`) rather than picking it off a
+ * list - `resolveView()` either finds it (switches the form into edit
+ * mode) or reports "not found," same as any other lookup-by-name.
+ *
+ * `sources` is edited as raw JSON text (`[{"type":"pages","prefix":"/blog/"},
+ * {"type":"shared-list","name":"guestbook"}]`) - the SAME "structured data
+ * as a JSON textarea" convention `wirePages()`'s own `data` field already
+ * uses below, not a new UI paradigm. GLOBAL apps are skipped entirely
+ * (`if (global) return;`), the SAME deliberate cut `wireTemplates()`/
+ * `wireStyles()` already make: `viewKind` is `acl.write: 'content'`
+ * (self-certifying to the CREATING identity, `Space.createNode()`'s own
+ * doc comment on why that mode never takes an external owner anchor) -
+ * there is no `qu-admin-view` counterpart yet for a global app's
+ * `'relay-admins'`-owned content, real future work if ever needed.
+ */
+async function wireViewEditor({ mountEl, doc, space, global, ownerPub }) {
+  if (global) return;
+  const form = mountEl.querySelector('form[data-qu-action="cms-view-form"]');
+  if (!form) return;
+  const loadBtn = mountEl.querySelector('[data-qu-action="cms-view-load"]');
+  const resetBtn = mountEl.querySelector('[data-qu-cms-reset="view"]');
+  const resolver = new ContentResolver(space, { appAdminPub: ownerPub });
+  let activeEdit = null;
+
+  if (loadBtn) {
+    loadBtn.addEventListener('click', async () => {
+      setStatus(form, '');
+      const name = form.querySelector('[name="name"]').value.trim();
+      if (!name) return;
+      const view = await resolver.resolveView(name, { timeout: 1500 });
+      if (!view) {
+        setStatus(form, `Keine View namens "${name}" gefunden.`);
+        return;
+      }
+      activeEdit = await holdEdit(space, viewKind, name, activeEdit, ownerPub);
+      enterEditMode(form, {
+        keyFieldName: 'name',
+        keyValue: name,
+        fields: {
+          sources: JSON.stringify(view.sources),
+          sortBy: view.sortBy ?? '',
+          sortOrder: view.sortOrder,
+          limit: view.limit ?? '',
+          itemTemplate: view.itemTemplate,
+        },
+      });
+    });
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    setStatus(form, '');
+    try {
+      const mode = form.querySelector('input[name="mode"]').value;
+      const name = form.querySelector('[name="name"]').value.trim();
+      const sources = JSON.parse(form.querySelector('[name="sources"]').value || '[]');
+      const sortBy = form.querySelector('[name="sortBy"]').value.trim() || null;
+      const sortOrder = form.querySelector('[name="sortOrder"]').value;
+      const limitRaw = form.querySelector('[name="limit"]').value.trim();
+      const limit = limitRaw ? Number(limitRaw) : null;
+      const itemTemplate = form.querySelector('[name="itemTemplate"]').value;
+      const id = await deriveContentNodeId(ownerPub, viewKind.kind, name);
+      if (mode === 'edit') {
+        await verifyWritesAcked(space, id, () => editView(space, { name, ownerPub, sources, sortBy, sortOrder, limit, itemTemplate, timeout: 2000 }));
+      } else {
+        await verifyWritesAcked(space, id, () => createView(space, { name, sources, sortBy, sortOrder, limit, itemTemplate }));
+      }
+      setStatus(form, 'Gespeichert und vom Relay bestätigt.');
+    } catch (err) {
+      setStatus(form, `Fehler: ${err.message}`);
+    }
+  });
+
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      activeEdit?.release();
+      activeEdit = null;
+      resetForm(form, 'name');
+    });
+  }
+}
+
+/**
  * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, appAdminPub: Uint8Array, global?: boolean, prefix?: string}} params
  *   `space`/`appAdminPub` - the app whose content is being managed: the
  *   VISITING identity is `space.identity` (may or may not be `appAdminPub`
@@ -592,5 +690,6 @@ export async function wireCms({ mountEl, doc, space, appAdminPub, global = false
     wireTemplates({ mountEl, doc, space, resolver, global, ownerPub }),
     wireStyles({ mountEl, doc, space, resolver, global, ownerPub }),
     wirePages({ mountEl, doc, space, resolver, global, prefix, ownerPub }),
+    wireViewEditor({ mountEl, doc, space, global, ownerPub }),
   ]);
 }

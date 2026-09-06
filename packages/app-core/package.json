@@ -12,6 +12,7 @@
     "@qu/space-core": "^0.1.0"
   },
   "devDependencies": {
+    "@qu/events": "^0.1.0",
     "@qu/space-storage": "^0.1.0",
     "@qu/space-transport": "^0.1.0",
     "jsdom": "^25.0.1"

@@ -466,6 +466,96 @@ any OTHER `realm: 'global'` app don't have this problem at all - every
 relay-admin already has full access, by design (see the CMS section
 above).
 
+## Groups and private/shared content
+
+An ordinary `createPage()` is readable by the whole Space - `'content'`-ACL
+only governs who may WRITE. For a page that should be readable by nobody
+but its own owner, or by a named subset of the Space, `@qu/app-core` adds
+two GENERIC primitives (not CMS-specific - Chat/Calendar reuse both):
+
+```js
+import { createGroup, editGroup, createPrivatePage, editPrivatePage } from '@qu/app-core';
+
+// A named, self-owned list of members (public membership - see kinds.js's
+// own doc comment on why: encrypting the list itself needs to already know
+// who's allowed to read it, the exact problem this Kind exists to solve).
+await createGroup(space, { name: 'familie', members: [{ pub, xPub }, ...] });
+const group = await resolver.resolveGroup('familie'); // -> {name, members}
+
+// A page encrypted for exactly `recipients` (raw X25519 pubkeys) instead of
+// the whole Space - omit `recipients` entirely for "nobody but me."
+await createPrivatePage(space, {
+  route: '/familientreffen', title: '...', content: '...',
+  recipients: group.members.map((m) => m.xPub),
+});
+const page = await resolver.resolvePrivatePage('/familientreffen'); // null if not an authorized reader
+```
+
+Editing an existing private page's fields (`editPrivatePage()`) re-narrows
+encryption live for anyone who could ALREADY decrypt that page - it does
+**not** retroactively unlock that same page for a brand-new group member,
+even after their key is added to `recipients`: the Node's one-time meta
+stamp stays sealed to whoever was a recipient at creation, and Yjs itself
+won't integrate any later update from that Node's author while an earlier
+one in the SAME author's sequence stays undecryptable to a given reader.
+This is intentional - the same "no retroactive decryption of history from
+before you had a key" guarantee real E2E-encrypted group messaging relies
+on. A new member gets full access to any page created AFTER they joined
+instead. See architecture.md's own "Groups and private/shared content"
+section and `packages/app-core/test/group-private-content.test.js` for the
+full design rationale and an end-to-end proof over a real relay.
+
+## Guestbooks and live Views (combined feeds)
+
+A genuine guestbook (many different visitors each posting their own entry
+to one shared list) needs `acl.write: 'members'`, not the `'content'`-ACL
+`defineCollectionKind()` already provides (that's for one owner curating
+many items it each individually owns - e.g. your own blog posts, which
+need no new Kind at all: a post is just an ordinary page, the index is
+just `resolveRoutes()` filtered by a route prefix). `sharedListKind`
+closes that specific gap:
+
+```js
+import { pushToSharedList } from '@qu/app-core';
+
+// any CURRENT Space member may call this, for any name, with no "create
+// the list" step first:
+await pushToSharedList(space, 'guestbook', { name: 'Alice', message: 'Hi!' });
+const entries = await resolver.resolveSharedList('guestbook'); // [] if never used, not a timeout
+```
+
+**Views** (`viewKind`) combine several content sources - pages, a shared
+list, ... - into one live, sorted feed, à la Drupal Views:
+
+```js
+import { createView } from '@qu/app-core';
+
+await createView(space, {
+  name: 'user-feed',
+  sources: [
+    { type: 'pages', prefix: '/blog/' },
+    { type: 'shared-list', name: 'guestbook' },
+  ],
+  sortBy: 'title', sortOrder: 'desc',
+  itemTemplate: '<a data-qu-view-link><qu-slot name="title"></qu-slot></a>',
+});
+```
+
+Embed it on any page with `<div data-qu-view="user-feed"></div>` -
+`@qu/app-shell`'s `view-actions.js` wires it up automatically after every
+render, live: a new blog post or guestbook entry appears with no reload.
+Both primitives are deliberately GENERIC, not CMS-specific - a future
+Forum, Live-Ticker, or other app built on `@qu/app-core` can use the exact
+same `createView()`/`pushToSharedList()` Dev API and `wireViews()`
+rendering from its own pages; the CMS's own "Views" form
+(`cms-actions.js`'s `wireViewEditor()`) is one reference editor among
+possibly several ("editors as plugins"), not the only way to author one.
+See architecture.md's own "Shared lists ... and Views" section for the
+full design (including what's deliberately not built yet - a `'collection'`
+source adapter, and watching a View's own definition live) and
+`packages/app-core/test/{shared-list,views}.test.js` /
+`packages/app-shell/test/{view-actions,view-editor}.test.js` for proof.
+
 ## Deploying the legacy chat relay
 
 The OLD, hardcoded chat demo relay (`@qu/space-transport`'s own

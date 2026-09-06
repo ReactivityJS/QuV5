@@ -21,7 +21,7 @@
 import { QuCrypto } from '@qu/core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { deriveContentNodeId } from './content-id.js';
-import { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind } from './kinds.js';
+import { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind, groupKind, privatePageKind, sharedListKind, sharedListAnchor, viewKind } from './kinds.js';
 
 const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind };
 
@@ -273,5 +273,133 @@ export class ContentResolver {
     }, { timeout });
     release();
     return item;
+  }
+
+  /**
+   * @param {string} name
+   * @param {{ownerPub?: Uint8Array|string, timeout?: number}} [params] - `ownerPub` defaults to this resolver's own configured `appAdminPub` (the common case - a group owned by the SAME identity as the content it protects), same convention `resolveCollectionItems()` already uses.
+   * @returns {Promise<{name: string, members: Array<{pub: Uint8Array, xPub: Uint8Array}>}|null>} `null` if unpublished/unsynced within `timeout`. `members` are decoded back to raw bytes - the exact shape `createPrivatePage()`'s own `recipients` param expects (`members.map(m => m.xPub)`).
+   */
+  async resolveGroup(name, { ownerPub, timeout } = {}) {
+    const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
+    const id = await deriveContentNodeId(owner, groupKind.kind, name);
+    const { node, release } = await this._space.useNode(id, groupKind);
+    const group = await waitFor(this._space, id, async () => {
+      // Unlike a brand-new Node's FIRST-ever write (where a field going from empty to non-empty IS
+      // the "is it here yet" signal every other `waitFor()` caller in this file relies on), an EDIT
+      // to an ALREADY-EXISTING group's `members` list has no such tell: `members` was already
+      // non-empty before the edit (`dev.js`'s `editGroup()`), so a caller whose OWN earlier read
+      // already released this Node (this class's own "every read releases when done" contract) and
+      // is now re-subscribing from scratch could see a PARTIALLY-applied replay - `name` (unchanged
+      // since creation) already in, but `members`' own LATEST envelope not yet applied - and hand
+      // back a "found a value" result built from the STALE list, genuinely indistinguishable from
+      // the fresh one by shape alone. `isNodeSynced()` (`Space`'s own doc comment) closes that gap:
+      // it only goes true once a subscribed relay confirms EVERYTHING it currently has for this id
+      // has already been delivered, and this codebase's own serial, arrival-ordered message
+      // processing (`Space._handleIncoming()`'s own doc comment) guarantees every envelope ahead of
+      // that confirmation in the same reply is already applied by the time it arrives - so gating on
+      // it here is what makes a re-read after an edit actually see the edit, not just eventually.
+      if (!this._space.isNodeSynced(id)) return null;
+      const groupName = await node.field('name').get();
+      if (!groupName) return null;
+      const rawMembers = await node.field('members').get();
+      const members = (rawMembers ?? []).map((m) => ({ pub: QuCrypto.fromBase64(m.pub), xPub: QuCrypto.fromBase64(m.xPub) }));
+      return { name: groupName, members };
+    }, { timeout });
+    release();
+    return group;
+  }
+
+  /**
+   * `privatePageKind`'s counterpart to `resolvePage()` - see that method's
+   * own doc comment (identical shape/sync-readiness reasoning). `null`
+   * covers BOTH "no such route" AND "this route exists, but the currently
+   * signed-in identity is not an authorized reader" - genuinely
+   * indistinguishable on purpose (kinds.js's own `privatePageKind` doc
+   * comment) - a non-recipient's `Space` never even integrates the
+   * encrypted update in the first place, so from here it looks exactly
+   * like nothing was ever published.
+   * @param {string} route
+   * @returns {Promise<{route, title, template, content, data}|null>}
+   */
+  async resolvePrivatePage(route, { timeout } = {}) {
+    const id = await deriveContentNodeId(this._appAdminPub, privatePageKind.kind, route);
+    const { node, release } = await this._space.useNode(id, privatePageKind);
+    const page = await waitFor(this._space, id, async () => {
+      // Same "an EDIT to an already-existing value has no empty-to-non-empty tell" gap
+      // `resolveGroup()`'s own doc comment above explains in full - `editPrivatePage()` can update
+      // `content` without every OTHER field, so a re-subscribe racing a partially-applied replay
+      // could otherwise return an internally-inconsistent mix of a stale and a fresh field. Gating
+      // on `isNodeSynced()` first means every envelope the relay already had for this id (the latest
+      // edit included) is guaranteed applied before any field below is even read.
+      if (!this._space.isNodeSynced(id)) return null;
+      const title = await node.field('title').get();
+      const content = node.field('content').get();
+      if (!title || !content) return null;
+      const template = await node.field('template').get();
+      const data = await node.field('data').get();
+      return { route, title, template, content, data };
+    }, { timeout });
+    release();
+    return page;
+  }
+
+  /**
+   * Every entry currently on a NAMED shared list (`kinds.js`'s
+   * `sharedListKind` doc comment) - `[]` both while genuinely empty (a
+   * brand-new guestbook nobody has signed yet) AND if the list has never
+   * been written to at all - deliberately indistinguishable, the same
+   * "empty array if no registry exists yet" default `resolveTemplateNames()`/
+   * `resolveStyleNames()` already accept for their own registries.
+   * Gated on `isNodeSynced()` rather than "entries is non-empty" (unlike
+   * every OTHER resolver method here): an empty list is a perfectly valid,
+   * final answer for this Kind, so "wait for a non-empty value" would hang
+   * out the full `timeout` for a real, already-synced, still-empty
+   * guestbook - waiting for the relay's sync-ack instead means an empty
+   * result comes back as fast as a genuinely populated one does.
+   * @param {string} name - see `pushToSharedList()`.
+   * @returns {Promise<Array<object>>}
+   */
+  async resolveSharedList(name, { timeout } = {}) {
+    const anchor = await sharedListAnchor(name);
+    const id = await deriveOwnerNodeId(anchor, sharedListKind.kind);
+    const { node, release } = await this._space.useNode(id, sharedListKind);
+    const entries = await waitFor(this._space, id, async () => {
+      if (!this._space.isNodeSynced(id)) return null;
+      return (await node.field('entries').toArray()).filter(Boolean);
+    }, { timeout });
+    release();
+    return entries ?? [];
+  }
+
+  /**
+   * Resolves a View's OWN configuration (`kinds.js`'s `viewKind` doc
+   * comment) - `sources`/`sortBy`/`sortOrder`/`limit`/`itemTemplate`, NOT
+   * its resolved items - `@qu/app-core`'s `view-sources.js`'s
+   * `openLiveView(space, {appAdminPub: ownerPub ?? this._appAdminPub,
+   * kinds: this._kinds, ...resolved})` is what turns this into an actual
+   * live, merged item feed. Kept separate on purpose: reading a View's
+   * config is an ordinary one-shot resolve (this class's own established
+   * shape), while OPENING it is a persistent subscription with its own
+   * lifecycle (`openLiveView()`'s own `close()`) this class's "every read
+   * releases when done" contract was never designed for.
+   * @param {string} name
+   * @returns {Promise<{sources: Array<object>, sortBy: string|null, sortOrder: string, limit: number|null, itemTemplate: string}|null>}
+   */
+  async resolveView(name, { ownerPub, timeout } = {}) {
+    const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
+    const id = await deriveContentNodeId(owner, viewKind.kind, name);
+    const { node, release } = await this._space.useNode(id, viewKind);
+    const view = await waitFor(this._space, id, async () => {
+      const itemTemplate = node.field('itemTemplate').get();
+      if (!itemTemplate) return null;
+      const sources = await node.field('sources').get();
+      const sortBy = await node.field('sortBy').get();
+      const sortOrder = await node.field('sortOrder').get();
+      const limit = await node.field('limit').get();
+      return { sources: sources ?? [], sortBy: sortBy ?? null, sortOrder: sortOrder ?? 'desc', limit: limit ?? null, itemTemplate };
+    }, { timeout });
+    release();
+    return view;
   }
 }
