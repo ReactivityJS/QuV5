@@ -397,7 +397,9 @@ export class ContentResolver {
       const sortBy = await node.field('sortBy').get();
       const sortOrder = await node.field('sortOrder').get();
       const limit = await node.field('limit').get();
-      return { sources: sources ?? [], sortBy: sortBy ?? null, sortOrder: sortOrder ?? 'desc', limit: limit ?? null, itemTemplate };
+      const route = await node.field('route').get();
+      const template = await node.field('template').get();
+      return { sources: sources ?? [], sortBy: sortBy ?? null, sortOrder: sortOrder ?? 'desc', limit: limit ?? null, itemTemplate, route: route ?? null, template: template ?? null };
     }, { timeout });
     release();
     return view;

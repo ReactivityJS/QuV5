@@ -15,7 +15,7 @@
  * granteePub, {path})` - not something this file wraps, since it is
  * already exactly one call.
  */
-import { deriveOwnerNodeId } from '@qu/space-core';
+import { deriveOwnerNodeId, stampMeta } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
 import { deriveContentNodeId } from './content-id.js';
 import {
@@ -117,21 +117,45 @@ export async function createApp(space, { name, version = '1.0', rootTemplate = n
  * unlucky case, `stampMeta()`'s meta-key race, permanently) disappears
  * from the registry a NEW call to `registerContentName()`/`publishRoute()`
  * appends to, right after an operation that looked otherwise successful.
- * Only falls through to `createNode()` once a bounded wait genuinely
- * confirms the Node has never been stamped (`meta.get('kind')` still
- * unset) - checked via `meta`, not the list field's own length, since an
- * empty-but-real registry (the split second between its own creation and
- * its first entry being pushed) must not be mistaken for "never existed."
- * 500ms default, matching `resolver.js`'s own already-accepted "does this
- * registry exist yet" tradeoff (`resolveTemplateNames()`/
- * `resolveStyleNames()`/`resolveRoutes()`'s identical default) - the ONLY
- * case that ever pays this cost is a brand-new app's FIRST template/style/
- * published route (nothing to discover yet, so the wait always runs to
- * completion); an app-admin's client that keeps this registry Node held
- * open across an editing session (e.g. `@qu/app-shell`'s CMS, holding it
- * for the session's whole lifetime rather than releasing it after every
- * single read) never pays it again after the first call, since
+ * Only STAMPS the Node (see below) once a bounded wait genuinely confirms
+ * it has never been stamped (`meta.get('kind')` still unset) - checked via
+ * `meta`, not the list field's own length, since an empty-but-real
+ * registry (the split second between its own creation and its first entry
+ * being pushed) must not be mistaken for "never existed." 500ms default,
+ * matching `resolver.js`'s own already-accepted "does this registry exist
+ * yet" tradeoff (`resolveTemplateNames()`/`resolveStyleNames()`/
+ * `resolveRoutes()`'s identical default) - the ONLY case that ever pays
+ * this cost is a brand-new app's FIRST template/style/published route
+ * (nothing to discover yet, so the wait always runs to completion); an
+ * app-admin's client that keeps this registry Node held open across an
+ * editing session (e.g. `@qu/app-shell`'s CMS, holding it for the
+ * session's whole lifetime rather than releasing it after every single
+ * read) never pays it again after the first call, since
  * `space.getNode(id)` above then finds it immediately.
+ *
+ * FALLS BACK TO `stampMeta()` ON THE NODE WE ALREADY HAVE OPEN, NEVER TO
+ * `space.createNode()` - a SECOND, real bug this once had, caught building
+ * the Guestbook/Forum apps (`@qu/app-shell`): `space.useNode(id,
+ * registryKind)` a few lines up already attached (and cached, in `Space`'s
+ * own `_nodes` map) whatever Node object this call is going to use,
+ * SYNCHRONOUSLY, before the `waitForSync()` wait even starts - so ANY
+ * OTHER concurrent caller for the SAME id within this SAME Space instance
+ * (e.g. `wireViews()` opening a live `'shared-list'` source on the very
+ * page whose form is about to `pushToSharedList()` into that SAME list - a
+ * Guestbook's own index renders both on one page) finds and shares that
+ * EXACT node too, `field.observe()`-subscribing to it. `space.createNode()`
+ * unconditionally forks a BRAND NEW Y.Doc and overwrites `_nodes.set(id,
+ * ...)` with it - orphaning that other caller's subscription on the old
+ * (still real, still correct) doc forever: it silently stops receiving ANY
+ * further update for that id (`Space._handleIncoming()` only ever routes
+ * to whatever `_nodes.get(id)` currently returns), while THIS call's own
+ * write lands on the fresh, disconnected replacement - a write the relay
+ * genuinely acks (nothing rejects it) yet invisible to the very page that
+ * just made it. Restamping the node we already hold - the SAME
+ * `stampMeta()` `space.createNode()` itself uses internally - never
+ * discards anything, so no subscriber is ever orphaned; safe to invoke
+ * more than once too (Yjs' own per-key last-write-wins on `meta` merges
+ * harmlessly if real content turns out to have been in flight after all).
  */
 async function getOrSyncRegistryNode(space, registryKind, ownerPub = space.identity.signingPub) {
   const id = await deriveOwnerNodeId(ownerPub, registryKind.kind);
@@ -139,7 +163,13 @@ async function getOrSyncRegistryNode(space, registryKind, ownerPub = space.ident
   if (existing) return existing;
   const { node } = await space.useNode(id, registryKind);
   const alreadyExists = await waitForSync(() => node.meta.get('kind') !== undefined, { timeout: 500, space, nodeId: id });
-  return alreadyExists ? node : space.createNode(registryKind, {}, { id });
+  // `space.identity.signingPub` - NOT this function's own `ownerPub` param, matching exactly what
+  // `space.createNode()` itself would have stamped (it always meta-stamps as the CALLING identity,
+  // never as whatever `id` was derived from) - for a shared list specifically, `ownerPub` here is
+  // actually `sharedListAnchor()`'s content hash, not a real identity, so stamping IT as `ownerPub`
+  // would be a meaningless value in a field meant to record who actually originated this Node.
+  if (!alreadyExists) stampMeta(node.doc, registryKind, space.identity.signingPub);
+  return node;
 }
 
 /** One entry, deduplicated by `name` - shared by `createTemplate()`/`createStyle()` below so a caller never has to remember a separate "publish" call the way `qu-page`'s own `publishRoute()` historically needed (kept separate, unchanged, for backward compatibility). */
@@ -447,11 +477,53 @@ export async function pushToSharedList(space, name, entry) {
  * @param {import('@qu/space-core').Space} space
  * @param {{name: string, sources: Array<{type: string, [k: string]: *}>, sortBy?: string|null, sortOrder?: 'asc'|'desc', limit?: number|null, itemTemplate: string}} params
  */
-export async function createView(space, { name, sources, sortBy = null, sortOrder = 'desc', limit = null, itemTemplate }) {
-  return space.createNode(viewKind, { sources, sortBy, sortOrder, limit, itemTemplate }, { path: name });
+/**
+ * @param {{name: string, route?: string|null, template?: string|null, sources: Array<{type: string, [k: string]: *}>, sortBy?: string|null, sortOrder?: 'asc'|'desc', limit?: number|null, itemTemplate: string}} params -
+ *   `route` (optional) makes this View directly visitable, "Views
+ *   zusammenklickbar wie bei Drupal" (the user's own framing) - when
+ *   given, this ALSO `createPage()`s + `publishRoute()`s a plain wrapper
+ *   page at `route` whose entire content is `<div data-qu-view="name">
+ *   </div>` (`@qu/app-shell`'s `view-actions.js` hydrates it exactly as it
+ *   would for a hand-authored one - a routed View is genuinely nothing
+ *   more than this same embed convention, auto-wired). `template`
+ *   (optional, only meaningful together with `route`) is that wrapper
+ *   page's own `template` name, same as `createPage()`'s own `template`
+ *   param - omit for no wrapping template (a bare, unstyled feed).
+ *   Omitting `route` entirely (unchanged, pre-existing behavior) creates
+ *   an EMBED-ONLY View, meant to be referenced from `<div data-qu-view=
+ *   "name">` inside some OTHER, separately-authored page's own content -
+ *   the right choice whenever a feed needs to sit alongside other content
+ *   (a sidebar, a form on the same page) rather than being the WHOLE page.
+ */
+export async function createView(space, { name, route = null, template = null, sources, sortBy = null, sortOrder = 'desc', limit = null, itemTemplate }) {
+  const node = await space.createNode(viewKind, { sources, sortBy, sortOrder, limit, itemTemplate, route, template }, { path: name });
+  if (route) {
+    await createPage(space, { route, title: name, template, content: `<div data-qu-view="${name}"></div>` });
+    await publishRoute(space, { route, title: name });
+  }
+  return node;
 }
 
-/** Updates an existing View - see `editTemplate()`'s own doc comment (including `ownerPub`) for the full "why never re-`createNode()`" reasoning, identical here. `fields` is a PARTIAL update, same convention `editCollectionItem()` already uses - only keys actually present are written. */
+/**
+ * Updates an existing View - see `editTemplate()`'s own doc comment
+ * (including `ownerPub`) for the full "why never re-`createNode()`"
+ * reasoning, identical here. `fields` is a PARTIAL update, same
+ * convention `editCollectionItem()` already uses - only keys actually
+ * present are written.
+ *
+ * NOT auto-synced to its wrapper page: unlike `createView()`, this never
+ * touches the `route`/`template` wrapper page `createView()` may have
+ * made - editing `route` here only changes what THIS View's own record
+ * reports (`resolveView()`), it does not move/create/update any page.
+ * Real, deliberate scope cut, the same "no rename support" limitation
+ * every other `edit*()` in this file already accepts for its own key
+ * field - migrating an already-published route safely (old one 404s or
+ * redirects? new one needs its own `createPage()`?) is a genuinely
+ * separate design question, not attempted here. Setting `route`/`template`
+ * on a View that never had one (or changing an existing one) is still a
+ * valid partial update, it just won't retroactively create/move the page
+ * - call `createPage()`/`publishRoute()` yourself if you need that too.
+ */
 export async function editView(space, { name, ownerPub = space.identity.signingPub, timeout, ...fields } = {}) {
   const id = await deriveContentNodeId(ownerPub, viewKind.kind, name);
   const { node, release } = await space.useNode(id, viewKind);
@@ -622,7 +694,23 @@ export async function installAppBundle(space, bundle) {
  *   kinds.js's own doc comment on the three states; use `setAppMode()`
  *   to change it later for an app already registered.
  */
-export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode }) {
+/**
+ * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'global', mode?: string, sharedLists?: string[]}} params
+ *   `sharedLists` (optional) - every `sharedListKind` NAME (`kinds.js`'s
+ *   own doc comment, `pushToSharedList()`) this app's own content uses
+ *   (e.g. a Guestbook app registers `[prefix]`, a Forum app registers
+ *   `[prefix + ':topics', prefix + ':replies']`) - `@qu/app-shell`'s
+ *   `live-app-resolver.js` collects this across EVERY registered app and
+ *   feeds it to `createAppResolveKindSchema()`'s own `sharedListNames`
+ *   param, the SAME "no relay restart needed" fix `appAdminPub`/`realm:
+ *   'global'` already get for their own Kinds - a shared list's id is
+ *   anchored on a HASH OF ITS NAME (`relay-resolver.js`'s own doc comment
+ *   on why), so unlike an owner-derived id, the relay has no way to
+ *   classify a name it was never told about, even dynamically. Omit
+ *   entirely for an app that uses no shared lists at all (unchanged
+ *   behavior - every existing caller of this function keeps working).
+ */
+export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode, sharedLists }) {
   // getOrSyncRegistryNode(), not a blind `space.getNode(id) ?? createNode()` - the SAME "never
   // re-createNode() over a Node that already exists, just torn down locally between two calls"
   // reasoning that function's own doc comment already documents for an app's per-owner registries -
@@ -637,6 +725,7 @@ export async function registerApp(space, { prefix, appAdminPub, name, realm = 'm
   const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
   const entry = { prefix, appAdminPub: appAdminPub ? QuCrypto.toBase64(appAdminPub) : null, name, realm };
   if (realm === 'global' && mode) entry.mode = mode;
+  if (sharedLists?.length) entry.sharedLists = sharedLists;
   await node.field('apps').push(entry);
   return node;
 }

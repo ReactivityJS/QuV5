@@ -19,6 +19,7 @@ import { renderPage } from '@qu/app-renderer';
 import { wireAdminConsole } from './admin-actions.js';
 import { wireCms } from './cms-actions.js';
 import { wireViews } from './view-actions.js';
+import { wireInstalledApps } from './installed-apps-actions.js';
 import { installCms } from '../cms-bundle.js';
 
 /**
@@ -252,6 +253,10 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   const plan = await runtime.resolveRoute(userSubPath, timeoutOpt);
   mountEl.quSpace = space;
   renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+  // `wireInstalledApps()` goes FIRST, before `wireViews()` - see its own call in `startApp()`'s
+  // doc comment on why: `wireViews()` does real async work (resolving + opening each View's live
+  // sources) that a form-attaching call must never be stalled behind.
+  await wireInstalledApps({ mountEl, doc: window.document, space });
   // Wired regardless of whose `ref` this is, same posture #/<prefix>/cms already has for an
   // ordinary app: write-ACL (self-owned, or an explicit grantContentWriter()) is what actually
   // gates a save, never this UI - a visitor viewing someone ELSE's page sees the same editor,
@@ -282,6 +287,7 @@ async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeo
   const plan = await runtime.resolveRoute(subPath, timeoutOpt);
   mountEl.quSpace = space;
   renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+  await wireInstalledApps({ mountEl, doc: window.document, space });
   await wireCms({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), global: true, prefix });
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
 }
@@ -303,6 +309,20 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
     onChange: async (route) => {
       const plan = await runtime.resolveRoute(route, resolveTimeout ? { timeout: resolveTimeout } : undefined);
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+      // `wireInstalledApps()` (guestbook/blog/forum action forms) goes BEFORE `wireViews()`
+      // deliberately, here and at every other render call site in this file: `wireViews()` does
+      // real async work per `[data-qu-view]` element (`resolveView()` + `openLiveView()`, each a
+      // genuine round trip through the relay, `view-actions.js`'s own doc comment) before it
+      // resolves - a real, measured gap (tens to ~100ms even in-process, `installed-apps.test.js`'s
+      // own regression coverage), not a rounding error. A page's action form is ordinary DOM
+      // already sitting in `mountEl` the instant `renderPage()` returns, with ITS OWN listener
+      // attached synchronously (no top-level `await` in any of `guestbook-actions.js`/
+      // `blog-actions.js`/`forum-actions.js`'s own wiring functions - each one's doc comment
+      // explains why) - stalling that attachment behind `wireViews()`'s slower, unrelated work
+      // would leave a real window where a fast visitor's `submit` fires on a form with no listener
+      // yet, silently lost (confirmed the hard way - `installed-apps.test.js` caught exactly this
+      // before this reordering fixed it).
+      await wireInstalledApps({ mountEl, doc: window.document, space });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub });
       await wireViews({ mountEl, doc: window.document, space, appAdminPub });
     },
@@ -432,6 +452,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
         const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
         mountEl.quSpace = space;
         renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+        await wireInstalledApps({ mountEl, doc: window.document, space });
         wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
         await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor('admin'), kinds: GLOBAL_KINDS });
         return;
@@ -473,6 +494,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
       const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
       mountEl.quSpace = space;
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+      await wireInstalledApps({ mountEl, doc: window.document, space });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
       await wireViews({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
     },

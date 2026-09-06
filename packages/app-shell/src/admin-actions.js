@@ -53,8 +53,39 @@
  */
 import { QuCrypto } from '@qu/core';
 import { registerApp, setAppMode } from '@qu/app-core';
+import { installGuestbook } from '../guestbook-bundle.js';
+import { installBlog } from '../blog-bundle.js';
+import { installForum } from '../forum-bundle.js';
 
 const MODE_LABELS = { off: 'Aus', global: 'Global', multiuser: 'Multi-User' };
+
+/**
+ * ONE-CLICK REFERENCE APP INSTALLERS — each entry pairs a bundle's own
+ * `installX(space, {prefix})` (the same function an operator's install
+ * script would otherwise call by hand) with the `sharedLists` a
+ * `registerApp()` call for it must declare (`dev.js`'s own doc comment on
+ * why: a `'members'`-ACL shared list's name has to be known to the relay
+ * BEFORE any write to it can be classified, and these apps' shared lists
+ * are only chosen here, at install time, under a relay-admin-picked
+ * prefix - unlike `pageKind`/`viewKind`, which are self-certifying and need
+ * no such registration). `label` doubles as the registered app's `name`.
+ *
+ * Installs into `mainSpace` - the SAME identity/Space this admin console
+ * itself runs as (`wireAdminConsole()`'s own `mainSpace` param) - never a
+ * fresh, bespoke identity per app: `createPage()`/`createView()`/
+ * `pushToSharedList()` are all self-certified against WHOEVER calls them
+ * (`'content'`-ACL) or ACL-gated only by relay-side group membership
+ * (`'members'`-ACL), never by a specific "this app's own identity" concept -
+ * exactly the same posture `ensureSelfProvisioned()` (`boot.js`) already
+ * takes for a visitor's own self-provisioned space. `realm: 'main'`
+ * (`registerApp()`'s own default) - these are ordinary single-owner apps,
+ * not relay-toggleable `mode`-bearing `realm: 'global'` ones.
+ */
+const APP_INSTALLERS = {
+  guestbook: { label: 'Gästebuch', install: installGuestbook, sharedLists: (prefix) => [prefix] },
+  blog: { label: 'Blog', install: installBlog, sharedLists: () => [] },
+  forum: { label: 'Forum', install: installForum, sharedLists: (prefix) => [`${prefix}:topics`, `${prefix}:replies`] },
+};
 
 /** @param {{mountEl: Element, doc: Document, mainSpace: import('@qu/space-core').Space, platform: import('@qu/app-core').PlatformRuntime}} params */
 export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
@@ -133,6 +164,33 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
         const appAdminPub = QuCrypto.fromBase64(rawPub);
         await registerApp(mainSpace, { prefix, appAdminPub, name });
         status.textContent = 'Gesendet. Falls du der Relay-Admin bist, ist die App jetzt registriert.';
+        await renderList();
+      } catch (err) {
+        status.textContent = `Fehler: ${err.message}`;
+      }
+    });
+  }
+
+  for (const form of mountEl.querySelectorAll('form[data-qu-action="install-app"]')) {
+    const appType = form.getAttribute('data-app-type');
+    const installer = APP_INSTALLERS[appType];
+    if (!installer) continue;
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const status = form.querySelector('[data-qu-status]') ?? form.appendChild(doc.createElement('p'));
+      status.setAttribute('data-qu-status', '');
+      status.textContent = '';
+      try {
+        const prefix = form.querySelector('input[name="prefix"]').value.trim();
+        await installer.install(mainSpace, { prefix });
+        await registerApp(mainSpace, {
+          prefix,
+          appAdminPub: mainSpace.identity.signingPub,
+          name: installer.label,
+          sharedLists: installer.sharedLists(prefix),
+        });
+        status.textContent = `${installer.label} installiert - erreichbar unter #/${prefix}/.`;
+        form.reset();
         await renderList();
       } catch (err) {
         status.textContent = `Fehler: ${err.message}`;

@@ -33,6 +33,20 @@ along. Wiring any of this into rendered pages (`<div data-qu-view="...">`,
 `wireViews()`) works exactly as already documented in README.md's own
 "Guestbooks and live Views" section - not repeated here.
 
+**Guestbook, Blog, and Forum (§1-§3) are no longer just sketches - they are
+real, ready-to-use apps** in `packages/app-shell/` (`guestbook-bundle.js`/
+`blog-bundle.js`/`forum-bundle.js` for the content, `src/guestbook-actions.js`/
+`src/blog-actions.js`/`src/forum-actions.js` for the interactivity), each
+installable in one click from the built-in admin console's own "Beispiel-App
+installieren" form (`#/admin`, `admin-console-bundle.js`/`admin-actions.js`'s
+`APP_INSTALLERS`) - pick a path prefix, and the app is live at `#/<prefix>/`
+immediately, no Dev API calls of your own needed. The code below still shows
+the UNDERLYING primitives these bundles are built from (useful for a NEW app
+in this shape, e.g. a Live-Ticker or Geo Chase wanting the same "content
+features as reusable building blocks" - the reason the View-rendering code
+lives in `@qu/app-shell` rather than baked into the CMS). Chat (§4) remains a
+sketch only - no installable bundle exists for it yet.
+
 ## 1. Guestbook
 
 The reference case `sharedListKind` was built for - see architecture.md's

@@ -159,7 +159,15 @@ export function createLiveAppResolveKindSchema({ collectionRegistryKinds = [] } 
         templateNames: KNOWN_GLOBAL_TEMPLATE_NAMES[prefix] ?? [],
         pageRoutes: (globalPageRoutesByPrefix.get(prefix) ?? []).filter(Boolean).map((r) => r.route),
       }));
-      current = await createAppResolveKindSchema({ appAdminPubs, collectionRegistryKinds, globalApps });
+      // See `dev.js`'s `registerApp()` own doc comment on `sharedLists` - the SAME "no relay
+      // restart needed" fix `appAdminPubs`/`globalApps` above already give `'named'`/`'relay-admins'`
+      // content, extended to `sharedListKind` (`'members'`-ACL, anchored on a hash of its own NAME -
+      // relay-resolver.js's own doc comment on why that specifically can't self-certify dynamically
+      // the way an owner-derived id can). Collected across EVERY app regardless of `realm` - a
+      // `realm: 'main'` Guestbook/Forum install needs this exactly as much as a hypothetical global
+      // one would.
+      const sharedListNames = [...new Set(apps.flatMap((a) => a.sharedLists ?? []))];
+      current = await createAppResolveKindSchema({ appAdminPubs, collectionRegistryKinds, globalApps, sharedListNames });
     }
     field.observe(rebuild);
     await rebuild(); // initial snapshot - covers a relay restart with an already-populated registry, not just apps registered AFTER this call.

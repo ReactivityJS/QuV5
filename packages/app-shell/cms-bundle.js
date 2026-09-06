@@ -93,10 +93,13 @@ export const cmsBundle = {
 <section>
   <h2>Views (live Feeds)</h2>
   <p>Kombiniert mehrere Inhaltsquellen (Seiten, Gästebuch, ...) zu einem live aktualisierten Feed -
-    einbinden mit <code>&lt;div data-qu-view="NAME"&gt;&lt;/div&gt;</code> auf einer Seite.</p>
+    entweder eigenständig unter einer Route aufrufbar, oder eingebunden mit
+    <code>&lt;div data-qu-view="NAME"&gt;&lt;/div&gt;</code> auf einer anderen Seite.</p>
   <form data-qu-action="cms-view-form">
     <input type="hidden" name="mode" value="create">
     <label>Name: <input name="name" required> <button type="button" data-qu-action="cms-view-load">Laden</button></label><br>
+    <label>Route (optional, z.B. "/blog" - macht die View selbst aufrufbar): <input name="route"></label><br>
+    <label>Template für die Route (optional, Name eines vorhandenen Templates): <input name="template"></label><br>
     <label>Quellen (JSON, z.B. <code>[{"type":"pages","prefix":"/blog/"},{"type":"shared-list","name":"guestbook"}]</code>):<br>
       <textarea name="sources" rows="3" cols="60" placeholder='[{"type":"pages","prefix":"/blog/"}]'></textarea></label><br>
     <label>Sortieren nach: <select name="sortBy"><option value="">(Reihenfolge der Quellen)</option><option value="title">Titel</option><option value="timestamp">Zeitstempel</option></select></label><br>

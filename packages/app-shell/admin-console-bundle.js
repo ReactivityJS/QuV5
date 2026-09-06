@@ -17,6 +17,15 @@
  * unconditionally regardless - see that file's own doc comment on Stufe 1
  * of the security model). `<ul data-qu-bind="platform-apps-list">` is the
  * matching convention for the installed-apps listing.
+ *
+ * `<form data-qu-action="install-app" data-app-type="...">` (three of them,
+ * one per reference app) is the SAME convention, one level up: rather than
+ * requiring an operator to already have run an install script AND know its
+ * own `appAdminPub` by heart (what "App registrieren" above still assumes),
+ * these seed a brand-new Guestbook/Blog/Forum under a relay-admin-chosen
+ * prefix AND register it in one click - `admin-actions.js`'s
+ * `wireAppInstallers()` doc comment has the full story on why this installs
+ * into the relay-admin's OWN main Space (never a bespoke per-app identity).
  */
 export const adminConsoleBundle = {
   manifest: { name: 'Relay-Admin', rootTemplate: 'main', defaultRoute: '/' },
@@ -34,6 +43,23 @@ export const adminConsoleBundle = {
       content: `<h1>Relay-Admin</h1>
 <h2>Installierte Apps</h2>
 <ul data-qu-bind="platform-apps-list"></ul>
+<h2>Beispiel-App installieren</h2>
+<p>Erstellt eine fertig eingerichtete App unter dem gewählten Pfad-Präfix (in diesem, dem Relay-Admin eigenen Space) und registriert sie sofort - kein separates <code>installAppBundle()</code> nötig.</p>
+<form data-qu-action="install-app" data-app-type="guestbook">
+  <label>Pfad-Präfix (z.B. "gaestebuch"): <input name="prefix" required pattern="[a-z0-9-]+"></label>
+  <button type="submit">Gästebuch installieren</button>
+  <p data-qu-status></p>
+</form>
+<form data-qu-action="install-app" data-app-type="blog">
+  <label>Pfad-Präfix (z.B. "blog"): <input name="prefix" required pattern="[a-z0-9-]+"></label>
+  <button type="submit">Blog installieren</button>
+  <p data-qu-status></p>
+</form>
+<form data-qu-action="install-app" data-app-type="forum">
+  <label>Pfad-Präfix (z.B. "forum"): <input name="prefix" required pattern="[a-z0-9-]+"></label>
+  <button type="submit">Forum installieren</button>
+  <p data-qu-status></p>
+</form>
 <h2>App registrieren</h2>
 <p>Setzt voraus, dass die App bereits installiert wurde (z.B. über <code>installAppBundle()</code>) - hier wird sie nur unter einem Pfad-Präfix eingehängt. Für diese Admin-Konsole selbst nicht nötig - sie ist bereits unter ihrem eigenen Präfix registriert.</p>
 <form data-qu-action="register-app">
