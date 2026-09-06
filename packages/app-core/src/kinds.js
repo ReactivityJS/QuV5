@@ -335,6 +335,89 @@ export const styleKind = publicMeta(
 );
 
 /**
+ * A GROUP - a named, owner-curated list of members - the one generic
+ * primitive `mode: 'multiuser'`-style self-sovereign content needs to be
+ * shared with SOMEONE beyond "everyone" or "just me," without inventing
+ * app-specific relay logic for it (the same "keine app-spezifischen Kinds
+ * im Relay" constraint every other feature in this package already
+ * respects - a group is exactly as generic as `pageKind`/`templateKind`
+ * themselves, usable by CMS today and Chat/Kalender/whatever else later,
+ * unchanged). Node id = `deriveContentNodeId(ownerPub, 'qu-group', name)` -
+ * MANY per owner (you can curate several groups, e.g. "Familie", "Team X"),
+ * `acl.write: 'content'` (same self-owned, grantable write-ACL as
+ * `pageKind` - an owner may `grantWriter()` a co-admin the exact same way).
+ *
+ * `members` is a single `'atomic'` value (`Array<{pub: string, xPub:
+ * string}>`, both base64 - the SAME `{pub, xPub}` shape `Space`'s own
+ * `members` constructor option already uses), REPLACED wholesale on every
+ * edit - never a `'list'`/`ListField` (`platformAppsKind`'s own "ONLY
+ * ADDITIVE, no removal" doc comment) - a group's whole POINT is that
+ * people leave it again, which an append-only log can't express. This
+ * does mean two concurrent edits race last-write-wins (whichever
+ * `editGroup()` call's write lands at the relay later wins outright, no
+ * merge) - an accepted, low-stakes tradeoff for v1: a group is normally
+ * curated by one owner at a time, not simultaneously by several.
+ *
+ * `members` is deliberately `visibility: 'public'` - readable by anyone
+ * who already knows this group's Node id (its OWN existence is no more
+ * secret than a page's route already is) - "who is in this group" is a
+ * much weaker secret than whatever content later gets ENCRYPTED for the
+ * group's current members (`@qu/app-core`'s `resolveGroup()`/
+ * `createPrivatePage()`, this file's own doc comment on `privatePageKind`
+ * below), and keeping it public sidesteps a real chicken-and-egg problem a
+ * `visibility: 'encrypted'` members list would otherwise create for every
+ * member OTHER than the group's own owner (whoever wants to encrypt new
+ * content for "everyone currently in the group" needs to read that list
+ * WITHOUT already being able to decrypt it circularly). Metadata privacy
+ * for group membership itself is real, separate future work if it's ever
+ * needed - not attempted here.
+ */
+export const groupKind = defineKind('qu-group', {
+  fields: {
+    name: { shape: 'atomic', visibility: 'public' },
+    members: { shape: 'atomic', visibility: 'public' },
+  },
+  acl: { write: 'content' },
+});
+
+/**
+ * A PRIVATE/SHARED PAGE - `pageKind`'s sibling for content that should NOT
+ * be readable by every Space member by default (the honest answer to "CMS
+ * heißt nicht automatisch, dass alle Seiten alle sehen können" - a real,
+ * reported gap: `pageKind`'s own fields are ALL `visibility: 'public'`,
+ * fixed once per Kind-Schema, never per-instance - see `@qu/space-core`'s
+ * field.js's own doc comment on why visibility can't just be a per-write
+ * choice on the SAME Kind). SAME shape as `pageKind` (`route`/`title`/
+ * `template`/`content`/`data`) and the SAME `acl.write: 'content'`
+ * self-owned write-ACL, but `visibility: 'encrypted'` on every field
+ * except `route` (kept `'public'` - needed for ordinary routing/
+ * enumeration, and a route string alone reveals no page CONTENT) - and,
+ * UNLIKE `pageKind`, deliberately NOT wrapped in `publicMeta()`: this
+ * Kind's own meta-stamp (existence/owner/timestamp) should be exactly as
+ * hidden as its content, not just its fields - see `publicMeta()`'s own
+ * doc comment above for why that override exists at all, and why skipping
+ * it here is the deliberate choice for genuinely private content.
+ *
+ * Reachable through the EXACT SAME `AppRuntime`/`ContentResolver`
+ * machinery as any other Kind (`resolveTimeout` unaffected) - a caller who
+ * doesn't pass `recipients` when creating one degenerates to "shared with
+ * nobody but the owner" (see `@qu/space-core`'s `Space._effectiveRecipients()`
+ * doc comment: the owner's own key is always included, defensively, no
+ * matter what) - genuinely private, single-user notes are simply the
+ * degenerate case of this same Kind, not a separate concept.
+ */
+export const privatePageKind = defineKind('qu-private-page', {
+  fields: {
+    route: { shape: 'atomic', visibility: 'public' },
+    title: { shape: 'atomic', visibility: 'encrypted' },
+    template: { shape: 'atomic', visibility: 'encrypted' },
+    content: { shape: 'text', visibility: 'encrypted' },
+    data: { shape: 'atomic', visibility: 'encrypted' },
+  },
+  acl: { write: 'content' },
+});
+
+/**
  * GLOBAL APP CONTENT (architecture.md §7, REVISED TWICE — first "One relay
  * Space, not two" folded the built-in admin console into the ordinary main
  * Space instead of a separate confidential realm; this revision

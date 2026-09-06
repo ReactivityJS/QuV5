@@ -466,6 +466,45 @@ any OTHER `realm: 'global'` app don't have this problem at all - every
 relay-admin already has full access, by design (see the CMS section
 above).
 
+## Groups and private/shared content
+
+An ordinary `createPage()` is readable by the whole Space - `'content'`-ACL
+only governs who may WRITE. For a page that should be readable by nobody
+but its own owner, or by a named subset of the Space, `@qu/app-core` adds
+two GENERIC primitives (not CMS-specific - Chat/Calendar reuse both):
+
+```js
+import { createGroup, editGroup, createPrivatePage, editPrivatePage } from '@qu/app-core';
+
+// A named, self-owned list of members (public membership - see kinds.js's
+// own doc comment on why: encrypting the list itself needs to already know
+// who's allowed to read it, the exact problem this Kind exists to solve).
+await createGroup(space, { name: 'familie', members: [{ pub, xPub }, ...] });
+const group = await resolver.resolveGroup('familie'); // -> {name, members}
+
+// A page encrypted for exactly `recipients` (raw X25519 pubkeys) instead of
+// the whole Space - omit `recipients` entirely for "nobody but me."
+await createPrivatePage(space, {
+  route: '/familientreffen', title: '...', content: '...',
+  recipients: group.members.map((m) => m.xPub),
+});
+const page = await resolver.resolvePrivatePage('/familientreffen'); // null if not an authorized reader
+```
+
+Editing an existing private page's fields (`editPrivatePage()`) re-narrows
+encryption live for anyone who could ALREADY decrypt that page - it does
+**not** retroactively unlock that same page for a brand-new group member,
+even after their key is added to `recipients`: the Node's one-time meta
+stamp stays sealed to whoever was a recipient at creation, and Yjs itself
+won't integrate any later update from that Node's author while an earlier
+one in the SAME author's sequence stays undecryptable to a given reader.
+This is intentional - the same "no retroactive decryption of history from
+before you had a key" guarantee real E2E-encrypted group messaging relies
+on. A new member gets full access to any page created AFTER they joined
+instead. See architecture.md's own "Groups and private/shared content"
+section and `packages/app-core/test/group-private-content.test.js` for the
+full design rationale and an end-to-end proof over a real relay.
+
 ## Deploying the legacy chat relay
 
 The OLD, hardcoded chat demo relay (`@qu/space-transport`'s own

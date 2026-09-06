@@ -6,6 +6,8 @@ export {
   pageKind,
   templateKind,
   styleKind,
+  groupKind,
+  privatePageKind,
   platformAppsKind,
   PLATFORM_REGISTRY_ANCHOR,
   adminAppManifestKind,
@@ -45,5 +47,9 @@ export {
   publishGlobalRoute,
   createCollectionItem,
   editCollectionItem,
+  createGroup,
+  editGroup,
+  createPrivatePage,
+  editPrivatePage,
 } from './dev.js';
 export { createAppResolveKindSchema } from './relay-resolver.js';

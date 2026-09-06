@@ -74,7 +74,7 @@ export class SpaceNode {
  * for the exact symptom: content staying `{}` with no error anywhere).
  * `Space.createNode()` calls this AFTER `_attach()`, never before.
  */
-export function stampMeta(doc, kindSchema, ownerPub) {
+export function stampMeta(doc, kindSchema, ownerPub, { recipients } = {}) {
   // One doc.transact() so meta AND every 'text' field's placeholder become
   // a SINGLE atomic Yjs update (one signed envelope) - a Node's creation
   // is one atomic fact, not an observable partial state. `visibility:
@@ -82,7 +82,13 @@ export function stampMeta(doc, kindSchema, ownerPub) {
   // 'owner'/'named' Kinds, 'encrypted' for 'members' Kinds, unchanged from
   // pre-existing behavior) is how Space._handleLocalUpdate() learns which
   // envelope mode this creation write seals with - same mechanism field.js
-  // uses for every other write, see that file's own doc comment.
+  // uses for every other write, see that file's own doc comment. `recipients`
+  // (optional, `metaVisibility: 'encrypted'` only) narrows this creation
+  // envelope's audience below the full Space membership - see field.js's own
+  // doc comment on it; without threading it through here too, a NARROWLY
+  // shared Node's own META (its existence at this id, owner, timestamp)
+  // would still leak to every Space member even though its actual field
+  // content stayed hidden from them.
   doc.transact(
     () => {
       const meta = doc.getMap('meta');
@@ -104,6 +110,6 @@ export function stampMeta(doc, kindSchema, ownerPub) {
         if (decl.shape === 'text') content.set(name, new Y.Text());
       }
     },
-    { visibility: kindSchema.metaVisibility }
+    { visibility: kindSchema.metaVisibility, recipients }
   );
 }

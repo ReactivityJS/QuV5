@@ -124,7 +124,7 @@ test('a notify hint declared in the Kind-Schema is accepted and rides as the Yjs
   });
   await node.field('messages').push('hi', { notify: { topic: 'mention', to: ['somePub'] } });
 
-  assert.deepEqual(capturedOrigin, { notify: { topic: 'mention', to: ['somePub'] }, visibility: 'encrypted' });
+  assert.deepEqual(capturedOrigin, { notify: { topic: 'mention', to: ['somePub'] }, visibility: 'encrypted', recipients: undefined });
 });
 
 test('a notify hint whose topic is NOT declared in the Kind-Schema throws, before touching Yjs at all', async () => {

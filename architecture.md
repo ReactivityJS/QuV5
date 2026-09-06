@@ -1673,3 +1673,80 @@ admin app's own content through this same UI (see above), and a
 generalized "any sufficiently-trusted identity can install a NEW kind of
 app" story beyond the two built-in shapes (an ordinary `qu-app` and the
 admin app) - both real, separate work, not attempted in this pass.
+
+**Groups and private/shared content ("CMS heißt nicht automatisch, dass
+alle Seiten alle sehen können" - the user's own framing):** every `qu-page`
+so far is readable by the WHOLE Space (`'content'`-ACL governs who may
+WRITE, never who may READ - kind-schema.js's own doc comment). A page
+someone wants visible to only themselves, or to a named subset of the
+Space, needed two new, deliberately GENERIC (not CMS-specific - Chat/
+Calendar will reuse both) primitives, both in `@qu/app-core`:
+
+- **`groupKind`** (`kinds.js`) - a `'content'`-ACL, many-per-owner, named
+  Kind (`deriveContentNodeId(ownerPub, 'qu-group', name)`) with two PUBLIC
+  atomic fields: `name` and `members` (`Array<{pub, xPub}>`, base64
+  strings). `members` is public by design, a deliberate, accepted
+  tradeoff: encrypting the membership LIST itself would need to already
+  know who's allowed to read it - the exact chicken-and-egg problem this
+  Kind exists to solve for everything else. `editGroup()`
+  (`dev.js`) replaces the whole list wholesale (last-write-wins, no add/
+  remove primitive) - `ContentResolver.resolveGroup(name)` reads it back
+  as `{name, members}` with `members` already decoded to raw bytes, the
+  exact shape `createPrivatePage()`'s own `recipients` expects.
+- **`privatePageKind`** - `pageKind`'s sibling: same fields (`route`/
+  `title`/`template`/`content`/`data`), but only `route` stays `public`;
+  `title`/`template`/`content`/`data` are `visibility: 'encrypted'`, and
+  the Kind is deliberately NOT wrapped in `publicMeta()` (unlike
+  `pageKind`) so the Node's own meta-stamp - its existence, owner, and
+  timestamp - is hidden from non-recipients too, not just its content.
+  `createPrivatePage()`'s `recipients` (raw X25519 pubkeys - a group's own
+  `members.map(m => m.xPub)`, or an ad-hoc list) narrows the encryption
+  audience below "every Space member"; omitting it entirely means
+  "nobody but me" (`recipients` defaults to `[]` here specifically, NOT
+  `undefined` - see below). `ContentResolver.resolvePrivatePage(route)`
+  mirrors `resolvePage()` exactly; `null` covers BOTH "no such route" and
+  "you're not an authorized reader" - genuinely indistinguishable on
+  purpose, the same privacy-preserving non-answer a truly unpublished
+  route already gives.
+
+**The mechanism underneath both is generic, not new**: `@qu/space-core`'s
+envelope encryption (`QuCrypto.encrypt()`) was ALREADY multi-recipient
+(`{iv, ct, to: [{pub, key}]}`, one wrapped content-key per recipient) -
+what was missing was a way to narrow the recipient list below "every
+Space member" at all. `Space._effectiveRecipients(recipients)` does that:
+`undefined`/omitted still means the old, unchanged "every Space member"
+default (so every EXISTING Kind's behavior is untouched); an explicit
+list is used as-is, with the caller's OWN key defensively appended if
+missing (so narrowing recipients can never accidentally lock the writer
+out of their own data). `Space.createNode()`/`stampMeta()`/`field.js`'s
+`AtomicField`/`TextField`/`ListField` all now accept and thread through
+this same `recipients` option. One easy-to-make mistake this surfaced
+and fixed directly in `field.js`: the defensive self-inclusion above is
+ENVELOPE-level only - `'atomic'`/`'list'` shape fields ALSO have their own
+separate FIELD-level ciphertext layer (`encryptForRecipients()`, on top
+of the envelope, kind-schema.js's own doc comment on why), which needed
+the identical defensive self-inclusion (`includingSelf()`) or a narrowed
+`recipients` list would leave the page's own OWNER unable to decrypt
+their own just-written field.
+
+**Not retroactive, by design - the same guarantee real E2E group
+messaging relies on:** growing a group's membership and re-saving an
+EXISTING `privatePageKind`'s fields reaches every reader who could
+ALREADY decrypt that page, live - proven by `createPrivatePage()`'s own
+test re-saving `content` and a pre-existing group member seeing the
+update immediately. It does NOT retroactively unlock that same page for a
+BRAND NEW member, even once their key is added to `recipients` on a later
+write: `stampMeta()`'s meta envelope is sealed exactly ONCE, at creation,
+for whoever was a recipient then, and is never re-sealed by a later edit
+- and Yjs itself refuses to integrate ANY later envelope from that Node's
+original author while an EARLIER one in that same author's sequence (the
+meta stamp) stays undecryptable to a given reader (the identical
+gapless-per-author mechanism `grant.js`'s own "WRITE-BEFORE-GRANT IS A
+TRAP" doc comment describes for a different write-ACL scenario). A new
+member gets full, immediate access to any page `createPrivatePage()`d
+AFTER they joined instead, since every one of THAT page's envelopes -
+meta included - is sealed for the group's CURRENT membership from the
+very first write. See `packages/app-core/test/group-private-content.test.js`
+for all of the above proven end-to-end over a real in-process relay
+(genuine ACL/encryption enforcement, not a local simulation), and
+`dev.js`'s own `editPrivatePage()` doc comment for the full "why" inline.

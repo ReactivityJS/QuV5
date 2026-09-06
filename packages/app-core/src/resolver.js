@@ -21,7 +21,7 @@
 import { QuCrypto } from '@qu/core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { deriveContentNodeId } from './content-id.js';
-import { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind } from './kinds.js';
+import { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind, groupKind, privatePageKind } from './kinds.js';
 
 const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind };
 
@@ -273,5 +273,74 @@ export class ContentResolver {
     }, { timeout });
     release();
     return item;
+  }
+
+  /**
+   * @param {string} name
+   * @param {{ownerPub?: Uint8Array|string, timeout?: number}} [params] - `ownerPub` defaults to this resolver's own configured `appAdminPub` (the common case - a group owned by the SAME identity as the content it protects), same convention `resolveCollectionItems()` already uses.
+   * @returns {Promise<{name: string, members: Array<{pub: Uint8Array, xPub: Uint8Array}>}|null>} `null` if unpublished/unsynced within `timeout`. `members` are decoded back to raw bytes - the exact shape `createPrivatePage()`'s own `recipients` param expects (`members.map(m => m.xPub)`).
+   */
+  async resolveGroup(name, { ownerPub, timeout } = {}) {
+    const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
+    const id = await deriveContentNodeId(owner, groupKind.kind, name);
+    const { node, release } = await this._space.useNode(id, groupKind);
+    const group = await waitFor(this._space, id, async () => {
+      // Unlike a brand-new Node's FIRST-ever write (where a field going from empty to non-empty IS
+      // the "is it here yet" signal every other `waitFor()` caller in this file relies on), an EDIT
+      // to an ALREADY-EXISTING group's `members` list has no such tell: `members` was already
+      // non-empty before the edit (`dev.js`'s `editGroup()`), so a caller whose OWN earlier read
+      // already released this Node (this class's own "every read releases when done" contract) and
+      // is now re-subscribing from scratch could see a PARTIALLY-applied replay - `name` (unchanged
+      // since creation) already in, but `members`' own LATEST envelope not yet applied - and hand
+      // back a "found a value" result built from the STALE list, genuinely indistinguishable from
+      // the fresh one by shape alone. `isNodeSynced()` (`Space`'s own doc comment) closes that gap:
+      // it only goes true once a subscribed relay confirms EVERYTHING it currently has for this id
+      // has already been delivered, and this codebase's own serial, arrival-ordered message
+      // processing (`Space._handleIncoming()`'s own doc comment) guarantees every envelope ahead of
+      // that confirmation in the same reply is already applied by the time it arrives - so gating on
+      // it here is what makes a re-read after an edit actually see the edit, not just eventually.
+      if (!this._space.isNodeSynced(id)) return null;
+      const groupName = await node.field('name').get();
+      if (!groupName) return null;
+      const rawMembers = await node.field('members').get();
+      const members = (rawMembers ?? []).map((m) => ({ pub: QuCrypto.fromBase64(m.pub), xPub: QuCrypto.fromBase64(m.xPub) }));
+      return { name: groupName, members };
+    }, { timeout });
+    release();
+    return group;
+  }
+
+  /**
+   * `privatePageKind`'s counterpart to `resolvePage()` - see that method's
+   * own doc comment (identical shape/sync-readiness reasoning). `null`
+   * covers BOTH "no such route" AND "this route exists, but the currently
+   * signed-in identity is not an authorized reader" - genuinely
+   * indistinguishable on purpose (kinds.js's own `privatePageKind` doc
+   * comment) - a non-recipient's `Space` never even integrates the
+   * encrypted update in the first place, so from here it looks exactly
+   * like nothing was ever published.
+   * @param {string} route
+   * @returns {Promise<{route, title, template, content, data}|null>}
+   */
+  async resolvePrivatePage(route, { timeout } = {}) {
+    const id = await deriveContentNodeId(this._appAdminPub, privatePageKind.kind, route);
+    const { node, release } = await this._space.useNode(id, privatePageKind);
+    const page = await waitFor(this._space, id, async () => {
+      // Same "an EDIT to an already-existing value has no empty-to-non-empty tell" gap
+      // `resolveGroup()`'s own doc comment above explains in full - `editPrivatePage()` can update
+      // `content` without every OTHER field, so a re-subscribe racing a partially-applied replay
+      // could otherwise return an internally-inconsistent mix of a stale and a fresh field. Gating
+      // on `isNodeSynced()` first means every envelope the relay already had for this id (the latest
+      // edit included) is guaranteed applied before any field below is even read.
+      if (!this._space.isNodeSynced(id)) return null;
+      const title = await node.field('title').get();
+      const content = node.field('content').get();
+      if (!title || !content) return null;
+      const template = await node.field('template').get();
+      const data = await node.field('data').get();
+      return { route, title, template, content, data };
+    }, { timeout });
+    release();
+    return page;
   }
 }
