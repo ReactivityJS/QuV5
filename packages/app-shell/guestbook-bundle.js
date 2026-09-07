@@ -20,7 +20,8 @@
  * by an owner identity - unaffected by any of this, still just `prefix`
  * itself as the list's name.
  */
-import { createGlobalPage, publishGlobalRoute, createGlobalView } from '@qu/app-core';
+import { createGlobalPage, publishGlobalRoute, createGlobalView, createPage, publishRoute, createView } from '@qu/app-core';
+import { QuCrypto } from '@qu/core';
 
 /** @param {import('@qu/space-core').Space} space @param {{prefix: string}} params */
 export async function installGuestbook(space, { prefix }) {
@@ -45,6 +46,61 @@ export async function installGuestbook(space, { prefix }) {
   await createGlobalView(space, prefix, {
     name: `${prefix}-feed`,
     sources: [{ type: 'shared-list', name: prefix }],
+    sortBy: 'timestamp',
+    sortOrder: 'desc',
+    itemTemplate: '<p><strong><qu-slot name="title"></qu-slot>:</strong> <qu-slot name="excerpt"></qu-slot></p>',
+  });
+}
+
+/**
+ * A VISITOR'S OWN PERSONAL GUESTBOOK — "not instead of the global one, an
+ * ADDITIONAL corner alongside it" (the user's own framing): self-provisioned
+ * by `installed-apps-actions.js`'s `provisionPersonalInstance()` the first
+ * time this identity reaches its own `#/<prefix>/u/me/` (`boot.js`'s own
+ * doc comment on that ADDITIVE route - it never replaces what the bare
+ * `#/<prefix>/` prefix means, unlike `mode: 'multiuser'`). Self-owned
+ * `pageKind`/`viewKind` (never `adminPageKind`/`adminViewKind` - this is
+ * genuinely THIS VISITOR's own content, not the relay-admins' shared one),
+ * at route `/<prefix>/` - PREFIXED, not bare `/`, so it coexists with
+ * whatever else this same identity has at its own root (its "Mein Bereich"
+ * CMS starter, or a DIFFERENT app's own personal instance at a different
+ * prefix) instead of colliding with it.
+ *
+ * ONE SHARED LIST FOR EVERYONE'S PERSONAL GUESTBOOK, `<prefix>:personal`
+ * (registered upfront - `admin-actions.js`'s own `APP_INSTALLERS.guestbook.
+ * sharedLists` - a per-visitor list name could never be pre-registered,
+ * since nobody knows who'll self-provision one until they actually visit),
+ * each entry tagged with its own `ownerPub` - the EXACT same "one physical
+ * list, many logical feeds" pattern `forum-actions.js`'s per-topic reply
+ * filtering already established (`view-sources.js`'s `'shared-list'`
+ * adapter own `filter` param). This View filters that ONE list down to
+ * `{ownerPub: <this identity's own base64 pubkey>}`; `guestbook-actions.js`'s
+ * `wireGuestbook()` reads the form's own `data-qu-owner` attribute (set
+ * here, absent from the GLOBAL guestbook's own form) to know it must tag
+ * every entry it pushes with that SAME owner, not just the plain
+ * `{name, message, ts}` the global guestbook's entries carry.
+ */
+export async function installPersonalGuestbook(space, { prefix }) {
+  const ownerPub = QuCrypto.toBase64(space.identity.signingPub);
+  const listName = `${prefix}:personal`;
+  const route = `/${prefix}/`;
+  await createPage(space, {
+    route,
+    title: 'Mein Gästebuch',
+    content: `<h1>Mein Gästebuch</h1>
+<form data-qu-action="guestbook-form" data-qu-list="${listName}" data-qu-owner="${ownerPub}">
+  <label>Name: <input name="name" required></label><br>
+  <label>Nachricht:<br><textarea name="message" rows="3" cols="50" required></textarea></label><br>
+  <button type="submit">Eintragen</button>
+  <p data-qu-status></p>
+</form>
+<h2>Einträge</h2>
+<div data-qu-view="${prefix}-personal-feed"></div>`,
+  });
+  await publishRoute(space, { route, title: 'Mein Gästebuch' });
+  await createView(space, {
+    name: `${prefix}-personal-feed`,
+    sources: [{ type: 'shared-list', name: listName, filter: { ownerPub } }],
     sortBy: 'timestamp',
     sortOrder: 'desc',
     itemTemplate: '<p><strong><qu-slot name="title"></qu-slot>:</strong> <qu-slot name="excerpt"></qu-slot></p>',

@@ -229,7 +229,7 @@ export const platformAppsKind = publicMeta(
   defineKind('qu-platform-apps', {
     fields: {
       /**
-       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser', sharedLists?: string[], globalViewNames?: string[]}>`
+       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser', sharedLists?: string[], globalViewNames?: string[], personalBundle?: string}>`
        * - see `dev.js`'s `registerApp()`/`setAppMode()`, `platform.js`'s
        * `PlatformRuntime`. `realm: 'global'` entries (`appAdminPub: null`)
        * route into content ANY configured relay-admin collectively

@@ -50,7 +50,7 @@ import { bindList } from '@qu/space-ui';
 /** @type {WeakMap<Element, () => void>} mountEl -> "close every View this file opened for it last time". See this file's own "SELF-CLEANING ACROSS ROUTE CHANGES" doc comment. */
 const openViewsByMountEl = new WeakMap();
 
-function renderItem(item, itemTemplate, doc) {
+function renderItem(item, itemTemplate, doc, { routeNamespace, userRef } = {}) {
   const filled = resolveSlots(
     sanitizeHtml(itemTemplate, doc),
     {
@@ -69,7 +69,18 @@ function renderItem(item, itemTemplate, doc) {
   // attribute" posture as every other framework-provided interactivity in this package.
   const links = wrapper.querySelectorAll('[data-qu-view-link]');
   if (item.route) {
-    for (const link of links) link.setAttribute('href', `#${item.route}`);
+    // `routeNamespace`/`userRef` (both present only for a `boot.js` `renderMultiUserRoute()` additive
+    // `/u/<ref>/` call - `routeNamespace: ''`, mode:'multiuser''s own bare-prefix case, deliberately
+    // opts OUT of this, unchanged from before this param existed) re-insert the `/u/<ref>` segment
+    // `parseMultiUserSubPath()` strips before resolving - `item.route` itself is the STORED,
+    // unprefixed self-owned route (must stay that way for `deriveContentNodeId` to agree with what
+    // was written), so a link built from it verbatim would point at the app's GLOBAL shell instead
+    // of back into this same personal instance.
+    const href =
+      routeNamespace && userRef && item.route.startsWith(routeNamespace)
+        ? `${routeNamespace}/u/${userRef}${item.route.slice(routeNamespace.length)}`
+        : item.route;
+    for (const link of links) link.setAttribute('href', `#${href}`);
   }
   // Every SCALAR field of the source's own raw item (e.g. a shared-list entry's own `topicId`) is
   // ALSO exposed as a `data-*` attribute on `[data-qu-view-link]` - not just `title`/`excerpt`/
@@ -90,9 +101,9 @@ function renderItem(item, itemTemplate, doc) {
 /**
  * Wires every `[data-qu-view="<name>"]` element in `mountEl` to that
  * View's own live, merged feed - see this file's own top doc comment.
- * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, appAdminPub: Uint8Array, kinds?: object}} params - `kinds`/`appAdminPub` are the SAME override `ContentResolver`/`openLiveView()` already accept (e.g. `cms-actions.js`'s own `GLOBAL_KINDS` for a `realm: 'global'` app) - a View's OWN sources resolve against these too, so a global app's View correctly reads ITS OWN route registry, not the default one.
+ * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, appAdminPub: Uint8Array, kinds?: object, routeNamespace?: string, userRef?: string}} params - `kinds`/`appAdminPub` are the SAME override `ContentResolver`/`openLiveView()` already accept (e.g. `cms-actions.js`'s own `GLOBAL_KINDS` for a `realm: 'global'` app) - a View's OWN sources resolve against these too, so a global app's View correctly reads ITS OWN route registry, not the default one. `routeNamespace`/`userRef` - `boot.js`'s `renderMultiUserRoute()` own additive `/u/<ref>/` case only, see `renderItem()`'s own doc comment on why item links need it.
  */
-export async function wireViews({ mountEl, doc, space, appAdminPub, kinds }) {
+export async function wireViews({ mountEl, doc, space, appAdminPub, kinds, routeNamespace, userRef }) {
   openViewsByMountEl.get(mountEl)?.();
   openViewsByMountEl.delete(mountEl);
 
@@ -111,7 +122,7 @@ export async function wireViews({ mountEl, doc, space, appAdminPub, kinds }) {
       closers.push(() => view.close());
       const stopBinding = bindList(container, view, {
         key: (item, i) => item.route ?? `${i}:${item.title}`,
-        render: (item) => renderItem(item, config.itemTemplate, doc),
+        render: (item) => renderItem(item, config.itemTemplate, doc, { routeNamespace, userRef }),
       });
       closers.push(stopBinding);
     })

@@ -88,10 +88,29 @@ const MODE_LABELS = { off: 'Aus', global: 'Global', multiuser: 'Multi-User' };
  * installed from the same session - and, as a bonus, they get the SAME
  * mode toggle (`MODE_LABELS` below) and "Verwalten"/"Besuchen" links every
  * other global app already has, for free.
+ *
+ * `personalBundle` (Gästebuch/Blog only, omitted for Forum - see
+ * `installed-apps-actions.js`'s own `PERSONAL_INSTALLERS` doc comment on
+ * why) tags this prefix so `boot.js`'s own ADDITIVE `/u/<ref>/` route
+ * (alongside the global one, never instead of it) knows which reference
+ * app's personal-instance installer to self-provision the first time a
+ * visitor reaches `#/<prefix>/u/me/` - `dev.js`'s `registerApp()` own doc
+ * comment on the field. Gästebuch's `sharedLists` here ALSO includes
+ * `<prefix>:personal` upfront - `installPersonalGuestbook()`'s own doc
+ * comment on why: unlike the global list (`prefix` itself), a per-visitor
+ * personal guestbook's own list name can't be known until someone actually
+ * self-provisions one, so ALL of them share this ONE, pre-registered list
+ * instead, filtered per owner.
  */
 const APP_INSTALLERS = {
-  guestbook: { label: 'Gästebuch', install: installGuestbook, sharedLists: (prefix) => [prefix], viewNames: (prefix) => [`${prefix}-feed`] },
-  blog: { label: 'Blog', install: installBlog, sharedLists: () => [], viewNames: (prefix) => [`${prefix}-index`] },
+  guestbook: {
+    label: 'Gästebuch',
+    install: installGuestbook,
+    sharedLists: (prefix) => [prefix, `${prefix}:personal`],
+    viewNames: (prefix) => [`${prefix}-feed`],
+    personalBundle: 'guestbook',
+  },
+  blog: { label: 'Blog', install: installBlog, sharedLists: () => [], viewNames: (prefix) => [`${prefix}-index`], personalBundle: 'blog' },
   forum: {
     label: 'Forum',
     install: installForum,
@@ -220,6 +239,7 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
             name: installer.label,
             sharedLists: installer.sharedLists(prefix),
             globalViewNames: installer.viewNames(prefix),
+            personalBundle: installer.personalBundle,
           })
         );
         await new Promise((resolve) => setTimeout(resolve, 400)); // let the relay's live resolver start watching this app's own route registry/shared lists/View names.

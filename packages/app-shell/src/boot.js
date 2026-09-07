@@ -19,7 +19,7 @@ import { renderPage } from '@qu/app-renderer';
 import { wireAdminConsole } from './admin-actions.js';
 import { wireCms } from './cms-actions.js';
 import { wireViews } from './view-actions.js';
-import { wireInstalledApps } from './installed-apps-actions.js';
+import { wireInstalledApps, provisionPersonalInstance } from './installed-apps-actions.js';
 import { installCms } from '../cms-bundle.js';
 
 /**
@@ -227,37 +227,64 @@ async function ensureSelfProvisioned(space, ownerPub) {
 }
 
 /**
- * Renders one user's own sub-namespace within a `mode: 'multiuser'` global
- * app - an ORDINARY `AppRuntime`/`wireCms()` pair, exactly like a single-
- * owner app (`startApp()`'s own posture), just addressed at `ownerPub`
- * instead of a `qu-platform-apps`-registered `appAdminPub` - the whole
- * point of this mode: self-owned `'content'`-ACL Kinds need no relay-admin
+ * Renders one user's own sub-namespace within a `realm: 'global'` app - an
+ * ORDINARY `AppRuntime`/`wireCms()` pair, exactly like a single-owner app
+ * (`startApp()`'s own posture), just addressed at `ownerPub` instead of a
+ * `qu-platform-apps`-registered `appAdminPub` - the whole point of this
+ * mechanism: self-owned `'content'`-ACL Kinds need no relay-admin
  * cooperation or per-app registration to work AT ALL, they only need an
  * agreed-upon URL SHAPE to be discoverable, which is all this function
- * provides.
+ * provides. Two DIFFERENT callers use it, told apart by `routeNamespace`:
+ *
+ *   - `mode: 'multiuser'` (`routeNamespace` omitted/`''`) - the bare
+ *     `#/<prefix>/` prefix ITSELF means "my own space" (the flip this
+ *     mode is named for - `startPlatform()`'s own top doc comment). Route
+ *     resolves at the bare `userSubPath`, unprefixed - by design, so
+ *     `#/cms/u/me/` and `#/<any-other-multiuser-app>/u/me/` reach the
+ *     EXACT SAME identity-addressed content regardless of which app's URL
+ *     got you there (`deriveContentNodeId(ownerPub, kind, route)` has no
+ *     prefix in it at all) - ONE canonical personal space per identity,
+ *     not one per app. `ensureSelfProvisioned()`'s generic "Mein Bereich"
+ *     CMS starter is what a brand-new visitor sees here.
+ *   - An ORDINARY `mode: 'global'` app's own ADDITIVE `/u/<ref>/` (the user's
+ *     own framing: "zusätzlich zur globalen Route, optional") -
+ *     `routeNamespace: '/'+prefix` this time, so the resolved route becomes
+ *     `/<prefix><userSubPath>` instead of bare `userSubPath` - this is what
+ *     keeps a personal Guestbook/Blog instance from colliding with this
+ *     SAME identity's own "Mein Bereich" root OR a DIFFERENT app's own
+ *     personal instance (all three are the exact same self-owned Kind set,
+ *     told apart only by ROUTE now, not by owner). Never replaces what the
+ *     bare `#/<prefix>/` means - that still always resolves the GLOBAL
+ *     shell (`renderGlobalShell()`), unchanged, for every visitor.
+ *     `personalBundle` (the app's OWN `qu-platform-apps` entry - `dev.js`'s
+ *     `registerApp()` own doc comment) says WHICH reference app's own
+ *     personal-instance installer to self-provision instead of the generic
+ *     CMS starter - `installed-apps-actions.js`'s `provisionPersonalInstance()`.
  *
  * SELF-PROVISIONING, `ref === "me"` ONLY: a brand-new visitor's own
- * identity has no `qu-app` manifest yet the very first time they reach
- * their own `/u/me/` - rather than a 404 (technically correct, but a
- * dead end with no way to fix itself), this creates one, plus installs
- * the CMS editor, using nothing but THIS identity's own already-connected
- * `space` - the same `createApp()`/`installCms()` calls any install
- * script already makes, just triggered by a first visit instead of an
- * operator running one. Never done for someone else's `ref` (an ordinary
- * visitor reading Alice's still-empty page must never conjure content
- * into Alice's OWN name) - reading stays side-effect-free regardless of
- * what's actually there.
+ * identity has no content at this route yet the very first time they reach
+ * it - rather than a 404 (technically correct, but a dead end with no way
+ * to fix itself), this creates some, using nothing but THIS identity's own
+ * already-connected `space` - the same calls any install script already
+ * makes, just triggered by a first visit instead of an operator running
+ * one. Never done for someone else's `ref` (an ordinary visitor reading
+ * Alice's still-empty page must never conjure content into Alice's OWN
+ * name) - reading stays side-effect-free regardless of what's actually
+ * there.
  */
-async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ref, userSubPath }) {
+async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ref, userSubPath, routeNamespace = '', personalBundle }) {
   const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
   const ownerPub = resolveUserRef(ref, space);
   if (!ownerPub) {
     renderPage({ mountEl, doc: window.document, templateHtml: null, page: null, css: '', styleId });
     return;
   }
-  if (ref === 'me') await ensureSelfProvisioned(space, ownerPub);
+  if (ref === 'me') {
+    if (routeNamespace) await provisionPersonalInstance({ space, prefix: routeNamespace.slice(1), personalBundle });
+    else await ensureSelfProvisioned(space, ownerPub);
+  }
   const runtime = new AppRuntime(space, { appAdminPub: ownerPub });
-  const plan = await runtime.resolveRoute(userSubPath, timeoutOpt);
+  const plan = await runtime.resolveRoute(routeNamespace + userSubPath, timeoutOpt);
   mountEl.quSpace = space;
   renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
   // `wireInstalledApps()` goes FIRST, before `wireViews()` - see its own call in `startApp()`'s
@@ -270,7 +297,10 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   // and their save simply fails cleanly (cms-actions.js's own verifyWritesAcked()) unless that
   // owner actually granted them access.
   await wireCms({ mountEl, doc: window.document, space, appAdminPub: ownerPub });
-  await wireViews({ mountEl, doc: window.document, space, appAdminPub: ownerPub });
+  // `routeNamespace`/`ref` only actually rewrite anything when `routeNamespace` is non-empty (the
+  // additive `/u/<ref>/` case) - `view-actions.js`'s own `wireViews()` doc comment on why
+  // mode:'multiuser''s own bare-prefix case (`routeNamespace: ''`) deliberately opts out unchanged.
+  await wireViews({ mountEl, doc: window.document, space, appAdminPub: ownerPub, routeNamespace, userRef: ref });
 }
 
 /**
@@ -476,6 +506,25 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
       }
 
       if (isGlobal) {
+        // ADDITIVE personal route, an ordinary mode:'global' app's own `/u/<ref>/...` - never
+        // replaces what the bare prefix means (that's `mode: 'multiuser'`'s own job, above) - see
+        // renderMultiUserRoute()'s own doc comment on `routeNamespace`/`personalBundle` for the full
+        // "why prefixed, why this and not multiuser" reasoning. A bare prefix with no `/u/` segment
+        // falls through to the global shell exactly as before.
+        const userRoute = parseMultiUserSubPath(match.subPath);
+        if (userRoute) {
+          await renderMultiUserRoute({
+            space,
+            mountEl,
+            window,
+            styleId,
+            resolveTimeout,
+            ...userRoute,
+            routeNamespace: `/${match.prefix}`,
+            personalBundle: match.personalBundle,
+          });
+          return;
+        }
         await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: match.prefix, subPath: match.subPath });
         return;
       }

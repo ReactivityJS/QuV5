@@ -301,3 +301,89 @@ test('Forum: a topic is started by one Space member and replied to by a DIFFEREN
   replierRouter.stop();
   await relay.close();
 });
+
+test('Guestbook: a visitor\'s own personal guestbook (#/book/u/me/) is separate from the global one and self-provisions on first visit', async () => {
+  const visitor = await actor();
+  const relay = await bootRelay({ extraActors: [visitor] });
+  try {
+    const adminSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl: adminMountEl, router: adminRouter } = mountAdmin(adminSpace);
+    await installViaForm(adminMountEl, 'guestbook', 'book');
+    adminRouter.stop();
+
+    const visitorSpace = await relay.connect(visitor);
+    const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/book/u/me/' });
+    const mountEl = window.document.querySelector('qu-app-shell');
+    const { router } = startPlatform({ space: visitorSpace, mountEl, window, resolveTimeout: 1500 });
+
+    // Self-provisioned "Mein Gästebuch" - a DIFFERENT page than the global one, reached via the
+    // ADDITIVE /u/me/ route (boot.js's own doc comment: never replaces what the bare #/book/ prefix
+    // means - the assertion at the very end of this test proves that side by side).
+    await waitUntil(() => mountEl.textContent.includes('Mein Gästebuch'));
+    await waitUntil(() => mountEl.querySelector('form[data-qu-action="guestbook-form"]'));
+    const personalForm = mountEl.querySelector('form[data-qu-action="guestbook-form"]');
+    personalForm.querySelector('[name="name"]').value = 'Alice';
+    personalForm.querySelector('[name="message"]').value = 'Das ist mein eigenes Gästebuch!';
+    personalForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await waitUntil(() => /bestätigt/.test(personalForm.querySelector('[data-qu-status]')?.textContent ?? ''));
+    await waitUntil(() => mountEl.querySelector('[data-qu-view="book-personal-feed"]')?.textContent.includes('Das ist mein eigenes Gästebuch!'));
+
+    // The GLOBAL guestbook, at the bare prefix, is untouched by any of this - a different page, a
+    // different (empty) feed. Waits for the GLOBAL feed specifically (`book-feed`, not
+    // `book-personal-feed`) - both renders have a `form[data-qu-action="guestbook-form"]`, so
+    // waiting on that alone would resolve against the STALE personal render still in the DOM the
+    // instant navigate() is called, before the new page actually replaces it.
+    router.navigate('/book/');
+    await waitUntil(() => mountEl.querySelector('[data-qu-view="book-feed"]'));
+    assert.ok(mountEl.textContent.includes('Gästebuch') && !mountEl.textContent.includes('Mein Gästebuch'), 'the bare prefix still shows the GLOBAL guestbook page');
+    assert.ok(!mountEl.querySelector('[data-qu-view="book-feed"]').textContent.includes('Das ist mein eigenes Gästebuch!'), "the global feed never saw the personal guestbook's own entry");
+
+    router.stop();
+  } finally {
+    await relay.close();
+  }
+});
+
+test('Blog: a visitor\'s own personal blog (#/blog/u/me/) lets ANY Space member publish, separately from the relay-admin-only global blog', async () => {
+  const author = await actor();
+  const relay = await bootRelay({ extraActors: [author] });
+  try {
+    const adminSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl: adminMountEl, router: adminRouter } = mountAdmin(adminSpace);
+    await installViaForm(adminMountEl, 'blog', 'blog');
+    adminRouter.stop();
+
+    // `author` is an ORDINARY Space member, never a relay-admin - the global blog's own form would
+    // reject their post (blog-bundle.js's own doc comment: relay-admins only) - their PERSONAL blog
+    // uses self-owned, self-certified writes instead, so this must succeed regardless.
+    const authorSpace = await relay.connect(author);
+    const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/blog/u/me/' });
+    const mountEl = window.document.querySelector('qu-app-shell');
+    const { router } = startPlatform({ space: authorSpace, mountEl, window, resolveTimeout: 1500 });
+
+    await waitUntil(() => mountEl.textContent.includes('Mein Blog'));
+    await waitUntil(() => mountEl.querySelector('form[data-qu-action="blog-post-form"]'));
+    const form = mountEl.querySelector('form[data-qu-action="blog-post-form"]');
+    form.querySelector('[name="title"]').value = 'Mein erster eigener Post';
+    form.querySelector('[name="slug"]').value = 'eigener-post';
+    form.querySelector('[name="content"]').value = '<p>Ganz allein mein Blog.</p>';
+    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await waitUntil(() => /bestätigt/.test(form.querySelector('[data-qu-status]')?.textContent ?? ''), { timeout: 6000 });
+    await waitUntil(() => mountEl.querySelector('[data-qu-view] a[data-qu-view-link]'));
+    const link = mountEl.querySelector('[data-qu-view] a[data-qu-view-link]');
+    assert.equal(link.textContent, 'Mein erster eigener Post');
+    assert.equal(link.getAttribute('href'), '#/blog/u/me/post/eigener-post', "a personal post's own link stays within the /u/me/ instance - the bare /blog/post/<slug> the global blog uses would land on the GLOBAL shell instead (boot.js's own renderGlobalShell(), a different owner anchor entirely)");
+
+    // A fresh read-back through the SAME connection that just wrote it - see the earlier "Blog:
+    // a relay-admin publishes..." test's own comment on why this specific step gets a more generous
+    // timeout (a real, occasionally-slow relay round trip, not a logic bug).
+    router.navigate('/blog/u/me/post/eigener-post');
+    await waitUntil(() => mountEl.textContent.includes('Ganz allein mein Blog.'), { timeout: 8000 });
+
+    router.stop();
+  } finally {
+    await relay.close();
+  }
+});

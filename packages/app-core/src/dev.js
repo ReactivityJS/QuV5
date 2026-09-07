@@ -696,7 +696,7 @@ export async function installAppBundle(space, bundle) {
  *   to change it later for an app already registered.
  */
 /**
- * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'global', mode?: string, sharedLists?: string[], globalViewNames?: string[]}} params
+ * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'global', mode?: string, sharedLists?: string[], globalViewNames?: string[], personalBundle?: string}} params
  *   `sharedLists` (optional) - every `sharedListKind` NAME (`kinds.js`'s
  *   own doc comment, `pushToSharedList()`) this app's own content uses
  *   (e.g. a Guestbook app registers `[prefix]`, a Forum app registers
@@ -721,8 +721,19 @@ export async function installAppBundle(space, bundle) {
  *   'list every View this owner has' registry yet") - so its name has to be
  *   told to the relay up front, right here, the one place it's already
  *   known (the installer choosing this app's own fixed set of View names).
+ *
+ *   `personalBundle` (optional, `realm: 'global'` only) - a free-form tag
+ *   (e.g. `'guestbook'`/`'blog'`) naming WHICH reference app this prefix
+ *   is, so `@qu/app-shell`'s `boot.js`/`installed-apps-actions.js` know
+ *   which content to self-provision the FIRST time a visitor reaches their
+ *   own `#/<prefix>/u/me/` - see `boot.js`'s own doc comment on this
+ *   ADDITIVE personal route (never replaces what the bare prefix means,
+ *   unlike `mode: 'multiuser'`, which is a different, older mechanism for
+ *   a related but distinct need). Omit for a global app with no personal-
+ *   instance story at all (the built-in admin console, or any custom app) -
+ *   `#/<prefix>/u/me/` then simply resolves nothing, same as today.
  */
-export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode, sharedLists, globalViewNames }) {
+export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode, sharedLists, globalViewNames, personalBundle }) {
   // getOrSyncRegistryNode(), not a blind `space.getNode(id) ?? createNode()` - the SAME "never
   // re-createNode() over a Node that already exists, just torn down locally between two calls"
   // reasoning that function's own doc comment already documents for an app's per-owner registries -
@@ -739,6 +750,7 @@ export async function registerApp(space, { prefix, appAdminPub, name, realm = 'm
   if (realm === 'global' && mode) entry.mode = mode;
   if (sharedLists?.length) entry.sharedLists = sharedLists;
   if (realm === 'global' && globalViewNames?.length) entry.globalViewNames = globalViewNames;
+  if (realm === 'global' && personalBundle) entry.personalBundle = personalBundle;
   await node.field('apps').push(entry);
   return node;
 }

@@ -17,8 +17,17 @@
  * has the full "why this order, specifically" reasoning (the relay's
  * `live-app-resolver.js` needs to have observed the route before it will
  * classify the matching page write correctly).
+ *
+ * `data-qu-mode="personal"` (set only by `installPersonalBlog()`, absent
+ * from the GLOBAL blog's own form) switches this SAME form's submit
+ * handler to the self-owned `createPage()`/`publishRoute()` pair instead -
+ * ANY Space member may publish to their OWN personal blog (ordinary
+ * `'content'`-ACL self-certification, no relay-admin needed), at
+ * `/<prefix>/post/<slug>` instead of the global blog's bare `/post/<slug>`
+ * - see `installPersonalBlog()`'s own doc comment for the full "why
+ * prefixed" reasoning.
  */
-import { createGlobalPage, publishGlobalRoute, adminPageKind, globalAppAnchor, deriveContentNodeId } from '@qu/app-core';
+import { createGlobalPage, publishGlobalRoute, adminPageKind, globalAppAnchor, createPage, publishRoute, pageKind, deriveContentNodeId } from '@qu/app-core';
 import { verifyWritesAcked } from './verify-writes.js';
 
 /** @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space}} params */
@@ -26,6 +35,7 @@ export function wireBlog({ mountEl, doc, space }) {
   const form = mountEl.querySelector('form[data-qu-action="blog-post-form"]');
   if (!form) return;
   const prefix = form.getAttribute('data-qu-prefix');
+  const isPersonal = form.getAttribute('data-qu-mode') === 'personal';
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -36,14 +46,23 @@ export function wireBlog({ mountEl, doc, space }) {
       const title = form.querySelector('[name="title"]').value.trim();
       const slug = form.querySelector('[name="slug"]').value.trim();
       const content = form.querySelector('[name="content"]').value;
-      const route = `/post/${slug}`;
-      const anchor = await globalAppAnchor(prefix);
-      const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
-      await verifyWritesAcked(space, id, async () => {
-        await publishGlobalRoute(space, prefix, { route, title });
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        await createGlobalPage(space, prefix, { route, title, content });
-      });
+      if (isPersonal) {
+        const route = `/${prefix}/post/${slug}`;
+        const id = await deriveContentNodeId(space.identity.signingPub, pageKind.kind, route);
+        await verifyWritesAcked(space, id, async () => {
+          await createPage(space, { route, title, content });
+          await publishRoute(space, { route, title });
+        });
+      } else {
+        const route = `/post/${slug}`;
+        const anchor = await globalAppAnchor(prefix);
+        const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
+        await verifyWritesAcked(space, id, async () => {
+          await publishGlobalRoute(space, prefix, { route, title });
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          await createGlobalPage(space, prefix, { route, title, content });
+        });
+      }
       form.reset();
       status.textContent = 'Veröffentlicht und vom Relay bestätigt.';
     } catch (err) {
