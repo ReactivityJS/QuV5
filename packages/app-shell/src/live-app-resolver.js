@@ -69,23 +69,18 @@ import { createAppResolveKindSchema, platformAppsKind, PLATFORM_REGISTRY_ANCHOR,
  * function's OWN default parameter (`[{prefix: 'admin', templateNames:
  * ['main'], ...}]`, matching what `admin-console-bundle.js` ships) never
  * applies in platform mode any more, not even for the 'admin' prefix
- * itself. Since global apps have no TEMPLATE registry yet (kinds.js's own
- * "GLOBAL APP CONTENT" doc comment - a deliberate, documented scope cut,
- * pages first), the built-in admin console's own "main" template has no
- * OTHER way to stay correctly classified once this reactive resolver takes
- * over - its write gets silently misclassified against the generic
- * `'content'`-ACL fallback and rejected, and the console renders through
- * `@qu/app-renderer`'s own template-not-found fallback (no `<qu-slot>`
- * wrapper around the page's own markup) instead of the real one, or - if
- * the console's own PAGE also isn't registered in its route registry
- * (`bin/install-admin-console.mjs`/`bootstrap-platform.mjs` MUST call
- * `publishGlobalRoute()` for it, the exact same requirement any other
- * global app's page now has) - a literal "404" fallback, indistinguishable
- * from the console genuinely not being installed at all. Hardcoded here,
- * not derived from anything dynamic, because there is still no per-app
- * template registry to discover it FROM - this is the SAME "small, fixed,
- * known set" the admin console's own content has always been scoped to
- * (`@qu/app-core`'s `relay-resolver.js` own doc comment on "GLOBAL APPS").
+ * itself. The built-in admin console's own "main" template is hardcoded
+ * here rather than relying on any dynamic registration - it predates
+ * `registerApp()`'s own `globalTemplateNames` param (below) and there is no
+ * reason to ever make its OWN operators declare it. Every OTHER global
+ * app's own template/style names ARE now dynamic (`rebuild()`'s own
+ * `globalTemplateNamesByPrefix`/`globalStyleNamesByPrefix`, merged with
+ * this hardcoded set below) - `kinds.js`'s own `platformAppsKind` doc
+ * comment on the real, observed failure that gap used to cause: a NEW
+ * global app's own template (`installGlobalCms()`'s `__cms__`, for any
+ * prefix other than "admin") was silently REJECTED (no `'relay-admins'`
+ * -ACL classification exists for a name the relay was never told about)
+ * until `registerApp()`/`addGlobalTemplateNames()` closed it.
  */
 const KNOWN_GLOBAL_TEMPLATE_NAMES = { admin: ['main'] };
 
@@ -159,12 +154,27 @@ export function createLiveAppResolveKindSchema({ collectionRegistryKinds = [] } 
       // OWN `qu-platform-apps` entry instead, same as `sharedLists` below. Last entry per prefix
       // wins, same "last write wins" convention `platform.js`'s `resolveApps()` already uses.
       const globalViewNamesByPrefix = new Map();
+      // `globalTemplateNames`/`globalStyleNames` - the SAME "read straight off each app's own
+      // qu-platform-apps entry" pattern as `globalViewNames`, one Kind over - `kinds.js`'s own
+      // `platformAppsKind` doc comment on the real, observed failure this closes: a NEW global
+      // app's own template/style (any prefix other than the built-in admin console's hardcoded
+      // "main") was silently REJECTED (no 'relay-admins'-ACL classification exists for a name the
+      // relay was never told about) until this was added.
+      const globalTemplateNamesByPrefix = new Map();
+      const globalStyleNamesByPrefix = new Map();
       for (const app of apps) {
-        if (app?.realm === 'global' && app.globalViewNames?.length) globalViewNamesByPrefix.set(app.prefix, app.globalViewNames);
+        if (app?.realm !== 'global') continue;
+        if (app.globalViewNames?.length) globalViewNamesByPrefix.set(app.prefix, app.globalViewNames);
+        if (app.globalTemplateNames?.length) globalTemplateNamesByPrefix.set(app.prefix, app.globalTemplateNames);
+        if (app.globalStyleNames?.length) globalStyleNamesByPrefix.set(app.prefix, app.globalStyleNames);
       }
       const globalApps = [...watchedPrefixes].map((prefix) => ({
         prefix,
-        templateNames: KNOWN_GLOBAL_TEMPLATE_NAMES[prefix] ?? [],
+        // KNOWN_GLOBAL_TEMPLATE_NAMES ∪ whatever this prefix's own registration declared - the
+        // hardcoded admin-console default stays valid even for a prefix that ALSO lists its own
+        // names (not that "admin" ever would).
+        templateNames: [...new Set([...(KNOWN_GLOBAL_TEMPLATE_NAMES[prefix] ?? []), ...(globalTemplateNamesByPrefix.get(prefix) ?? [])])],
+        styleNames: globalStyleNamesByPrefix.get(prefix) ?? [],
         pageRoutes: (globalPageRoutesByPrefix.get(prefix) ?? []).filter(Boolean).map((r) => r.route),
         viewNames: globalViewNamesByPrefix.get(prefix) ?? [],
       }));

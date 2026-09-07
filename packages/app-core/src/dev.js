@@ -737,8 +737,16 @@ export async function installAppBundle(space, bundle) {
  *   kinds.js's own `platformAppsKind` doc comment on both; `setAppBundleVersion()`
  *   right below updates `bundleVersion` alone for an already-registered prefix,
  *   the same "push a newer entry, same prefix" pattern `setAppMode()` uses.
+ *
+ *   `globalTemplateNames`/`globalStyleNames` (optional, `realm: 'global'`
+ *   only) - see kinds.js's own `platformAppsKind` doc comment on both: a
+ *   REAL, observed failure mode this closes - `createGlobalTemplate()`/
+ *   `createGlobalStyle()` writes for a prefix OTHER than the built-in admin
+ *   console's own hardcoded `"main"` template are silently REJECTED (no
+ *   `'relay-admins'`-ACL classification exists for a name the relay was
+ *   never told about) unless listed here at registration time.
  */
-export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode, sharedLists, globalViewNames, personalBundle, appType, bundleVersion }) {
+export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode, sharedLists, globalViewNames, globalTemplateNames, globalStyleNames, personalBundle, appType, bundleVersion }) {
   // getOrSyncRegistryNode(), not a blind `space.getNode(id) ?? createNode()` - the SAME "never
   // re-createNode() over a Node that already exists, just torn down locally between two calls"
   // reasoning that function's own doc comment already documents for an app's per-owner registries -
@@ -755,6 +763,8 @@ export async function registerApp(space, { prefix, appAdminPub, name, realm = 'm
   if (realm === 'global' && mode) entry.mode = mode;
   if (sharedLists?.length) entry.sharedLists = sharedLists;
   if (realm === 'global' && globalViewNames?.length) entry.globalViewNames = globalViewNames;
+  if (realm === 'global' && globalTemplateNames?.length) entry.globalTemplateNames = globalTemplateNames;
+  if (realm === 'global' && globalStyleNames?.length) entry.globalStyleNames = globalStyleNames;
   if (realm === 'global' && personalBundle) entry.personalBundle = personalBundle;
   if (realm === 'global' && appType) entry.appType = appType;
   if (realm === 'global' && bundleVersion !== undefined) entry.bundleVersion = bundleVersion;
@@ -866,6 +876,39 @@ export async function addGlobalViewNames(space, { prefix, globalViewNames }) {
 }
 
 /**
+ * `addSharedLists()`'s own counterpart for `globalTemplateNames` - identical
+ * "push a newer entry, everything else carried over, deduplicated" pattern.
+ * `kinds.js`'s own `platformAppsKind` doc comment on the real, observed
+ * failure this (and `registerApp()`'s own `globalTemplateNames` param) fixes:
+ * a `createGlobalTemplate()` write for any prefix OTHER than the built-in
+ * admin console's hardcoded `"main"` template is silently REJECTED unless
+ * the relay was told to expect that name first - exactly here, for an
+ * ALREADY-registered app that never declared it upfront.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{prefix: string, globalTemplateNames: string[]}} params
+ */
+export async function addGlobalTemplateNames(space, { prefix, globalTemplateNames }) {
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
+  const apps = (await node.field('apps').toArray()).filter(Boolean);
+  const current = [...apps].reverse().find((a) => a.prefix === prefix);
+  if (!current) throw new Error(`addGlobalTemplateNames: "${prefix}" is not a registered app - registerApp() it first.`);
+  const merged = [...new Set([...(current.globalTemplateNames ?? []), ...globalTemplateNames])];
+  await node.field('apps').push({ ...current, globalTemplateNames: merged });
+  return node;
+}
+
+/** `addGlobalTemplateNames()`'s own counterpart for `globalStyleNames` - see that function's own doc comment (identical reasoning, `createGlobalStyle()` instead of `createGlobalTemplate()`). */
+export async function addGlobalStyleNames(space, { prefix, globalStyleNames }) {
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
+  const apps = (await node.field('apps').toArray()).filter(Boolean);
+  const current = [...apps].reverse().find((a) => a.prefix === prefix);
+  if (!current) throw new Error(`addGlobalStyleNames: "${prefix}" is not a registered app - registerApp() it first.`);
+  const merged = [...new Set([...(current.globalStyleNames ?? []), ...globalStyleNames])];
+  await node.field('apps').push({ ...current, globalStyleNames: merged });
+  return node;
+}
+
+/**
  * MERGES fields into an ALREADY-registered `realm: 'global'` app's own free-
  * form `config` bag (kinds.js's own `platformAppsKind` doc comment on why
  * this exists at all, and its `blog-bundle.js` `routeScheme` example) - same
@@ -939,18 +982,19 @@ export async function createGlobalApp(space, prefix, { name, version = '1.0', ro
 /**
  * Global-app counterpart to `createTemplate()` - see `createGlobalApp()`'s
  * own doc comment on `prefix`. UNLIKE `createGlobalPage()`, this has no
- * registry `@qu/app-shell`'s `live-app-resolver.js` watches yet (kinds.js's
- * own "GLOBAL APP CONTENT" doc comment - "TEMPLATES/STYLES stay a smaller,
- * more static set... a deliberate, separate scope boundary"), so a relay
- * only classifies THIS write correctly if `name` is in the STATIC
- * `templateNames` list `createAppResolveKindSchema()` was configured with
- * for `prefix` - true for the built-in admin console (`['main']`, its
- * OWN default) but NOT for any other, dynamically-registered global app
- * unless a deployment wires its own static list. Calling this for a
- * dynamically-registered global app's non-default template name will
- * silently fail (the relay misclassifies it against the ordinary
- * `'content'`-ACL fallback and rejects the write) until that gap is
- * closed - real, separate future work, not attempted in this pass.
+ * registry `@qu/app-shell`'s `live-app-resolver.js` watches to discover
+ * `name` FROM - a relay only classifies THIS write correctly if `name` is
+ * in the `templateNames` list `createAppResolveKindSchema()` was configured
+ * with for `prefix`, so `name` MUST be declared upfront: either hardcoded
+ * for the built-in admin console (`live-app-resolver.js`'s own
+ * `KNOWN_GLOBAL_TEMPLATE_NAMES`, `['main']`), or via `registerApp()`'s own
+ * `globalTemplateNames` param (or `addGlobalTemplateNames()` for an
+ * already-registered prefix) for any OTHER global app - `kinds.js`'s own
+ * `platformAppsKind` doc comment on the real, previously-shipped failure
+ * this closes: calling this for an UNDECLARED template name still silently
+ * fails (misclassified against the generic `'content'`-ACL fallback,
+ * write rejected) exactly as before - the fix is declaring the name, not a
+ * change to this function itself.
  */
 export async function createGlobalTemplate(space, prefix, { name, html }) {
   const anchor = await cachedGlobalAppAnchor(prefix);
@@ -958,7 +1002,7 @@ export async function createGlobalTemplate(space, prefix, { name, html }) {
   return space.createNode(adminTemplateKind, { html }, { id });
 }
 
-/** Global-app counterpart to `createStyle()` - see `createGlobalTemplate()`'s own doc comment (including its "not yet dynamically discoverable" caveat - identical here for `styleNames`). */
+/** Global-app counterpart to `createStyle()` - see `createGlobalTemplate()`'s own doc comment (including the "declare the name via `registerApp()`'s `globalStyleNames`/`addGlobalStyleNames()` first" requirement - identical here, just the sibling field). */
 export async function createGlobalStyle(space, prefix, { name, css }) {
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminStyleKind.kind, name);

@@ -125,56 +125,43 @@ always admits a self-generated bootstrap relay-admin identity, persisted at
 `QU_RELAY_BOOTSTRAP_ADMIN=false` disables it if you'd rather rely only on
 an explicitly-configured `QU_RELAY_ADMINS`). Getting to an
 ACTUALLY-configured platform (the built-in admin console installed, one
-CMS-managed demo shell-app) is always the SAME two steps, regardless of how
-you deploy - Compose, `docker stack`, Kubernetes, bare metal - except now
-you can skip the "paste `QU_RELAY_ADMINS` and redeploy" round trip
-entirely by retrieving that auto-generated identity file instead of
-generating your own:
+CMS-managed demo shell-app) needs **no `QU_RELAY_ADMINS` pasting or
+redeploy at all** when run via `docker exec` into that SAME container -
+`bootstrap-platform.mjs` finds and reuses the relay's own already-trusted
+bootstrap identity directly:
 
 ```sh
-docker cp <container>:/data/relay-bootstrap-admin.json ./relay-admin.json
-npm run bootstrap:platform -- --relay ws://<your-host>:8081 --dir .
+docker exec -it <container> npm run bootstrap:platform -- --relay ws://localhost:8081 --dir /data
 ```
 
-(`--dir` must point at a directory containing that file named exactly
-`relay-admin.json` - `bootstrap-platform.mjs`'s own `ensureIdentity()`
-reads that specific filename.) Prefer your own pubkey in `QU_RELAY_ADMINS`
-instead if you'd rather not depend on a filesystem-retrieved identity at
-all - the ORIGINAL two-step flow below still works exactly as documented:
+(`--dir /data` - the SAME volume the container's relay already writes
+`relay-bootstrap-admin.json` into; `docker-compose.space-relay.yml`'s own
+`QU_BOOTSTRAP_DIR` already defaults to it, so `--dir` can be omitted there
+entirely.) One run is normal now - no "paste, redeploy, run again" round
+trip needed for this path.
+
+**Running it from a machine that only has network access to your relay's
+public URL, not its filesystem** (your own laptop, a CI runner) - the
+ORIGINAL flow, still fully supported, since there's no shared filesystem to
+find `relay-bootstrap-admin.json` on:
 
 ```sh
-npm run bootstrap:platform
+npm run bootstrap:platform -- --relay ws://<your-host>:8081
 ```
 
-**Run this from ANYWHERE with network access to your relay's URL - your
-own laptop, a CI runner, wherever is easiest** (never touches your
-deployment config either way): it generates a single `relay-admin`
-identity locally, then either
+This generates a SEPARATE, script-managed `relay-admin` identity locally
+(persisted next to the script by default, `--dir`/`QU_BOOTSTRAP_DIR` to
+change that), then either
 
-**A REAL FOOTGUN if you run it via `docker exec` into the SAME container
-you'll later redeploy** (common on managed platforms like Rancher/
-Kubernetes where a separate machine/toolchain is inconvenient): the
-identity it generates defaults to a path INSIDE the container's own
-filesystem, which does NOT survive a redeploy - the symptom is a
-brand-new `relay-admin` pubkey printed every time you run it, and the OLD
-relay-admin loses write access to everything it previously administered
-once its identity is gone. If you must run it this way, set
-`QU_BOOTSTRAP_DIR` (or pass `--dir`) to a path backed by a volume that
-actually survives redeploys - `docker-compose.space-relay.yml`'s own
-`qu-app-shell-relay-admin-identity` volume (mounted at `/admin-identity`,
-`QU_BOOTSTRAP_DIR` already defaults to it there) is the reference setup;
-back that volume up like you would any other private key. The script
-itself warns loudly when `--dir`/`QU_BOOTSTRAP_DIR` isn't set, for exactly
-this reason.
-
-- the relay isn't configured yet → **prints the exact `QU_RELAY_ADMINS`
+- the relay doesn't trust it yet → **prints the exact `QU_RELAY_ADMINS`
   value** (a plain JSON array of base64 pubkeys, public keys only - the ONE
   static list a platform deployment needs) for YOU to paste into however
   you manage your deployment's environment - `docker-compose.space-relay.yml`
   directly, your own `docker stack` file, a Kubernetes manifest, systemd,
   whatever - then redeploy however you already do (`docker compose up -d`,
   `docker stack deploy`, ...) and run the SAME command again; or
-- the relay already has them (this second run, or any later one) →
+- the relay already trusts it (this second run, or any later one, or the
+  FIRST run via the `docker exec`/bootstrap-identity path above) →
   installs the admin console AND registers the built-in **"cms"** app as
   `realm: 'global'`, `mode: 'multiuser'` (see "Three administrable states"
   below) under `#/admin` and `#/cms` respectively, and prints the exact
@@ -184,6 +171,22 @@ this reason.
   `bin/bootstrap-platform.mjs`'s own doc comment for the full reasoning:
   every visitor gets their own self-owned CMS space at `#/cms/` the moment
   they visit it, with zero cooperation from this script or any relay-admin.
+
+**A REAL FOOTGUN if you run the SEPARATE-identity path via `docker exec`
+into the SAME container you'll later redeploy** (common on managed
+platforms like Rancher/Kubernetes where a separate machine/toolchain is
+inconvenient) - only relevant if `--dir`/`QU_BOOTSTRAP_DIR` genuinely finds
+no `relay-bootstrap-admin.json` there (`QU_RELAY_BOOTSTRAP_ADMIN=false`, or
+a relay from before that feature existed): the identity it generates then
+defaults to a path INSIDE the container's own filesystem, which does NOT
+survive a redeploy - the symptom is a brand-new `relay-admin` pubkey
+printed every time you run it, and the OLD relay-admin loses write access
+to everything it previously administered once its identity is gone. Point
+`--dir`/`QU_BOOTSTRAP_DIR` at a volume that survives redeploys if you must
+run this fallback path repeatedly against the same container - or just use
+the bootstrap-identity path above instead, which needs no such volume at
+all. The script itself warns loudly when this fallback path's own identity
+directory looks ephemeral, for exactly this reason.
 
 **You don't have to use the generated `relay-admin` identity at all** -
 `#/admin` is ordinary content in the SAME main Space, gated only by
