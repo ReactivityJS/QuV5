@@ -28,21 +28,41 @@
  * 'personal'` is still selectable for a Blog in the admin console; its bare
  * prefix will simply render an empty aggregate feed until that follow-up
  * lands.
+ *
+ * `routeScheme` (optional, default `'flat'` - `qu-placeholders.js`'s own
+ * `ROUTE_SCHEMES` doc comment on the full list and reasoning) - a QuV3
+ * requirement raised again for V5: a date-segmented post route
+ * (`/post/2026/09/07/erster-post` for `'yyyy/mm/dd'`) so a year/month/day
+ * ARCHIVE View (`view-sources.js`'s `'pages'` source `prefix` filter) comes
+ * for free, no new resolver code. Persisted into this app's own
+ * `qu-platform-apps` `config` (`dev.js`'s `setAppConfig()`) by whichever
+ * caller installs it (`admin-actions.js`'s own install-form handler) so a
+ * LATER `updateBlog()`/personal-instance provisioning call picks the SAME
+ * scheme back up without the caller having to remember it - see
+ * `blog-actions.js`'s own `wireBlog()` doc comment for how a form actually
+ * resolves this at submit time.
  */
 import { createGlobalPage, publishGlobalRoute, createGlobalView, createPage, publishRoute, createView } from '@qu/app-core';
 import { upsertGlobalPage, upsertGlobalView, upsertPage, upsertView } from './bundle-upsert.js';
+import { ROUTE_SCHEMES } from './src/qu-placeholders.js';
 
 /** Bumped whenever this bundle's own shipped content changes - see `guestbook-bundle.js`'s own `GUESTBOOK_VERSION` doc comment, identical reasoning. */
 export const BLOG_VERSION = 1;
 
 const ITEM_TEMPLATE = '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a></p>';
 
-function globalPageFields(prefix) {
+/** `routeScheme` -> this bundle's own `{slug}`-ending route TEMPLATE (this file's own top doc comment) - `'flat'`/unset falls back to the pre-existing, unprefixed `/post/{slug}` unchanged. */
+function routeTemplate(routeScheme) {
+  return `/post/${ROUTE_SCHEMES[routeScheme ?? 'flat'] ?? ROUTE_SCHEMES.flat}`;
+}
+
+function globalPageFields(prefix, routeScheme) {
+  const template = routeTemplate(routeScheme);
   return {
     route: '/',
     title: 'Blog',
     content: `<h1>Blog</h1>
-<form data-qu-action="blog-post-form" data-qu-prefix="${prefix}">
+<form data-qu-action="blog-post-form" data-qu-prefix="${prefix}" data-qu-route-template="${template}">
   <label>Titel: <input name="title" required></label><br>
   <label>Route (z.B. "erster-post", nur Kleinbuchstaben/Zahlen/Bindestriche): <input name="slug" required pattern="[a-z0-9\\-]+"></label><br>
   <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required></textarea></label><br>
@@ -58,11 +78,11 @@ function globalIndexViewFields(prefix) {
   return { name: `${prefix}-index`, sources: [{ type: 'pages', prefix: '/post/' }], sortBy: 'title', sortOrder: 'asc', itemTemplate: ITEM_TEMPLATE };
 }
 
-/** @param {import('@qu/space-core').Space} space @param {{prefix: string}} params */
-export async function installBlog(space, { prefix }) {
+/** @param {import('@qu/space-core').Space} space @param {{prefix: string, routeScheme?: 'flat'|'yyyy'|'yyyy/mm'|'yyyy/mm/dd'}} params */
+export async function installBlog(space, { prefix, routeScheme }) {
   await publishGlobalRoute(space, prefix, { route: '/', title: 'Blog' });
   await new Promise((resolve) => setTimeout(resolve, 400));
-  await createGlobalPage(space, prefix, globalPageFields(prefix));
+  await createGlobalPage(space, prefix, globalPageFields(prefix, routeScheme));
   await createGlobalView(space, prefix, globalIndexViewFields(prefix));
 }
 
@@ -73,10 +93,17 @@ export async function installBlog(space, { prefix }) {
  * here. Never touches any already-published POST (a `realm: 'global'`
  * app's post is its own `adminPageKind` entry at its own route, untouched
  * by this - only the index page/View DEFINITIONS this bundle itself owns).
+ * `routeScheme` should be the SAME value this app was installed/last
+ * configured with (`admin-actions.js`'s own "Update verfügbar" button reads
+ * it back off `app.config` and passes it straight through) - passing a
+ * DIFFERENT one only changes the form's own template for POSTS PUBLISHED
+ * AFTER this call; it never migrates already-published routes (the same
+ * "no rename support" scope cut every other `updateX()`/`editX()` in this
+ * codebase already accepts).
  */
-export async function updateBlog(space, { prefix }) {
+export async function updateBlog(space, { prefix, routeScheme }) {
   await publishGlobalRoute(space, prefix, { route: '/', title: 'Blog' });
-  await upsertGlobalPage(space, prefix, globalPageFields(prefix));
+  await upsertGlobalPage(space, prefix, globalPageFields(prefix, routeScheme));
   await upsertGlobalView(space, prefix, globalIndexViewFields(prefix));
 }
 
@@ -100,13 +127,14 @@ export async function updateBlog(space, { prefix }) {
  * pair, at this PREFIXED route instead of the bare `/post/<slug>` the
  * global blog uses.
  */
-function personalPageFields(prefix) {
+function personalPageFields(prefix, routeScheme) {
+  const template = `/${prefix}${routeTemplate(routeScheme)}`;
   return {
     route: `/${prefix}/`,
     title: 'Mein Blog',
     data: { bundleVersion: BLOG_VERSION },
     content: `<h1>Mein Blog</h1>
-<form data-qu-action="blog-post-form" data-qu-prefix="${prefix}" data-qu-mode="personal">
+<form data-qu-action="blog-post-form" data-qu-prefix="${prefix}" data-qu-mode="personal" data-qu-route-template="${template}">
   <label>Titel: <input name="title" required></label><br>
   <label>Route (z.B. "erster-post", nur Kleinbuchstaben/Zahlen/Bindestriche): <input name="slug" required pattern="[a-z0-9\\-]+"></label><br>
   <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required></textarea></label><br>
@@ -122,9 +150,17 @@ function personalIndexViewFields(prefix) {
   return { name: `${prefix}-personal-index`, sources: [{ type: 'pages', prefix: `/${prefix}/post/` }], sortBy: 'title', sortOrder: 'asc', itemTemplate: ITEM_TEMPLATE };
 }
 
-export async function installPersonalBlog(space, { prefix }) {
+/**
+ * `routeScheme` (optional) - the SAME `qu-placeholders.js` scheme name the
+ * GLOBAL blog was installed/configured with (`installed-apps-actions.js`'s
+ * `provisionPersonalInstance()` threads `match.config` down to here, `boot.js`'s
+ * own `platformAppsKind.config` doc comment) - a visitor's own personal blog
+ * follows the SAME dated-or-flat convention the relay-admin picked for the
+ * site overall, rather than needing its own separate setting.
+ */
+export async function installPersonalBlog(space, { prefix, routeScheme }) {
   const route = `/${prefix}/`;
-  await createPage(space, personalPageFields(prefix));
+  await createPage(space, personalPageFields(prefix, routeScheme));
   await publishRoute(space, { route, title: 'Mein Blog' });
   await createView(space, personalIndexViewFields(prefix));
 }
@@ -134,11 +170,12 @@ export async function installPersonalBlog(space, { prefix }) {
  * `guestbook-bundle.js`'s `updatePersonalGuestbook()` own doc comment for
  * the full "why upsert, self-service, stamped version, never routed
  * through installX()" reasoning, identical here. Never touches any
- * already-published personal post.
+ * already-published personal post. `routeScheme` - see `installPersonalBlog()`'s
+ * own doc comment.
  */
-export async function updatePersonalBlog(space, { prefix }) {
+export async function updatePersonalBlog(space, { prefix, routeScheme }) {
   const route = `/${prefix}/`;
-  await upsertPage(space, personalPageFields(prefix));
+  await upsertPage(space, personalPageFields(prefix, routeScheme));
   await publishRoute(space, { route, title: 'Mein Blog' });
   await upsertView(space, personalIndexViewFields(prefix));
 }

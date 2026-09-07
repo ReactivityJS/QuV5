@@ -143,13 +143,41 @@ function renderAdminUnauthorized({ mountEl, doc }) {
  * that function's own doc comment on why the default flipped away from
  * the global shell (discoverability: a first-time visitor has no reason to
  * know or paste their own pubkey just to reach their OWN space).
+ *
+ * ALSO recognizes the SAME thing spelled without the `/u/` marker at all -
+ * `/<pubkey>/<rest>` - for an ordinary `mode: 'global'`/`'personal'` app's
+ * own ADDITIVE personal route (`renderMultiUserRoute()`'s own doc comment
+ * on `routeNamespace`): `#/blog/<pub>/` for that identity's own feed,
+ * `#/blog/<pub>/<slug>` for one of their own posts - `docs/example-apps.md`'s
+ * own worked example. Safe to accept unconditionally, no `/u/` needed to
+ * disambiguate: a real base64url-encoded 32-byte pubkey (`QuCrypto.
+ * fromBase64Url()`, the SAME check `PlatformRuntime`'s own top-level
+ * "unregistered prefix = literal owner id" fallback already makes) is a
+ * ~43-character string that will not, in practice, collide with an
+ * ordinary content route someone typed by hand. `"me"` is NOT a valid
+ * pubkey and never matches this shorter form on purpose - it stays
+ * reachable only via the explicit `/u/me/` spelling (this file's own
+ * `renderMultiUserRoute()` doc comment on why self-provisioning is
+ * deliberately gated on `ref === 'me'` specifically, never inferred from
+ * "some 32-byte value that happens to be this identity's own pubkey").
  * @param {string} subPath
  * @returns {{ref: string, userSubPath: string}|null}
  */
 function parseMultiUserSubPath(subPath) {
-  const match = /^\/u\/([^/]+)(\/.*)?$/.exec(subPath ?? '');
-  if (!match) return null;
-  return { ref: match[1], userSubPath: match[2] || '/' };
+  const explicit = /^\/u\/([^/]+)(\/.*)?$/.exec(subPath ?? '');
+  if (explicit) return { ref: explicit[1], userSubPath: explicit[2] || '/' };
+  const bare = /^\/([^/]+)(\/.*)?$/.exec(subPath ?? '');
+  if (bare && looksLikePubkey(bare[1])) return { ref: bare[1], userSubPath: bare[2] || '/' };
+  return null;
+}
+
+/** `parseMultiUserSubPath()`'s own "does this segment even look like a pubkey" check - `resolveUserRef()`'s own doc comment already does the REAL, authoritative decode; this is just a cheaper pre-filter so an ordinary route segment (e.g. a Blog's own global "/post/hallo") is never even attempted as one. */
+function looksLikePubkey(segment) {
+  try {
+    return QuCrypto.fromBase64Url(segment).length === 32;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -260,6 +288,11 @@ async function ensureSelfProvisioned(space, ownerPub) {
  *     `registerApp()` own doc comment) says WHICH reference app's own
  *     personal-instance installer to self-provision instead of the generic
  *     CMS starter - `installed-apps-actions.js`'s `provisionPersonalInstance()`.
+ *     `config` (this app's own `qu-platform-apps` `config`, `match.config`
+ *     straight off `PlatformRuntime.resolveForPath()` - kinds.js's own doc
+ *     comment) is threaded down to that SAME installer, so a visitor's
+ *     personal instance follows whatever install-time option (Blog's own
+ *     `routeScheme`) the relay-admin picked for the global one.
  *
  * SELF-PROVISIONING, `ref === "me"` ONLY: a brand-new visitor's own
  * identity has no content at this route yet the very first time they reach
@@ -272,7 +305,7 @@ async function ensureSelfProvisioned(space, ownerPub) {
  * name) - reading stays side-effect-free regardless of what's actually
  * there.
  */
-async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ref, userSubPath, routeNamespace = '', personalBundle }) {
+async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ref, userSubPath, routeNamespace = '', personalBundle, config }) {
   const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
   const ownerPub = resolveUserRef(ref, space);
   if (!ownerPub) {
@@ -281,7 +314,7 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   }
   let updateAvailable = false;
   if (ref === 'me') {
-    if (routeNamespace) ({ updateAvailable } = await provisionPersonalInstance({ space, prefix: routeNamespace.slice(1), personalBundle }));
+    if (routeNamespace) ({ updateAvailable } = await provisionPersonalInstance({ space, prefix: routeNamespace.slice(1), personalBundle, config }));
     else await ensureSelfProvisioned(space, ownerPub);
   }
   const runtime = new AppRuntime(space, { appAdminPub: ownerPub });
@@ -305,7 +338,7 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   // Only ever for `ref === 'me'` (`updateAvailable` stays `false` otherwise) - `installed-apps-
   // actions.js`'s own `wirePersonalUpdateBanner()` doc comment on why an update button on someone
   // ELSE's own personal instance would be actively wrong, not just pointless.
-  if (updateAvailable) wirePersonalUpdateBanner({ mountEl, doc: window.document, space, prefix: routeNamespace.slice(1), personalBundle });
+  if (updateAvailable) wirePersonalUpdateBanner({ mountEl, doc: window.document, space, prefix: routeNamespace.slice(1), personalBundle, config });
 }
 
 /**
@@ -568,6 +601,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
             ...userRoute,
             routeNamespace: `/${match.prefix}`,
             personalBundle: match.personalBundle,
+            config: match.config,
           });
           return;
         }

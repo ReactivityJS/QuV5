@@ -8,7 +8,9 @@
     ".": "./src/index.js",
     "./shell": "./src/shell.js",
     "./build": "./build.mjs",
-    "./admin-console-bundle": "./admin-console-bundle.js"
+    "./admin-console-bundle": "./admin-console-bundle.js",
+    "./bundle-upsert": "./bundle-upsert.js",
+    "./verify-writes": "./src/verify-writes.js"
   },
   "dependencies": {
     "@qu/app-core": "^0.1.0",

@@ -44,8 +44,13 @@ immediately, no Dev API calls of your own needed. The code below still shows
 the UNDERLYING primitives these bundles are built from (useful for a NEW app
 in this shape, e.g. a Live-Ticker or Geo Chase wanting the same "content
 features as reusable building blocks" - the reason the View-rendering code
-lives in `@qu/app-shell` rather than baked into the CMS). Chat (§4) remains a
-sketch only - no installable bundle exists for it yet.
+lives in `@qu/app-shell` rather than baked into the CMS).
+
+**Chat (§4) is also real now** - `apps/chat/` (`bundle.js`/`actions.js`/
+`index.js`), installed the exact same one-click way. It lives under `/apps/`
+rather than next to Guestbook/Blog/Forum in `packages/app-shell/` for a
+structural reason, not a maturity one: see `apps/README.md`'s own "Template +
+Data vs. genuine code" dividing line, and §5 below.
 
 **Two corrections the SHIPPED bundles make that the sketches below still
 predate:**
@@ -291,6 +296,202 @@ work for anything beyond "a simple form":**
 - **Editing/deleting a sent message**: same "ONLY ADDITIVE" constraint as
   the Forum's replies above.
 
+## 5. Building an app entirely through the admin console - no bundle.js, no script
+
+Every primitive §1-§4 use by hand (a `sharedListKind`-backed feed, a
+route-bound `viewKind`) is ALSO reachable purely through the admin
+console's own rendered UI, with zero Dev API calls of your own - the exact
+mechanism `guestbook-bundle.js`/etc. are themselves built on, just driven
+by forms instead of a script. Concretely, for a brand-new
+"Notizbrett"-style board (a public, many-author feed - structurally
+identical to §1's Guestbook):
+
+1. **Register a blank `realm: 'global'` app** - `#/admin`'s "App
+   registrieren" form, or (for now) a direct `registerApp(space, {prefix,
+   name, realm: 'global'})` call - no installer, no `bundle.js`.
+2. In the resulting app's row, type a **new shared-list name** (e.g.
+   `notesboard-entries`) into the field next to **"Views/Seiten (CMS)"**
+   and click it. This does two things, in order: `addSharedLists()`
+   (`@qu/app-core`'s `dev.js` - the relay has to be told a `'members'`-ACL
+   list's NAME before anything can write to it, same reasoning `sharedLists`
+   already documents for a bundle's own install step) registers the list,
+   then `installGlobalCms()` self-provisions this app's own Templates/
+   Styles/Pages/**Views** editor (`cms-bundle.js`) and navigates to
+   `#/admin/<prefix>/cms`.
+3. In the rendered **"Views (live Feeds)"** section, create a View: a
+   name, `sources: [{"type":"shared-list","name":"notesboard-entries"}]`,
+   `sortBy: "timestamp"`, an `itemTemplate`, and - the part that connects a
+   PATH to this generated View - a **route** (e.g. `/`). Submitting
+   self-registers the View's own name too (`addGlobalViewNames()`,
+   automatic, the same "tell the relay the name before writing it" step,
+   no separate button for this one - the form already knows the name the
+   moment it's typed) and auto-creates a wrapper page at that route
+   containing just `<div data-qu-view="...">`.
+4. **Header/footer, e.g. a sign-form above or below the list** (the
+   concrete case that started this whole section: a Gästebuch-style page
+   needs BOTH a feed AND a way to add to it): there is no separate
+   "header"/"footer" field - the auto-created wrapper page from step 3 is
+   itself ordinary, freely editable content. Go to the **"Seiten"** section
+   of the SAME editor, load that page (its route matches what you typed in
+   step 3), and edit its `content` to wrap the existing
+   `<div data-qu-view="...">` in a GENERIC, fully declarative write form -
+   `generic-write-actions.js`'s own `data-qu-action="qu-write"` convention,
+   wired unconditionally alongside every other reference app
+   (`installed-apps-actions.js`'s `wireInstalledApps()`), so it needs no
+   registration step of its own:
+   ```html
+   <h1>Notizbrett</h1>
+   <div data-qu-view="notesboard-feed"></div>
+   <form data-qu-action="qu-write" data-qu-target="shared-list" data-qu-list="notesboard-entries">
+     <input name="name" placeholder="Name">
+     <input name="message" placeholder="Nachricht">
+     <button type="submit">Eintragen</button>
+     <p data-qu-status></p>
+   </form>
+   ```
+   Every NAMED field (`name`/`message` here) becomes one key of the pushed
+   entry, plus an automatic `ts: Date.now()` - the SAME `{name, message,
+   ts}` shape the `'shared-list'` View source adapter already expects
+   (`view-sources.js`'s own doc comment), so the feed above picks up a
+   submission immediately, live, no reload. The View itself never needs to
+   change for this - only the page around it. `data-qu-target="page"`
+   (`data-qu-route="/post/{yyyy}/{mm}/{dd}/{slug}"`, say) is the SAME
+   convention's other shape - publishing a brand-new PAGE instead of a
+   shared-list entry, `data-qu-scope="global"` + `data-qu-prefix="..."` for
+   a relay-admin-only write, self-owned by default - see
+   `generic-write-actions.js`'s own top doc comment for the full attribute
+   reference, and the "Date-based archive routing" section below for why a
+   route template like that one is worth building at all.
+
+This is genuinely how far you can get with ZERO files today for an app
+that fits "Template + `qu-list`/`qu-bind`/`qu-view` data source" - see
+`apps/README.md`'s own dividing line for what does and doesn't qualify,
+and §6 below for the file-based side of that line.
+
+## 6. `/apps/*` - when a Template genuinely isn't enough
+
+`apps/README.md` has the full convention (`apps/<name>/index.js`,
+discovered at build time, administered identically to §1-§4 through the
+SAME admin console). Chat (§4) is the first resident, kept deliberately
+simple for now (one shared list, one View - it could, today, have been
+built via §5's own UI-only workflow instead). The reason it lives here
+regardless: the planned direction for it - sharing a live location,
+message reactions, a Slots-style extension point other apps register
+actions/UI into (the QuV3 precedent this project is drawing on: a shared
+menu/toolbar that apps contribute entries to without the host needing to
+know about them in advance) - is genuine per-message CODE, not a
+different shape of content a Template could express. `architecture.md`'s
+own still-open "app modules" question is answered for exactly this shape
+of app now; genuine custom EXECUTION logic beyond "a real relay write" per
+interaction (a Geo Chase's own game rules, a Live-Ticker's event-scoring)
+remains real, separate future work.
+
+## Personal-instance routing: the additive `/u/<ref>/` scheme
+
+Guestbook and Blog (§1-§2) also support a PERSONAL instance per visitor,
+additive to the app's own global one (never replacing what the bare prefix
+means - `boot.js`'s `renderMultiUserRoute()` own top doc comment has the
+full reasoning): `#/<prefix>/u/<ref>/`, where `ref` is `"me"` (the
+default) or another identity's own base64url pubkey.
+
+**The same address also works WITHOUT the literal `"u/"` marker** - a bare
+pubkey segment is unambiguous enough on its own (the exact same "does this
+look like a pubkey" test `PlatformRuntime`'s own top-level prefix fallback
+already uses, `boot.js`'s `parseMultiUserSubPath()` own doc comment): `#/
+blog/<pub>/` reaches that identity's own feed, `#/blog/<pub>/post/<slug>`
+one of their own posts - not just the longer `#/blog/u/<pub>/post/<slug>`
+form. `"me"` is not a valid pubkey and only ever works with the explicit
+`/u/me/` spelling - self-provisioning stays gated on that literal string,
+never inferred from "this happens to be my own pubkey" (reading someone
+ELSE's still-empty page must never conjure content into THEIR name).
+
+Concretely, for Blog:
+
+| Route | Resolves to |
+|---|---|
+| `#/blog/` | the relay-admin-curated GLOBAL feed |
+| `#/blog/<pub>/` | that identity's own personal blog's index |
+| `#/blog/<pub>/post/<slug>` | one of their own posts |
+
+Posts stay nested under the owner's own address (`/post/<slug>`, not a
+flat `/blog/<slug>` sitting directly next to the index) rather than at some
+independent, owner-agnostic path - this is a real constraint, not a
+stylistic choice: a personal post is self-owned content, addressed as
+`(ownerPub, kind, route)` (`kinds.js`'s own doc comment) - the router needs
+to already know BOTH pieces to resolve anything at all, and the URL itself
+is the only place both are available without a separate slug→owner lookup
+registry (a real, buildable primitive, just not one that exists today, and
+arguably not worth building only to shave one path segment off a URL that
+already reads perfectly clearly with it).
+
+## Date-based archive routing for Blog: `routeScheme`
+
+A QuV3 requirement raised again here: a blog post's own route segmented by
+date (`yyyy/mm/dd`, or just `yyyy/mm`, or `yyyy`) so a year/month/day
+ARCHIVE view is possible at all. The short answer for the Yjs-based V5
+storage layer: **yes, still worth having, and it costs no new resolver
+code** - `view-sources.js`'s `'pages'` View source already filters by a
+plain STRING PREFIX on the route (`§2`'s own `prefix: '/blog/'` for the
+whole-blog index); once a post's own route is itself hierarchical
+(`/post/2026/09/07/erster-post` rather than the flat `/post/erster-post`
+default), that SAME `prefix` param already gives a year (`/post/2026/`), a
+month (`/post/2026/09/`), or a day (`/post/2026/09/07/`) archive for free -
+one MORE `viewKind` per granularity wanted, nothing else.
+
+Blog's own admin-console install form (`admin-console-bundle.js`) offers a
+**"Datums-Schema für Beiträge"** `<select>` - `flat` (the pre-existing,
+unprefixed default), `yyyy`, `yyyy/mm`, or `yyyy/mm/dd`
+(`qu-placeholders.js`'s own `ROUTE_SCHEMES` map). The choice is persisted
+into the app's own `qu-platform-apps` `config` (`kinds.js`'s own doc
+comment, `dev.js`'s `setAppConfig()`) so a LATER "Update verfügbar" click,
+or a visitor's own personal-blog self-provisioning, picks the SAME scheme
+back up automatically. Concretely, choosing `yyyy/mm/dd` bakes a
+`data-qu-route-template="/post/{yyyy}/{mm}/{dd}/{slug}"` attribute onto the
+Blog's own post form (`blog-bundle.js`); `blog-actions.js`'s `wireBlog()`
+resolves it at SUBMIT time via `qu-placeholders.js`'s `resolvePlaceholders()`
+- `{yyyy}`/`{mm}`/`{dd}` from TODAY's date, `{slug}` from the form's own
+field - so a post published today always lands under today's own archive
+segment, permanently (never recomputed later; the route is fixed the
+moment the page is created, same as any other content-addressed Node).
+
+Building an actual archive View is then just ANOTHER `createGlobalView()`
+call (or the SAME "Views/Seiten (CMS)" editor §5 describes), narrower than
+Blog's own unfiltered index:
+
+```js
+import { createGlobalView } from '@qu/app-core';
+
+await createGlobalView(space, 'blog', {
+  name: 'blog-2026-09',
+  sources: [{ type: 'pages', prefix: '/post/2026/09/' }],
+  sortBy: 'title',
+  sortOrder: 'asc',
+  route: '/2026/09',
+  itemTemplate: '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a></p>',
+});
+```
+
+**Not attempted here**: a SINGLE archive View that reads the currently
+VISITED month straight off the URL (`#/blog/2026/09` rendering that
+month's own posts without a separate View per month) - today's Views are
+static, pre-configured records (`view-sources.js`'s own top doc comment:
+"`config` is read ONCE... editing a View's `sources`... only takes effect
+the NEXT time"), so this would need the router itself to extract date
+segments and pass them into View resolution as a dynamic parameter, the
+same class of extension `boot.js`'s own personal-instance `{ref}` capture
+already does for identity - real, separate, buildable future work, not
+needed for the "one archive View per month a relay-admin explicitly wants"
+case above.
+
+**Beyond dates**: `qu-placeholders.js`'s `AMBIENT_PLACEHOLDERS` is a small,
+explicitly extensible map (currently `{yyyy}`/`{mm}`/`{dd}`/`{pub}`) - a
+future `{alias}` (once a human-readable alias registry exists), or any
+other ambient value a route/list-name template might want, is a ONE-LINE
+addition there, usable immediately from every declaratively-configured
+template in the app shell (a `routeScheme`, a `data-qu-route`/`data-qu-list`
+on a generic write form, §5's own `notesboard-entries` example) with no
+change anywhere else.
+
 ## Where the four examples actually differ
 
 | | New Kind needed? | Who may post | Structure |
@@ -300,11 +501,11 @@ work for anything beyond "a simple form":**
 | Forum | No (`sharedListKind`, twice) | any Space member | one list of topics, one list of replies PER topic |
 | Chat | No (`sharedListKind`) | any Space member | one flat list, no per-item substructure |
 
-None of the four needed a new Kind-Schema, a filesystem-based "app
-module," or any change to `@qu/space-core`/`@qu/space-transport` - the
-generic primitives (self-owned content, member-writable shared lists,
-live merging Views) already cover this whole class of app. See
-architecture.md's own still-open "app modules" question for what
-WOULD eventually need more than content: genuine custom EXECUTION logic
-(e.g. game rules for a "Geo Chase," a Live-Ticker's own event-scoring),
-not just a different shape of content.
+None of the four needed a new Kind-Schema, and building one at all (§5)
+turned out to be optional even for a brand-new app, never mind a change to
+`@qu/space-core`/`@qu/space-transport` - the generic primitives (self-owned
+content, member-writable shared lists, live merging Views) already cover
+this whole class of app. §6/`apps/README.md` covers what genuinely needs
+more: custom EXECUTION logic (e.g. game rules for a "Geo Chase," a
+Live-Ticker's own event-scoring, Chat's own planned location/reactions/
+Slots work), not just a different shape of content.

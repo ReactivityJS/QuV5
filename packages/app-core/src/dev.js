@@ -809,6 +809,83 @@ export async function setAppBundleVersion(space, { prefix, bundleVersion }) {
 }
 
 /**
+ * ADDS one or more shared-list names to an ALREADY-registered `realm:
+ * 'global'` app's own `sharedLists` (kinds.js's own `platformAppsKind` doc
+ * comment on why the relay needs to know these names upfront - a
+ * `'members'`-ACL Kind's id is anchored on a HASH OF ITS NAME, so an
+ * unregistered name is misclassified/rejected regardless of who writes to
+ * it). Exists because `registerApp()` itself builds a fresh entry from
+ * exactly the fields it's given - calling it AGAIN to add one more shared
+ * list would silently DROP every other field (`mode`/`personalBundle`/
+ * `appType`/`bundleVersion`/...) unless the caller remembers to re-pass all
+ * of them - the same "push a newer entry, everything else carried over"
+ * pattern `setAppMode()`/`setAppBundleVersion()` already use, just for this
+ * field. Deduplicates against what's already there - safe to call with a
+ * name this app already has.
+ *
+ * The concrete case this unblocks: a relay-admin builds an app ENTIRELY
+ * through the admin console's own CMS editor (`installGlobalCms()`, no
+ * `bundle.js` at all) - a shared-list-backed View (a Gästebuch-style "many
+ * visitors contribute" feed) needs ITS OWN list name registered somewhere,
+ * and this is that "somewhere" for an app that was never `registerApp()`ed
+ * with one upfront.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{prefix: string, sharedLists: string[]}} params
+ */
+export async function addSharedLists(space, { prefix, sharedLists }) {
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
+  const apps = (await node.field('apps').toArray()).filter(Boolean);
+  const current = [...apps].reverse().find((a) => a.prefix === prefix);
+  if (!current) throw new Error(`addSharedLists: "${prefix}" is not a registered app - registerApp() it first.`);
+  const merged = [...new Set([...(current.sharedLists ?? []), ...sharedLists])];
+  await node.field('apps').push({ ...current, sharedLists: merged });
+  return node;
+}
+
+/**
+ * `addSharedLists()`'s own counterpart for `globalViewNames` - identical
+ * "push a newer entry, everything else carried over, deduplicated" pattern,
+ * one field over. `cms-actions.js`'s `wireViewEditor()` calls this itself,
+ * automatically, the moment a relay-admin creates a NEW View for a
+ * `realm: 'global'` app through the rendered CMS form - there is no
+ * separate "register this View's name first" step for a caller to forget,
+ * unlike `sharedLists` (a shared list's own NAME is chosen independently of
+ * any one View, so nothing else can infer it automatically the way a
+ * View's OWN name is right there the moment it's created).
+ * @param {import('@qu/space-core').Space} space
+ * @param {{prefix: string, globalViewNames: string[]}} params
+ */
+export async function addGlobalViewNames(space, { prefix, globalViewNames }) {
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
+  const apps = (await node.field('apps').toArray()).filter(Boolean);
+  const current = [...apps].reverse().find((a) => a.prefix === prefix);
+  if (!current) throw new Error(`addGlobalViewNames: "${prefix}" is not a registered app - registerApp() it first.`);
+  const merged = [...new Set([...(current.globalViewNames ?? []), ...globalViewNames])];
+  await node.field('apps').push({ ...current, globalViewNames: merged });
+  return node;
+}
+
+/**
+ * MERGES fields into an ALREADY-registered `realm: 'global'` app's own free-
+ * form `config` bag (kinds.js's own `platformAppsKind` doc comment on why
+ * this exists at all, and its `blog-bundle.js` `routeScheme` example) - same
+ * "push a newer entry, everything else carried over" pattern as `setAppMode()`/
+ * `setAppBundleVersion()`/`addSharedLists()`, just merging ONE KEY DEEPER
+ * (`{...current.config, ...config}`, not the whole entry) so setting one
+ * config key never clobbers another a DIFFERENT call already set.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{prefix: string, config: Record<string, unknown>}} params
+ */
+export async function setAppConfig(space, { prefix, config }) {
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
+  const apps = (await node.field('apps').toArray()).filter(Boolean);
+  const current = [...apps].reverse().find((a) => a.prefix === prefix);
+  if (!current) throw new Error(`setAppConfig: "${prefix}" is not a registered app - registerApp() it first.`);
+  await node.field('apps').push({ ...current, config: { ...(current.config ?? {}), ...config } });
+  return node;
+}
+
+/**
  * Retracts `prefix`'s own registration - kinds.js's own `platformAppsKind`
  * doc comment on the `removed` marker in full: pushes one more entry for
  * this prefix with `removed: true`, which `platform.js`'s `resolveApps()`

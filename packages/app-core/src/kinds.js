@@ -229,9 +229,9 @@ export const platformAppsKind = publicMeta(
   defineKind('qu-platform-apps', {
     fields: {
       /**
-       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser'|'personal', sharedLists?: string[], globalViewNames?: string[], personalBundle?: string, appType?: string, bundleVersion?: number, removed?: true}>`
+       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser'|'personal', sharedLists?: string[], globalViewNames?: string[], personalBundle?: string, appType?: string, bundleVersion?: number, config?: Record<string, unknown>, removed?: true}>`
        * - see `dev.js`'s `registerApp()`/`setAppMode()`/`setAppBundleVersion()`/
-       * `unregisterApp()`, `platform.js`'s `PlatformRuntime`. `realm: 'global'` entries (`appAdminPub: null`)
+       * `setAppConfig()`/`unregisterApp()`, `platform.js`'s `PlatformRuntime`. `realm: 'global'` entries (`appAdminPub: null`)
        * route into content ANY configured relay-admin collectively
        * administers (see this file's own "GLOBAL APP CONTENT" doc comment)
        * instead of an ordinary owner-pubkey-addressed app - the SAME
@@ -310,6 +310,24 @@ export const platformAppsKind = publicMeta(
        * manually `registerApp()`ed app with no known reference bundle (no
        * Update affordance shown for those, correctly - there is nothing to
        * compare against).
+       *
+       * `config` (optional) - a small, entirely free-form JSON bag for
+       * whatever ONE MORE per-app setting a reference app's own bundle
+       * needs to remember between install and a LATER re-apply/self-
+       * provisioning call, without a Kind-Schema change every time a new
+       * one comes up (`dev.js`'s `setAppConfig()` own "push a newer entry,
+       * merge into `config`, everything else carried over" doc comment) -
+       * e.g. `blog-bundle.js`'s `routeScheme` (`'flat'`/`'yyyy'`/`'yyyy/mm'`/
+       * `'yyyy/mm/dd'`, `@qu/app-shell`'s `qu-placeholders.js` own doc
+       * comment on the scheme names and what a post's route looks like
+       * under each). Not interpreted by this Kind or `platform.js` at all -
+       * purely a caller-defined dictionary, the SAME "no shape imposed"
+       * posture `platformAppsKind.apps` itself already has one level up.
+       * `boot.js`'s own `match.config` (spread straight off whichever entry
+       * `resolveForPath()`/`resolveApps()` returned - no separate accessor
+       * needed) is how a render call site reads it back, e.g. to pass the
+       * SAME `routeScheme` down to a visitor's own personal-instance
+       * installer as the relay-admin picked for the global one.
        *
        * `removed` (optional, `true` when present) - `unregisterApp()`'s own
        * marker: this prefix's registration is retracted, exactly as

@@ -61,12 +61,14 @@
  * gate keeps `#/admin/...` from rendering for them at all.
  */
 import { QuCrypto } from '@qu/core';
-import { registerApp, setAppMode, setAppBundleVersion, unregisterApp, nullGlobalAppContent, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
+import { registerApp, setAppMode, setAppBundleVersion, setAppConfig, addSharedLists, unregisterApp, nullGlobalAppContent, publishGlobalRoute, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
 import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
 import { installForum } from '../forum-bundle.js';
+import { installGlobalCms } from '../cms-bundle.js';
 import { verifyWritesAcked } from './verify-writes.js';
+import { discoveredApps } from '../apps-registry.generated.js';
 
 // `'personal'` (kinds.js's own `platformAppsKind` doc comment) - a read-only, aggregated feed at
 // the bare prefix instead of a relay-admin-authored page, for an app whose personal instances
@@ -154,6 +156,20 @@ const APP_INSTALLERS = {
   },
 };
 
+/**
+ * `APP_INSTALLERS[appType]` above, extended with every FILE-BASED `/apps/*`
+ * app `apps-registry.generated.js` discovered at build time (repo root's
+ * own `apps/README.md` - the SAME descriptor shape, `key` standing in for
+ * this map's own property name). A discovered app with a `key` that
+ * collides with a hardcoded one above loses - `/apps/*` is for apps that
+ * genuinely need files, never a way to override one of the three reference
+ * apps that don't.
+ */
+function resolveInstaller(appType) {
+  if (APP_INSTALLERS[appType]) return APP_INSTALLERS[appType];
+  return discoveredApps.find((app) => app.key === appType) ?? null;
+}
+
 /** @param {{mountEl: Element, doc: Document, mainSpace: import('@qu/space-core').Space, platform: import('@qu/app-core').PlatformRuntime}} params */
 export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
   const list = mountEl.querySelector('[data-qu-bind="platform-apps-list"]');
@@ -207,6 +223,53 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
         const status = doc.createElement('span');
         status.setAttribute('data-qu-status', '');
 
+        // "Views/Seiten (CMS)" - self-provisions (idempotent, `cms-bundle.js`'s own
+        // `installGlobalCms()` doc comment: "re-running is harmless") this app's OWN
+        // Templates/Styles/Pages/VIEWS editor at `#/admin/<prefix>/cms`
+        // (`parseAdminSubPath()`/`renderGlobalShell()`'s existing delegation - already wired,
+        // nothing new there) if it doesn't exist yet, then navigates there. THE POINT: any
+        // `realm: 'global'` app - including one with no bundle.js at all, just a bare
+        // `registerApp()` - gets a full Page+View authoring UI this way, `createGlobalView()`'s
+        // own `route`/`template` params already connecting a path to a live, generated feed
+        // (`docs/example-apps.md`'s own "Gästebuch nachbauen, nur per UI" walkthrough has the
+        // full worked example, including the "form above/below the list" case: create the View
+        // WITH a route first, THEN edit the auto-created wrapper page's own content afterward to
+        // wrap the `<div data-qu-view>` in whatever surrounding markup is wanted - there is no
+        // separate "header/footer" field, the wrapper page IS ordinary, freely editable content).
+        // Optional - a shared-list name to ADD to this app's own registration before opening the
+        // CMS editor (`dev.js`'s `addSharedLists()` own doc comment on why this exists at all: a
+        // Gästebuch-style "many visitors contribute" View, built ENTIRELY through that editor's own
+        // View form, needs its list's name registered SOMEWHERE first - there is no `bundle.js`
+        // install step to have done that for an app created this way). Leave blank for a Page-
+        // sourced View (single-author content) - those need no shared list at all.
+        const sharedListInput = doc.createElement('input');
+        sharedListInput.placeholder = 'neue shared-list (optional)';
+        sharedListInput.style.marginRight = '0.25rem';
+        li.appendChild(sharedListInput);
+
+        const cmsBtn = doc.createElement('button');
+        cmsBtn.type = 'button';
+        cmsBtn.textContent = 'Views/Seiten (CMS)';
+        cmsBtn.style.marginRight = '0.25rem';
+        cmsBtn.addEventListener('click', async () => {
+          status.textContent = '';
+          try {
+            const newList = sharedListInput.value.trim();
+            if (newList) {
+              await addSharedLists(mainSpace, { prefix: app.prefix, sharedLists: [newList] });
+              await new Promise((resolve) => setTimeout(resolve, 400)); // settle - the live resolver needs a moment to start watching this new name before anything writes to it.
+              sharedListInput.value = '';
+            }
+            await publishGlobalRoute(mainSpace, app.prefix, { route: '/cms', title: 'CMS' });
+            await new Promise((resolve) => setTimeout(resolve, 400)); // settle - see publishGlobalRoute()'s own doc comment on why a page write right after needs this.
+            await installGlobalCms(mainSpace, app.prefix);
+            doc.defaultView.location.hash = `/admin/${app.prefix}/cms`;
+          } catch (err) {
+            status.textContent = `Fehler: ${err.message}`;
+          }
+        });
+        li.appendChild(cmsBtn);
+
         for (const mode of ['off', 'global', 'multiuser', 'personal']) {
           const btn = doc.createElement('button');
           btn.type = 'button';
@@ -232,7 +295,7 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
         // personal instance's own missing `data.bundleVersion` already gets - `installed-apps-
         // actions.js`'s own `provisionPersonalInstance()` doc comment). A manually `registerApp()`ed
         // app (no `appType`) never shows this - there is no known bundle to compare against.
-        const installer = app.appType ? APP_INSTALLERS[app.appType] : null;
+        const installer = app.appType ? resolveInstaller(app.appType) : null;
         if (installer?.update && (app.bundleVersion ?? 0) < installer.version) {
           const updateBtn = doc.createElement('button');
           updateBtn.type = 'button';
@@ -241,7 +304,11 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
           updateBtn.addEventListener('click', async () => {
             status.textContent = '';
             try {
-              await installer.update(mainSpace, { prefix: app.prefix });
+              // `...(app.config ?? {})` - whatever install-time OPTIONS this prefix was last
+              // configured with (Blog's own `routeScheme`, kinds.js's `platformAppsKind` `config`
+              // doc comment) - re-applying an update must never silently drop back to that
+              // installer's own DEFAULTS just because this button doesn't otherwise know them.
+              await installer.update(mainSpace, { prefix: app.prefix, ...(app.config ?? {}) });
               await setAppBundleVersion(mainSpace, { prefix: app.prefix, bundleVersion: installer.version });
               await renderList();
             } catch (err) {
@@ -297,9 +364,40 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
     });
   }
 
+  // Fills in `<div data-qu-bind="file-app-installers">` (`admin-console-bundle.js`'s own doc
+  // comment) with one MORE install form per discovered `/apps/*` app that doesn't already have a
+  // static one above - dynamically created, but otherwise identical markup/wiring, so the loop
+  // right below treats every install-app form uniformly regardless of where it came from.
+  const fileAppContainer = mountEl.querySelector('[data-qu-bind="file-app-installers"]');
+  if (fileAppContainer) {
+    fileAppContainer.replaceChildren();
+    for (const app of discoveredApps) {
+      if (mountEl.querySelector(`form[data-qu-action="install-app"][data-app-type="${app.key}"]`)) continue;
+      const form = doc.createElement('form');
+      form.setAttribute('data-qu-action', 'install-app');
+      form.setAttribute('data-app-type', app.key);
+      const label = doc.createElement('label');
+      label.textContent = `Pfad-Präfix (z.B. "${app.key}"): `;
+      const input = doc.createElement('input');
+      input.name = 'prefix';
+      input.required = true;
+      input.pattern = '[a-z0-9\\-]+';
+      label.appendChild(input);
+      form.appendChild(label);
+      const button = doc.createElement('button');
+      button.type = 'submit';
+      button.textContent = `${app.label} installieren`;
+      form.appendChild(button);
+      const status = doc.createElement('p');
+      status.setAttribute('data-qu-status', '');
+      form.appendChild(status);
+      fileAppContainer.appendChild(form);
+    }
+  }
+
   for (const form of mountEl.querySelectorAll('form[data-qu-action="install-app"]')) {
     const appType = form.getAttribute('data-app-type');
-    const installer = APP_INSTALLERS[appType];
+    const installer = resolveInstaller(appType);
     if (!installer) continue;
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -308,6 +406,16 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
       status.textContent = '';
       try {
         const prefix = form.querySelector('input[name="prefix"]').value.trim();
+        // Every OTHER named field on this form (Blog's own `routeScheme` `<select>`,
+        // `admin-console-bundle.js`'s own doc comment) - passed straight through to
+        // `installer.install()` as an extra option AND persisted into this prefix's own `config`
+        // (`setAppConfig()`, below) so a LATER "Update verfügbar" click or personal-instance
+        // provisioning call can read the SAME choice back without this form needing to remember it.
+        const options = {};
+        for (const el of form.elements) {
+          if (!el.name || el.name === 'prefix' || el.type === 'submit' || el.type === 'button') continue;
+          options[el.name] = el.value;
+        }
         // REGISTER FIRST, THEN INSTALL - never the other way round: the relay only classifies THIS
         // app's own `adminPage`/`adminView`/shared-list writes correctly (`'relay-admins'`/`'members'`
         // -ACL) once its live resolver has observed this `qu-platform-apps` entry
@@ -322,15 +430,16 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
             prefix,
             realm: 'global',
             name: installer.label,
-            sharedLists: installer.sharedLists(prefix),
-            globalViewNames: installer.viewNames(prefix),
+            sharedLists: installer.sharedLists?.(prefix) ?? [],
+            globalViewNames: installer.viewNames?.(prefix) ?? [],
             personalBundle: installer.personalBundle,
             appType,
             bundleVersion: installer.version,
           })
         );
         await new Promise((resolve) => setTimeout(resolve, 400)); // let the relay's live resolver start watching this app's own route registry/shared lists/View names.
-        await installer.install(mainSpace, { prefix });
+        await installer.install(mainSpace, { prefix, ...options });
+        if (Object.keys(options).length) await setAppConfig(mainSpace, { prefix, config: options });
         status.textContent = `${installer.label} installiert - erreichbar unter #/${prefix}/.`;
         form.reset();
         await renderList();

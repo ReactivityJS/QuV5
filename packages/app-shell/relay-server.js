@@ -99,6 +99,8 @@
  *                        `live-app-resolver.js`) and reclassifies their
  *                        `qu-app`/registry Nodes automatically, typically
  *                        within the time one ordinary write takes to sync.
+ *   QU_RELAY_BOOTSTRAP_ADMIN - default `true` - see "BOOTSTRAP RELAY-ADMIN"
+ *                        below. Set to the exact string `"false"` to disable.
  *   QU_MEMBERS_JSON   - OPTIONAL. Same shape as `relay-server.js`'s own -
  *                        pre-authorize `'members'`-mode writers on the
  *                        MAIN, public Space. The app-admin identity itself
@@ -147,6 +149,57 @@
  * to it, checked independently by every client's own `Space` (never just
  * trusting this relay's own say-so), same as before.
  *
+ * BOOTSTRAP RELAY-ADMIN, the chicken-and-egg problem `QU_RELAY_ADMINS` itself
+ * has: PLATFORM mode (and therefore this relay's OWN admin console, AND
+ * `qu-platform-apps`) needs at least one relay-admin pubkey configured
+ * BEFORE anyone can register/administer anything - but that pubkey has to
+ * come from somewhere, and an operator generating one, pasting it into
+ * `QU_RELAY_ADMINS`, and redeploying is real friction for the most common
+ * case (a solo operator standing up their OWN relay for the first time).
+ * Solved the SAME way `@qu/space-transport`'s own `relay-server.js` already
+ * solves it for a relay's OWN federation identity (`relay-identity.js`'s own
+ * doc comment: "not a decision at all, just a keypair that needs to exist
+ * and stay stable across restarts") - this relay, on every boot (when
+ * `QU_RELAY_BOOTSTRAP_ADMIN` isn't `"false"` and `QU_RELAY_DATA_DIR` is
+ * non-empty), loads-or-creates its OWN Ed25519+X25519 keypair at
+ * `<QU_RELAY_DATA_DIR>/relay-bootstrap-admin.json` (`loadOrCreateIdentity()`)
+ * and ALWAYS adds its pubkey to the EFFECTIVE, in-memory relay-admins list -
+ * on top of whatever `QU_RELAY_ADMINS` already configures, never instead of
+ * it, and regardless of whether that list is empty or already has entries
+ * (an operator adding their OWN pubkey to `QU_RELAY_ADMINS` later doesn't
+ * retract this one - `unregisterApp()`-style retraction isn't a thing here;
+ * removing it means deleting the file and disabling `QU_RELAY_BOOTSTRAP_ADMIN`,
+ * or just leaving it - an extra always-present admin identity only a
+ * server-filesystem-level operator can ever actually use is a low-stakes
+ * residual, not a real widening of who can administer anything).
+ *
+ * DELIBERATELY REUSES `QU_RELAY_DATA_DIR` - the SAME directory
+ * `createFileStore()` already mirrors content into, and (per this package's
+ * own `docker-compose.space-relay.yml`) already the ONE volume a real
+ * deployment mounts for persistence - no SECOND volume to remember to add
+ * just for this. If `QU_RELAY_DATA_DIR` is empty (mirroring disabled), this
+ * feature is skipped entirely rather than falling back to an in-memory,
+ * regenerated-every-restart identity - unlike the federation identity's own
+ * ephemeral fallback, an admin identity that silently CHURNS on every
+ * restart is worse than not having one at all (whatever content the OLD
+ * one's pubkey administered becomes unwritable by the NEW one the moment it
+ * regenerates - the exact failure mode `bootstrap-platform.mjs`'s own top
+ * doc comment already documents for an operator's own identity file, just
+ * automated here instead of operator-run).
+ *
+ * THE PRIVATE KEY NEVER LEAVES THE FILESYSTEM: unlike `describeIdentity()`'s
+ * own "public halves only" contract (this file never logs or serves this
+ * identity's private material over the network, in `/relay-admins.json` or
+ * anywhere else - only its FINGERPRINT, for a boot-time log line), the
+ * PERSISTED FILE itself genuinely does hold the private key (`relay-
+ * identity.js`'s own `loadOrCreateIdentity()` - `0o600` permissions, same as
+ * the federation identity file), because unlike a federation identity
+ * (which must never leave this process), THIS one is meant to be retrieved
+ * by whoever already has filesystem/SSH access to `QU_RELAY_DATA_DIR` (the
+ * same trust level as e.g. reading the relay's own mirrored content
+ * directly) and imported as their own browser identity - see the boot log's
+ * own instructions the first time this file is created.
+ *
  * `GET /relay-admins.json` (unauthenticated, like `/members.json`) serves
  * the SAME list, plain base64 pubkeys - `@qu/app-shell`'s `shell.js`
  * fetches it in PLATFORM mode to construct its own `Space` with a matching
@@ -164,7 +217,7 @@ import { WebSocketServer } from 'ws';
 import { QuCrypto } from '@qu/core';
 import { EventBus } from '@qu/events';
 import { createFileStore } from '@qu/space-storage';
-import { createWsServerHub, createRelayForwarder, createAppRequestHandler } from '@qu/space-transport';
+import { createWsServerHub, createRelayForwarder, createAppRequestHandler, loadOrCreateIdentity, describeIdentity } from '@qu/space-transport';
 import { createAppResolveKindSchema } from '@qu/app-core';
 import { createLiveAppResolveKindSchema } from './src/live-app-resolver.js';
 import { buildAppShellBundle, renderIndexHtml } from './build.mjs';
@@ -175,6 +228,10 @@ const DATA_DIR = process.env.QU_RELAY_DATA_DIR ?? '/data';
 const ALLOW_JOIN = process.env.QU_ALLOW_JOIN !== 'false';
 const APP_ADMIN_PUB_B64 = process.env.QU_APP_ADMIN_PUB || null;
 const RELAY_ADMINS_JSON = process.env.QU_RELAY_ADMINS || null;
+// Default true - see this file's own "BOOTSTRAP RELAY-ADMIN" doc comment below for the full
+// reasoning. Set to the exact string "false" to disable, e.g. a deployment that wants ONLY the
+// explicitly-configured QU_RELAY_ADMINS list to ever matter, filesystem access to DATA_DIR notwithstanding.
+const BOOTSTRAP_ADMIN_ENABLED = process.env.QU_RELAY_BOOTSTRAP_ADMIN !== 'false';
 const WEB_DIR = join(HERE, 'dist-web');
 
 function parseMembersJson(label, json) {
@@ -215,8 +272,36 @@ function parsePub(label, b64) {
   }
 }
 
+/**
+ * ALWAYS-ADDITIVE bootstrap relay-admin - see this file's own "BOOTSTRAP
+ * RELAY-ADMIN" top doc comment for the full reasoning. Mutates the module-
+ * level `relayAdminPubs` array in place (pushing, never replacing) BEFORE
+ * `main()` computes `platformMode`/passes it to `createRelayForwarder()`/
+ * serves it via `/relay-admins.json` - every one of those must see the
+ * merged list, not the raw `QU_RELAY_ADMINS` parse alone.
+ */
+async function ensureBootstrapAdmin() {
+  if (!BOOTSTRAP_ADMIN_ENABLED) return;
+  if (!DATA_DIR) {
+    console.warn('[qu-app-shell-relay] QU_RELAY_DATA_DIR is empty - skipping the bootstrap relay-admin identity (would otherwise be a NEW one, and a new admin, every restart). Configure QU_RELAY_ADMINS by hand instead, or set QU_RELAY_DATA_DIR.');
+    return;
+  }
+  const file = join(DATA_DIR, 'relay-bootstrap-admin.json');
+  const { identity, created } = await loadOrCreateIdentity(file);
+  const { fingerprint } = await describeIdentity(identity);
+  const alreadyListed = relayAdminPubs.some((pub) => QuCrypto.toBase64(pub) === QuCrypto.toBase64(identity.signingPub));
+  if (!alreadyListed) relayAdminPubs.push(identity.signingPub);
+  if (created) {
+    console.log(`[qu-app-shell-relay] generated a new BOOTSTRAP relay-admin identity (fingerprint ${fingerprint}), persisted at ${file}.`);
+    console.log(`[qu-app-shell-relay] that file also holds a PRIVATE key (0o600, keep it secret) - copy/import it as your own browser identity to actually administer this relay with it, or add your OWN pubkey to QU_RELAY_ADMINS instead and ignore this one. Set QU_RELAY_BOOTSTRAP_ADMIN=false to stop generating/using it.`);
+  } else {
+    console.log(`[qu-app-shell-relay] bootstrap relay-admin identity present (fingerprint ${fingerprint}), loaded from ${file}.`);
+  }
+}
+
 async function main() {
   const appAdminPub = APP_ADMIN_PUB_B64 ? parsePub('QU_APP_ADMIN_PUB', APP_ADMIN_PUB_B64) : null;
+  await ensureBootstrapAdmin();
   const platformMode = relayAdminPubs.length > 0; // priority over QU_APP_ADMIN_PUB - see build.mjs's own doc comment.
 
   console.log('[qu-app-shell-relay] bundling @qu/app-shell…');
