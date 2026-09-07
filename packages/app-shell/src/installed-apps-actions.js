@@ -18,6 +18,14 @@
  * bare prefix means - see that function's own top doc comment for the full
  * routing story), and the latter when that same call reports a pending
  * update for an ALREADY-provisioned instance.
+ *
+ * `wireInstalledApps()` ALSO calls every discovered `/apps/*` app's own
+ * `wire` function (repo root's own `apps/README.md` doc comment on the
+ * descriptor shape) - the SAME "correct, cheap no-op on any page that
+ * isn't its own" contract the three hardcoded reference apps' own
+ * `wireX()` functions already promise, just discovered instead of
+ * hardcoded, so a file-based app's OWN interactivity needs no change here
+ * ever again either.
  */
 import { wireGuestbook } from './guestbook-actions.js';
 import { wireBlog } from './blog-actions.js';
@@ -25,10 +33,16 @@ import { wireForum } from './forum-actions.js';
 import { installPersonalGuestbook, updatePersonalGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
 import { installPersonalBlog, updatePersonalBlog, BLOG_VERSION } from '../blog-bundle.js';
 import { ContentResolver } from '@qu/app-core';
+import { discoveredApps } from '../apps-registry.generated.js';
 
 /** @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space}} params */
 export async function wireInstalledApps({ mountEl, doc, space }) {
-  await Promise.all([wireGuestbook({ mountEl, doc, space }), wireBlog({ mountEl, doc, space }), wireForum({ mountEl, doc, space })]);
+  await Promise.all([
+    wireGuestbook({ mountEl, doc, space }),
+    wireBlog({ mountEl, doc, space }),
+    wireForum({ mountEl, doc, space }),
+    ...discoveredApps.filter((app) => app.wire).map((app) => app.wire({ mountEl, doc, space })),
+  ]);
 }
 
 /**

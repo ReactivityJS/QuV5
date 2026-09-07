@@ -8,7 +8,9 @@
     "packages/*"
   ],
   "scripts": {
+    "pretest": "node packages/app-shell/apps-registry.mjs",
     "test": "node --test",
+    "apps:registry": "node packages/app-shell/apps-registry.mjs",
     "demo": "node demo/auto-demo.mjs",
     "relay": "node packages/app-shell/relay-server.js",
     "bootstrap:platform": "node packages/app-shell/bin/bootstrap-platform.mjs",

@@ -31,16 +31,27 @@
  * which also writes an on-disk identity file for convenience) and this
  * package's own `relay-server.js` (the production entrypoint, which reads
  * the app-admin pubkey from `QU_APP_ADMIN_PUB` instead).
+ *
+ * ALSO regenerates the file-based `/apps/*` discovery registry
+ * (`apps-registry.mjs`'s own doc comment on the full "why here, why
+ * generated" reasoning) before every bundle - both callers above pick up
+ * whatever's currently in `/apps` this way, with no separate build step to
+ * remember.
  */
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import * as esbuild from 'esbuild';
 import { QuCrypto } from '@qu/core';
+import { generateAppsRegistry } from './apps-registry.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
+const APPS_DIR = join(here, '..', '..', 'apps');
+const APPS_REGISTRY_FILE = join(here, 'apps-registry.generated.js');
 
 /** @param {{outDir?: string}} [params] @returns {Promise<{outfile: string}>} */
 export async function buildAppShellBundle({ outDir = join(here, 'dist') } = {}) {
+  const { names } = await generateAppsRegistry({ appsDir: APPS_DIR, outFile: APPS_REGISTRY_FILE });
+  if (names.length > 0) console.log(`[build] discovered /apps: ${names.join(', ')}`);
   const outfile = join(outDir, 'bundle.js');
   await esbuild.build({
     entryPoints: [join(here, 'src', 'shell.js')],

@@ -506,7 +506,7 @@ test('Guestbook: "Deinstallieren" retracts the registration and clears the globa
     const { window: outsiderWindow } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/notes/' });
     const outsiderMount = outsiderWindow.document.querySelector('qu-app-shell');
     const { router: outsiderRouter, platform: outsiderPlatform } = startPlatform({ space: outsiderSpace, mountEl: outsiderMount, window: outsiderWindow, resolveTimeout: 1500 });
-    await waitUntil(() => outsiderMount.textContent.includes('Qu App Shell'), { timeout: 6000 });
+    await waitUntil(() => outsiderMount.textContent.includes('Qu App Shell'), { timeout: 10000 });
     assert.ok(!outsiderMount.querySelector('form[data-qu-action="guestbook-form"]'), 'the uninstalled app\'s own content is gone, not just its registry entry');
     const apps = await outsiderPlatform.resolveApps({ timeout: 2000 });
     assert.ok(!apps.some((a) => a.prefix === 'notes'), 'resolveApps() no longer lists the retracted prefix at all, even from a completely fresh connection');

@@ -67,6 +67,7 @@ import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbo
 import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
 import { installForum } from '../forum-bundle.js';
 import { verifyWritesAcked } from './verify-writes.js';
+import { discoveredApps } from '../apps-registry.generated.js';
 
 // `'personal'` (kinds.js's own `platformAppsKind` doc comment) - a read-only, aggregated feed at
 // the bare prefix instead of a relay-admin-authored page, for an app whose personal instances
@@ -154,6 +155,20 @@ const APP_INSTALLERS = {
   },
 };
 
+/**
+ * `APP_INSTALLERS[appType]` above, extended with every FILE-BASED `/apps/*`
+ * app `apps-registry.generated.js` discovered at build time (repo root's
+ * own `apps/README.md` - the SAME descriptor shape, `key` standing in for
+ * this map's own property name). A discovered app with a `key` that
+ * collides with a hardcoded one above loses - `/apps/*` is for apps that
+ * genuinely need files, never a way to override one of the three reference
+ * apps that don't.
+ */
+function resolveInstaller(appType) {
+  if (APP_INSTALLERS[appType]) return APP_INSTALLERS[appType];
+  return discoveredApps.find((app) => app.key === appType) ?? null;
+}
+
 /** @param {{mountEl: Element, doc: Document, mainSpace: import('@qu/space-core').Space, platform: import('@qu/app-core').PlatformRuntime}} params */
 export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
   const list = mountEl.querySelector('[data-qu-bind="platform-apps-list"]');
@@ -232,7 +247,7 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
         // personal instance's own missing `data.bundleVersion` already gets - `installed-apps-
         // actions.js`'s own `provisionPersonalInstance()` doc comment). A manually `registerApp()`ed
         // app (no `appType`) never shows this - there is no known bundle to compare against.
-        const installer = app.appType ? APP_INSTALLERS[app.appType] : null;
+        const installer = app.appType ? resolveInstaller(app.appType) : null;
         if (installer?.update && (app.bundleVersion ?? 0) < installer.version) {
           const updateBtn = doc.createElement('button');
           updateBtn.type = 'button';
@@ -297,9 +312,40 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
     });
   }
 
+  // Fills in `<div data-qu-bind="file-app-installers">` (`admin-console-bundle.js`'s own doc
+  // comment) with one MORE install form per discovered `/apps/*` app that doesn't already have a
+  // static one above - dynamically created, but otherwise identical markup/wiring, so the loop
+  // right below treats every install-app form uniformly regardless of where it came from.
+  const fileAppContainer = mountEl.querySelector('[data-qu-bind="file-app-installers"]');
+  if (fileAppContainer) {
+    fileAppContainer.replaceChildren();
+    for (const app of discoveredApps) {
+      if (mountEl.querySelector(`form[data-qu-action="install-app"][data-app-type="${app.key}"]`)) continue;
+      const form = doc.createElement('form');
+      form.setAttribute('data-qu-action', 'install-app');
+      form.setAttribute('data-app-type', app.key);
+      const label = doc.createElement('label');
+      label.textContent = `Pfad-Präfix (z.B. "${app.key}"): `;
+      const input = doc.createElement('input');
+      input.name = 'prefix';
+      input.required = true;
+      input.pattern = '[a-z0-9\\-]+';
+      label.appendChild(input);
+      form.appendChild(label);
+      const button = doc.createElement('button');
+      button.type = 'submit';
+      button.textContent = `${app.label} installieren`;
+      form.appendChild(button);
+      const status = doc.createElement('p');
+      status.setAttribute('data-qu-status', '');
+      form.appendChild(status);
+      fileAppContainer.appendChild(form);
+    }
+  }
+
   for (const form of mountEl.querySelectorAll('form[data-qu-action="install-app"]')) {
     const appType = form.getAttribute('data-app-type');
-    const installer = APP_INSTALLERS[appType];
+    const installer = resolveInstaller(appType);
     if (!installer) continue;
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -322,8 +368,8 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
             prefix,
             realm: 'global',
             name: installer.label,
-            sharedLists: installer.sharedLists(prefix),
-            globalViewNames: installer.viewNames(prefix),
+            sharedLists: installer.sharedLists?.(prefix) ?? [],
+            globalViewNames: installer.viewNames?.(prefix) ?? [],
             personalBundle: installer.personalBundle,
             appType,
             bundleVersion: installer.version,

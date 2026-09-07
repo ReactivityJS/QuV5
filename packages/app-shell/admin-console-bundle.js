@@ -24,8 +24,16 @@
  * own `appAdminPub` by heart (what "App registrieren" above still assumes),
  * these seed a brand-new Guestbook/Blog/Forum under a relay-admin-chosen
  * prefix AND register it in one click - `admin-actions.js`'s
- * `wireAppInstallers()` doc comment has the full story on why this installs
+ * `wireAdminConsole()` doc comment has the full story on why this installs
  * into the relay-admin's OWN main Space (never a bespoke per-app identity).
+ *
+ * `<div data-qu-bind="file-app-installers">` is the SAME convention's
+ * DYNAMIC counterpart - `admin-actions.js`'s `wireAdminConsole()` fills it
+ * with one more install form per discovered `/apps/*` app (repo root's own
+ * `apps/README.md` has the full "why files, not Storage, for these"
+ * reasoning) that ISN'T already one of the three static forms above - never
+ * requires editing this STORED content again just because a new file-based
+ * app was added to the repo.
  */
 export const adminConsoleBundle = {
   manifest: { name: 'Relay-Admin', rootTemplate: 'main', defaultRoute: '/' },
@@ -60,6 +68,7 @@ export const adminConsoleBundle = {
   <button type="submit">Forum installieren</button>
   <p data-qu-status></p>
 </form>
+<div data-qu-bind="file-app-installers"></div>
 <h2>App registrieren</h2>
 <p>Setzt voraus, dass die App bereits installiert wurde (z.B. über <code>installAppBundle()</code>) - hier wird sie nur unter einem Pfad-Präfix eingehängt. Für diese Admin-Konsole selbst nicht nötig - sie ist bereits unter ihrem eigenen Präfix registriert.</p>
 <form data-qu-action="register-app">

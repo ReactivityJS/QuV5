@@ -9,3 +9,4 @@ export { startApp, startPlatform } from './boot.js';
 export { loadOrCreateIdentity, joinSpace, fetchMembers, fetchRelayAdmins, IDENTITY_STORAGE_KEY } from './identity.js';
 export { initDevConsole } from './dev-console.js';
 export { createLiveAppResolveKindSchema } from './live-app-resolver.js';
+export { verifyWritesAcked } from './verify-writes.js';
