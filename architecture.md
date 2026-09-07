@@ -836,6 +836,33 @@ extends this to "let a SPECIFIC other identity maintain exactly this
 page" (the `ownerPub` parameter on every `edit*()` call is what makes a
 grantee's write actually target the OWNER's Node id, not their own).
 
+**UPDATE - registered admin sections, separate routes, a unified Content
+editor:** the paragraph above describes the ORIGINAL shape (one `/cms`
+page, three sections crammed together) - since superseded by a small
+registry (`src/admin-sections.js`'s own `registerAdminSection()`/
+`listAdminSections()`) that `cms-bundle.js` iterates to install ONE PAGE
+PER SECTION (`/cms/templates`, `/cms/styles`, `/cms/content`) plus a
+generated `/cms` nav index, and `cms-actions.js`'s `wireCms()` iterates the
+SAME registry instead of calling three hardcoded `wire*()` functions - a
+fourth section (a `/apps/*` app's own admin panel) needs no edit to either
+function, only its own `registerAdminSection()` call. "Content" also
+REPLACES the old separate "Seiten"/"Pages" and "Views" sections with ONE
+form (`wireContent()`) - a content-SOURCE picker (Text/HTML | Geteilte
+Liste | Seiten-Filter) dispatches to `createPage()`/`editPage()` or
+`createView()`/`editView()` under the hood; combining multiple, mixed-type
+sources in one View (the "Blog + Guestbook" example a few sections below)
+still needs the raw-JSON `sourcesOverride` escape hatch, the simple picker
+only ever builds one source at a time. `view-sources.js`'s own `'pages'`
+source adapter also gained an `ownerPrefix` param (cross-app sourcing - a
+View defined under one app can filter ANOTHER app's own Pages); a
+`'shared-list'` source already worked cross-app with no such param, its id
+being a hash of its own name, never scoped to any one app. Neither the
+underlying `pageKind`/`viewKind` Kinds nor their write-ACL semantics
+changed - only the AUTHORING UI unified, so no already-published Page or
+View needed migrating. See `docs/example-apps.md`'s own §5 and "Deploying
+Guestbook, Blog, and Forum via the Views UI" section for the user-facing
+walkthrough.
+
 **A real, deployment-observed bug: `editPage()`/`editTemplate()`/
 `editStyle()` throwing "does not exist (or has not synced)" for content
 that plainly DOES exist.** `Space.useNode()` is ref-counted, and
@@ -1846,9 +1873,10 @@ document's own still-open question on that below).
   never accumulates one leaked subscription set per page visited.
 - **Authoring is a SEPARATE, swappable concern from rendering - "editors
   as plugins," the user's own stated future direction, not built as a full
-  plugin mechanism yet, but left room for**: `cms-actions.js`'s new
-  `wireViewEditor()` is explicitly documented as ONE REFERENCE editor for
-  `viewKind`, calling the exact same app-agnostic `createView()`/
+  plugin mechanism yet, but left room for**: `cms-actions.js`'s
+  `wireContent()` (superseding the original, now-removed `wireViewEditor()`
+  - see the "UPDATE" note above) is explicitly documented as ONE REFERENCE
+  editor for `viewKind`, calling the exact same app-agnostic `createView()`/
   `editView()` Dev API any OTHER app (a future Forum, Live-Ticker,
   GeoChase) could call from its own UI without touching `cms-actions.js`
   at all - the same point `kinds.js`'s own `viewKind` doc comment makes

@@ -404,6 +404,21 @@ export const pageKind = publicMeta(
        * deliberately NOT this field's job).
        */
       data: { shape: 'atomic', visibility: 'public' },
+      /**
+       * A `qu-style` NAME (same "name, resolved via content-id.js at render
+       * time" convention `template` above already uses) to load for THIS
+       * page specifically, instead of falling back to the Manifest's own
+       * single, app-wide `theme` style (`appManifestKind`'s own `theme`
+       * field) - `runtime.js`'s `AppRuntime.resolveRoute()` prefers this
+       * over `manifest.theme` when set, auto-loaded the exact same way the
+       * manifest theme already is (a page/template author never has to
+       * reference it from markup or JS - `boot.js`'s `renderPage()` already
+       * receives the resolved `css` string as one more plan field, same
+       * shape as before this existed). `null`/unset (the default) keeps the
+       * pre-existing "one app-wide theme for every page" behavior
+       * unchanged - fully backward compatible.
+       */
+      style: { shape: 'atomic', visibility: 'public' },
     },
     acl: { write: 'content' },
   })
@@ -701,6 +716,8 @@ export const adminPageKind = publicMeta(
       template: { shape: 'atomic', visibility: 'public' },
       content: { shape: 'text', visibility: 'public' },
       data: { shape: 'atomic', visibility: 'public' },
+      /** Global-app counterpart to `pageKind.style` - see that field's own doc comment (identical reasoning: resolves against `createGlobalStyle()`'s own `adminStyleKind` instead of the self-owned one). */
+      style: { shape: 'atomic', visibility: 'public' },
     },
     acl: { write: 'relay-admins' },
   })

@@ -63,10 +63,10 @@ test('a fresh visitor\'s own bare "#/<pubkey>/" route self-provisions a personal
   const { router: aliceRouter } = startPlatform({ space: aliceSpace, mountEl: aliceMount, window: aliceWindow, resolveTimeout: 500 });
 
   await waitUntil(() => aliceMount.innerHTML.length > 0, { timeout: 5000 });
-  aliceRouter.navigate(`/${aliceId}/cms`);
-  await waitUntil(() => aliceMount.querySelector('form[data-qu-action="cms-page-form"]'), { timeout: 4000 });
+  aliceRouter.navigate(`/${aliceId}/cms/content`);
+  await waitUntil(() => aliceMount.querySelector('form[data-qu-action="cms-content-form"]'), { timeout: 4000 });
 
-  const form = aliceMount.querySelector('form[data-qu-action="cms-page-form"]');
+  const form = aliceMount.querySelector('form[data-qu-action="cms-content-form"]');
   form.querySelector('[name="route"]').value = '/';
   form.querySelector('[name="title"]').value = "Alice's eigener Bereich";
   form.querySelector('[name="content"]').value = '<p>Kein Prefix noetig</p>';

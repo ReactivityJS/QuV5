@@ -56,17 +56,24 @@ test('an app-admin creates and edits a View through the rendered CMS form, and a
   await publishRoute(adminBootstrapSpace, { route: '/blog/hallo', title: 'Hallo Welt' });
   await pushToSharedList(adminBootstrapSpace, 'guestbook', { name: 'Alice', message: 'Hi!' });
 
-  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/cms' });
+  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/cms/content' });
   const mountEl = window.document.querySelector('qu-app-shell');
   const adminSpace = await connect(admin, 'admin-visit');
   startApp({ space: adminSpace, appAdminPub: admin.signingPub, mountEl, window, resolveTimeout: 500 });
 
-  await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-view-form"]'), { timeout: 4000 });
+  await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-content-form"]'), { timeout: 4000 });
 
-  // --- CREATE a View through the rendered form. ---
-  const viewForm = mountEl.querySelector('form[data-qu-action="cms-view-form"]');
+  // --- CREATE a View through the rendered, unified Content form. ---
+  // Combining TWO different source types in one View (a Blog + Guestbook feed,
+  // architecture.md's own flagship example) needs the "Erweitert" JSON override - the simple
+  // picker (sourceType "shared-list" XOR "pages") only ever builds a SINGLE source at a time -
+  // see cms-actions.js's own `wireContent()` doc comment on `sourcesOverride`.
+  const viewForm = mountEl.querySelector('form[data-qu-action="cms-content-form"]');
+  const sourceTypeSelect = viewForm.querySelector('[name="sourceType"]');
+  sourceTypeSelect.value = 'shared-list';
+  sourceTypeSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
   viewForm.querySelector('[name="name"]').value = 'feed';
-  viewForm.querySelector('[name="sources"]').value = JSON.stringify([
+  viewForm.querySelector('[name="sourcesOverride"]').value = JSON.stringify([
     { type: 'pages', prefix: '/blog/' },
     { type: 'shared-list', name: 'guestbook' },
   ]);
@@ -89,11 +96,11 @@ test('an app-admin creates and edits a View through the rendered CMS form, and a
     'the View created through the CMS form is genuine Space content, resolved and rendered like any other'
   );
 
-  // --- EDIT the View back through the form (no list - "Laden" looks it up by name). ---
+  // --- EDIT the View back through the form (no list - "View laden" looks it up by name). ---
   viewForm.querySelector('[name="name"]').value = 'feed';
-  mountEl.querySelector('[data-qu-action="cms-view-load"]').click();
+  mountEl.querySelector('[data-qu-action="cms-content-load-view"]').click();
   await waitUntil(() => viewForm.querySelector('input[name="mode"]').value === 'edit');
-  assert.equal(JSON.parse(viewForm.querySelector('[name="sources"]').value).length, 2, 'loading an existing View fills the form with its CURRENT saved values');
+  assert.equal(JSON.parse(viewForm.querySelector('[name="sourcesOverride"]').value).length, 2, 'loading an existing multi-source View fills the "Erweitert" override with its CURRENT saved sources');
   viewForm.querySelector('[name="sortOrder"]').value = 'desc';
   submit(viewForm, window);
   await waitUntil(() => /Gespeichert/.test(viewForm.querySelector('[data-qu-status]')?.textContent ?? ''));

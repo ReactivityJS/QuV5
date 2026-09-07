@@ -61,7 +61,7 @@
  * gate keeps `#/admin/...` from rendering for them at all.
  */
 import { QuCrypto } from '@qu/core';
-import { registerApp, setAppMode, setAppBundleVersion, setAppConfig, addSharedLists, addGlobalTemplateNames, unregisterApp, nullGlobalAppContent, publishGlobalRoute, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
+import { registerApp, setAppMode, setAppBundleVersion, setAppConfig, addSharedLists, addGlobalTemplateNames, unregisterApp, nullGlobalAppContent, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
 import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
@@ -268,8 +268,9 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
             // dedupes, so re-clicking this button for an app that already declared it is a no-op.
             await addGlobalTemplateNames(mainSpace, { prefix: app.prefix, globalTemplateNames: [cmsBundle.template.name] });
             await new Promise((resolve) => setTimeout(resolve, 400)); // settle - same reasoning as addSharedLists() above.
-            await publishGlobalRoute(mainSpace, app.prefix, { route: '/cms', title: 'CMS' });
-            await new Promise((resolve) => setTimeout(resolve, 400)); // settle - see publishGlobalRoute()'s own doc comment on why a page write right after needs this.
+            // installGlobalCms() itself now publishes EVERY one of its own pages' routes (the /cms
+            // index AND one per registered section) before writing each - no separate publishGlobalRoute()
+            // call needed here any more (cms-bundle.js's own installGlobalCms() doc comment).
             await installGlobalCms(mainSpace, app.prefix);
             doc.defaultView.location.hash = `/admin/${app.prefix}/cms`;
           } catch (err) {

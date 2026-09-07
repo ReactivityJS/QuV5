@@ -118,24 +118,31 @@ test('a relay-admin builds a Gästebuch-like app entirely through the admin cons
     assert.ok(cmsBtn, '"Views/Seiten (CMS)" is offered for every realm:"global" app, including a bundle-less one');
     cmsBtn.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
 
-    // Navigates to the app's own CMS editor and self-provisions it - the SAME editor
-    // view-editor.test.js already proves in detail, reached a different way here.
+    // Navigates to the app's own CMS editor INDEX and self-provisions it (one Page per registered
+    // section, `admin-sections.js`'s own doc comment) - then on to the "Content" section
+    // specifically, where the unified Page+View editor lives - the SAME editor view-editor.test.js
+    // already proves in detail, reached a different way here.
     await waitUntil(() => window.location.hash === '#/admin/notesboard/cms', { timeout: 6000 });
-    await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-view-form"]'), { timeout: 6000 });
+    await waitUntil(() => mountEl.querySelector('a[href="#/cms/content"]'), { timeout: 6000 });
+    router.navigate('/admin/notesboard/cms/content');
+    await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-content-form"]'), { timeout: 6000 });
     // A short settle margin - `renderGlobalShell()` calls `wireInstalledApps()` BEFORE `wireCms()`
-    // (sequentially, not `Promise.all`'d together the way `wireCms()`'s own three sections are) -
-    // the form already sits in the DOM the instant `renderPage()` ran, but `wireViewEditor()`'s own
+    // (sequentially, not `Promise.all`'d together the way `wireCms()`'s own registered sections are) -
+    // the form already sits in the DOM the instant `renderPage()` ran, but `wireContent()`'s own
     // submit listener isn't attached until `wireCms()` itself actually starts running. A real human
     // filling out a form takes far longer than this gap; only a script firing `submit` immediately
     // after the element appears can actually hit it.
     await new Promise((resolve) => setTimeout(resolve, 500));
 
-    // Build a shared-list-backed, route-bound View through the rendered form - no Dev API call,
-    // no bundle.js, exactly the "Gästebuch nachbauen nur per UI" workflow.
-    const viewForm = mountEl.querySelector('form[data-qu-action="cms-view-form"]');
-    viewForm.querySelector('[name="name"]').value = 'notesboard-feed';
+    // Build a shared-list-backed, route-bound View through the rendered, unified Content form - no
+    // Dev API call, no bundle.js, exactly the "Gästebuch nachbauen nur per UI" workflow.
+    const viewForm = mountEl.querySelector('form[data-qu-action="cms-content-form"]');
+    const sourceTypeSelect = viewForm.querySelector('[name="sourceType"]');
+    sourceTypeSelect.value = 'shared-list';
+    sourceTypeSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
     viewForm.querySelector('[name="route"]').value = '/';
-    viewForm.querySelector('[name="sources"]').value = JSON.stringify([{ type: 'shared-list', name: 'notesboard-entries' }]);
+    viewForm.querySelector('[name="name"]').value = 'notesboard-feed';
+    viewForm.querySelector('[name="listName"]').value = 'notesboard-entries';
     viewForm.querySelector('[name="sortBy"]').value = 'timestamp';
     viewForm.querySelector('[name="itemTemplate"]').value = '<p><strong><qu-slot name="title"></qu-slot>:</strong> <qu-slot name="excerpt"></qu-slot></p>';
     viewForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));

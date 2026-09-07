@@ -60,22 +60,22 @@ test('the CMS editor is genuine installed content - an app-admin creates AND edi
   await createApp(adminBootstrapSpace, { name: 'Demo', rootTemplate: null, defaultRoute: '/' });
   await installCms(adminBootstrapSpace);
 
-  // Starts directly on `#/cms` (rather than navigating there after boot) - same reason
+  // Starts directly on `#/cms/templates` (rather than navigating there after boot) - same reason
   // `platform-boot.test.js` constructs its admin-console JSDOM with `url: '.../#/admin'`
   // instead of calling `router.navigate('/admin')`: `startApp()`'s `router.start()` already
   // fires ONE `onChange('/')` immediately, and nothing is published at `/` in this test, so
   // that resolution would sit unresolved for its full `resolveTimeout` before a LATER
-  // `navigate('/cms')` call's own render even lands - two independent, unserialized async
-  // `onChange` calls racing to be the last one to touch `mountEl.innerHTML` (an existing
+  // `navigate('/cms/templates')` call's own render even lands - two independent, unserialized
+  // async `onChange` calls racing to be the last one to touch `mountEl.innerHTML` (an existing
   // `HashRouter`/`boot.js` property, not something this test or `wireCms()` needs to solve).
-  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/cms' });
+  // Templates/Styles/Content are now THREE SEPARATE pages (cms-bundle.js's own "SEPARATE PAGES, ONE
+  // PER SECTION" doc comment) - `router.navigate()` moves between them once past that initial race.
+  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/cms/templates' });
   const mountEl = window.document.querySelector('qu-app-shell');
   const adminSpace = await connect(admin, 'admin-visit');
   const { router } = startApp({ space: adminSpace, appAdminPub: admin.signingPub, mountEl, window, resolveTimeout: 500 });
 
   await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-template-form"]'), { timeout: 4000 });
-  assert.ok(mountEl.querySelector('form[data-qu-action="cms-style-form"]'), 'the CMS is rendered from installed content, not hardcoded DOM-building');
-  assert.ok(mountEl.querySelector('form[data-qu-action="cms-page-form"]'));
 
   // --- CREATE a template through the rendered form. ---
   const templateForm = mountEl.querySelector('form[data-qu-action="cms-template-form"]');
@@ -85,7 +85,9 @@ test('the CMS editor is genuine installed content - an app-admin creates AND edi
   await waitUntil(() => /Gespeichert/.test(templateForm.querySelector('[data-qu-status]')?.textContent ?? ''));
   await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-template-list"] button')].some((b) => b.textContent === 'layout/main'));
 
-  // --- CREATE a style through the rendered form. ---
+  // --- CREATE a style through the rendered form (its OWN page now). ---
+  router.navigate('/cms/styles');
+  await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-style-form"]'), { timeout: 4000 });
   const styleForm = mountEl.querySelector('form[data-qu-action="cms-style-form"]');
   styleForm.querySelector('[name="name"]').value = 'global';
   styleForm.querySelector('[name="css"]').value = 'body { color: navy; }';
@@ -93,15 +95,21 @@ test('the CMS editor is genuine installed content - an app-admin creates AND edi
   await waitUntil(() => /Gespeichert/.test(styleForm.querySelector('[data-qu-status]')?.textContent ?? ''));
   await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-style-list"] button')].some((b) => b.textContent === 'global'));
 
-  // --- CREATE a page through the rendered form (also registers the route). ---
-  const pageForm = mountEl.querySelector('form[data-qu-action="cms-page-form"]');
+  // --- CREATE a page through the rendered Content form (its OWN page now; also registers the route). ---
+  router.navigate('/cms/content');
+  await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-content-form"]'), { timeout: 4000 });
+  const pageForm = mountEl.querySelector('form[data-qu-action="cms-content-form"]');
   const templateSelect = pageForm.querySelector('[name="template"]');
-  // The template just created above must actually be PICKABLE here without a reload - the page
-  // form's own <select> is populated once at initial wiring (before "layout/main" existed) and
-  // only refreshed as a side effect of a successful template save (cms-actions.js's own
-  // refreshTemplateSelect()) - assert the option genuinely exists, not just that assigning `.value`
-  // didn't throw (a nonexistent <option> silently no-ops the assignment instead of erroring).
-  assert.ok([...templateSelect.options].some((o) => o.value === 'layout/main'), 'the newly created template is selectable without a page reload');
+  // "layout/main" (created above, on a DIFFERENT page/route) must be pickable here - the Content
+  // form's own <select> is populated fresh at THIS page's own wiring time, which already happened
+  // strictly AFTER the template save above (a real page navigation, unlike the old same-page
+  // "refreshTemplateSelect() after a template save" convenience this redesign intentionally drops -
+  // see cms-actions.js's own doc comment on that tradeoff). The FORM existing in the DOM (waited on
+  // above) doesn't itself prove `refreshTemplateSelect()` already finished populating this <select> -
+  // that runs as part of the SAME async `wireContent()` call, just not necessarily before this
+  // point, so wait on the option itself, not just the form's own presence.
+  await waitUntil(() => [...templateSelect.options].some((o) => o.value === 'layout/main'), { timeout: 2000 });
+  pageForm.querySelector('[name="sourceType"]').value = 'html';
   pageForm.querySelector('[name="route"]').value = '/';
   pageForm.querySelector('[name="title"]').value = 'Start v1';
   templateSelect.value = 'layout/main';
@@ -109,7 +117,7 @@ test('the CMS editor is genuine installed content - an app-admin creates AND edi
   pageForm.querySelector('[name="data"]').value = '{"author": "Alice"}';
   submit(pageForm, window);
   await waitUntil(() => /Gespeichert/.test(pageForm.querySelector('[data-qu-status]')?.textContent ?? ''));
-  await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].some((b) => b.textContent === '/'));
+  await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-content-list"] button')].some((b) => b.textContent === '/'));
 
   // A separate visitor confirms the created content actually landed in the Space.
   {
@@ -125,7 +133,7 @@ test('the CMS editor is genuine installed content - an app-admin creates AND edi
   }
 
   // --- EDIT the existing page by clicking it in the list, changing the content, and saving again. ---
-  const pageListButton = [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].find((b) => b.textContent === '/');
+  const pageListButton = [...mountEl.querySelectorAll('[data-qu-bind="cms-content-list"] button')].find((b) => b.textContent === '/');
   pageListButton.click();
   // The click handler itself resolves the page asynchronously before calling enterEditMode() -
   // waiting on "mode" (not "title", which already reads 'Start v1' from the earlier CREATE step
@@ -150,8 +158,8 @@ test('the CMS editor is genuine installed content - an app-admin creates AND edi
     assert.deepEqual(page.data, { author: 'Alice' });
   }
 
-  // --- "Neue Seite" resets the form back to create mode. ---
-  mountEl.querySelector('[data-qu-cms-reset="page"]').click();
+  // --- "Neuer Inhalt" resets the form back to create mode. ---
+  mountEl.querySelector('[data-qu-cms-reset="content"]').click();
   assert.equal(pageForm.querySelector('input[name="mode"]').value, 'create');
   assert.equal(pageForm.querySelector('[name="route"]').readOnly, false);
   assert.equal(pageForm.querySelector('[name="title"]').value, '');
@@ -197,7 +205,7 @@ test('a GRANTED CO-EDITOR - a different identity than the app-admin - can edit a
   await grantContentWriter(adminBootstrapSpace, { kind: pageKind, path: '/', granteePub: coEditor.signingPub });
   await new Promise((resolve) => setTimeout(resolve, 100)); // let the grant actually reach the relay/other peers before the co-editor's own write follows.
 
-  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/cms' });
+  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/cms/content' });
   const mountEl = window.document.querySelector('qu-app-shell');
   const coEditorSpace = await connect(coEditor, 'co-editor-visit');
   // The critical bit: `space` is the CO-EDITOR's own Space, `appAdminPub` is still the real owner -
@@ -205,11 +213,11 @@ test('a GRANTED CO-EDITOR - a different identity than the app-admin - can edit a
   // doc comment already described as intended, just never actually wired through until now.
   const { router } = startApp({ space: coEditorSpace, appAdminPub: admin.signingPub, mountEl, window, resolveTimeout: 500 });
 
-  await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-page-form"]'), { timeout: 4000 });
-  await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].some((b) => b.textContent === '/'), { timeout: 4000 });
+  await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-content-form"]'), { timeout: 4000 });
+  await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-content-list"] button')].some((b) => b.textContent === '/'), { timeout: 4000 });
 
-  const pageForm = mountEl.querySelector('form[data-qu-action="cms-page-form"]');
-  const pageListButton = [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].find((b) => b.textContent === '/');
+  const pageForm = mountEl.querySelector('form[data-qu-action="cms-content-form"]');
+  const pageListButton = [...mountEl.querySelectorAll('[data-qu-bind="cms-content-list"] button')].find((b) => b.textContent === '/');
   pageListButton.click();
   await waitUntil(() => pageForm.querySelector('input[name="mode"]').value === 'edit');
   assert.equal(pageForm.querySelector('[name="title"]').value, 'Start v1', "the co-editor's own click-to-load correctly finds the app-admin's EXISTING page");
@@ -264,16 +272,16 @@ test('an UNAUTHORIZED identity - no grant, not the app-admin - gets an honest "n
   await publishRoute(adminBootstrapSpace, { route: '/', title: 'Start' });
   // Deliberately NO grantContentWriter() for `stranger` - the whole point of this test.
 
-  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/cms' });
+  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/cms/content' });
   const mountEl = window.document.querySelector('qu-app-shell');
   const strangerSpace = await connect(stranger, 'stranger-visit', { withBus: true }); // WITH a bus - the only way verifyWritesAcked() can actually check anything.
   const { router } = startApp({ space: strangerSpace, appAdminPub: admin.signingPub, mountEl, window, resolveTimeout: 500 });
 
-  await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-page-form"]'), { timeout: 4000 });
-  await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].some((b) => b.textContent === '/'), { timeout: 4000 });
+  await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-content-form"]'), { timeout: 4000 });
+  await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-content-list"] button')].some((b) => b.textContent === '/'), { timeout: 4000 });
 
-  const pageForm = mountEl.querySelector('form[data-qu-action="cms-page-form"]');
-  const pageListButton = [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].find((b) => b.textContent === '/');
+  const pageForm = mountEl.querySelector('form[data-qu-action="cms-content-form"]');
+  const pageListButton = [...mountEl.querySelectorAll('[data-qu-bind="cms-content-list"] button')].find((b) => b.textContent === '/');
   pageListButton.click();
   await waitUntil(() => pageForm.querySelector('input[name="mode"]').value === 'edit');
 

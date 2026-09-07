@@ -143,7 +143,7 @@ export class ContentResolver {
     return routes.filter(Boolean);
   }
 
-  /** @param {string} route @returns {Promise<{route, title, template, content, data}|null>} `null` if this route has no published page (or it hasn't synced within `timeout`). `data` is kinds.js's `pageKind` own structured-data field (an arbitrary JSON object, or `null` if never set) - see its own doc comment; not part of the sync-readiness check below, a page missing it entirely is a perfectly normal, backward-compatible "title+content only" page, not an unsynced one. */
+  /** @param {string} route @returns {Promise<{route, title, template, content, data, style}|null>} `null` if this route has no published page (or it hasn't synced within `timeout`). `data` is kinds.js's `pageKind` own structured-data field (an arbitrary JSON object, or `null` if never set) - see its own doc comment; `style` is that same Kind's own per-page style-name override (`null` = fall back to the Manifest's `theme`, `runtime.js`'s `AppRuntime.resolveRoute()` own doc comment) - neither is part of the sync-readiness check below, a page missing either is a perfectly normal, backward-compatible page, not an unsynced one. */
   async resolvePage(route, { timeout } = {}) {
     const pageKind = this._kinds.pageKind;
     const id = await deriveContentNodeId(this._appAdminPub, pageKind.kind, route);
@@ -159,7 +159,8 @@ export class ContentResolver {
       if (!title || !content) return null;
       const template = await node.field('template').get();
       const data = await node.field('data').get();
-      return { route, title, template, content, data };
+      const style = await node.field('style').get();
+      return { route, title, template, content, data, style };
     }, { timeout });
     release();
     return page;

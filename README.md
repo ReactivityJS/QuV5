@@ -269,10 +269,14 @@ DIFFERENT things, at two different levels** - a common point of confusion:
   administrable states" below) - it has no generic content editor of its
   own. `bootstrap:platform` installs it for you; by hand, see
   `packages/app-shell/bin/install-admin-console.mjs`.
-- **`#/<prefix>/cms`** (per-app) is where that app's OWN templates/styles/
-  pages are actually created and edited - see architecture.md §7's "The
-  built-in CMS editor." For an ordinary (`realm: 'main'`) app this is the
-  app-admin's own `#/<prefix>/cms`, installed via `installCms(space)`
+- **`#/<prefix>/cms`** (per-app) is a small INDEX page linking to that
+  app's OWN registered admin sections - Templates, Styles, and the unified
+  "Inhalt (Seiten & Views)" editor today (`@qu/app-shell`'s own
+  `src/admin-sections.js` - "registered, not hardcoded," a fourth section
+  needs no router change anywhere), each its OWN bookmarkable route
+  (`#/<prefix>/cms/content`, etc.) - see architecture.md §7's "The built-in
+  CMS editor." For an ordinary (`realm: 'main'`) app this is the
+  app-admin's own `#/<prefix>/cms(/...)`, installed via `installCms(space)`
   (`@qu/app-shell`'s `cms-bundle.js`) into their OWN app's Space. For the
   built-in **"cms"** app itself (`realm: 'global'`, `mode: 'multiuser'`) it
   works differently - see the next section.
@@ -570,9 +574,10 @@ render, live: a new blog post or guestbook entry appears with no reload.
 Both primitives are deliberately GENERIC, not CMS-specific - a future
 Forum, Live-Ticker, or other app built on `@qu/app-core` can use the exact
 same `createView()`/`pushToSharedList()` Dev API and `wireViews()`
-rendering from its own pages; the CMS's own "Views" form
-(`cms-actions.js`'s `wireViewEditor()`) is one reference editor among
-possibly several ("editors as plugins"), not the only way to author one.
+rendering from its own pages; the CMS's own unified "Inhalt (Seiten &
+Views)" section (`cms-actions.js`'s `wireContent()`, `#/admin/<prefix>/cms/content`)
+is one reference editor among possibly several ("editors as plugins"), not
+the only way to author one.
 See architecture.md's own "Shared lists ... and Views" section for the
 full design (including what's deliberately not built yet - a `'collection'`
 source adapter, and watching a View's own definition live) and

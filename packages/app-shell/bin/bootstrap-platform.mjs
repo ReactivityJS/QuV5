@@ -414,11 +414,13 @@ async function main() {
   if (cmsGlobalAlreadyInstalled) {
     console.log(`  "#/${prefix}"'s global shell already installed - skipping (edit it live at #/admin/${prefix}/cms once bootstrapped).`);
   } else {
-    console.log(`  publishing "#/${prefix}"'s global route(s)...`);
+    console.log(`  publishing "#/${prefix}"'s landing route...`);
+    // Just "/" here - installGlobalCms() below now publishes EVERY one of its OWN pages' routes
+    // itself (the /cms index and one per registered section), no separate pre-publish needed for
+    // those any more (cms-bundle.js's own installGlobalCms() doc comment).
     await publishGlobalRoute(mainSpace, prefix, { route: '/', title: 'CMS' });
-    await publishGlobalRoute(mainSpace, prefix, { route: cmsBundle.page.route, title: cmsBundle.page.title });
     await waitUntilAllWritesAcked(mainWrites);
-    await new Promise((resolve) => setTimeout(resolve, 300)); // let the relay observe both new routes before the page content writes follow.
+    await new Promise((resolve) => setTimeout(resolve, 300)); // let the relay observe the new route before the page content write follows.
     console.log(`  installing "#/${prefix}"'s global landing page + CMS editor...`);
     await createGlobalApp(mainSpace, prefix, { name: 'CMS', rootTemplate: cmsBundle.template.name, defaultRoute: '/' });
     await installGlobalCms(mainSpace, prefix); // writes the __cms__ template + its own /cms editor page.

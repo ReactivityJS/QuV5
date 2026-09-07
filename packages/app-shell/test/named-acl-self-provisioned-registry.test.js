@@ -79,7 +79,7 @@ test('a relay-admin who is ALSO a self-provisioned multiuser participant: their 
   const resolveKindSchema = await createAppResolveKindSchema({
     globalApps: [
       { prefix: 'admin', templateNames: ['main'], pageRoutes: ['/'] },
-      { prefix: 'cms', templateNames: ['__cms__'], pageRoutes: ['/', '/cms'] },
+      { prefix: 'cms', templateNames: ['__cms__'], pageRoutes: ['/', '/cms', '/cms/templates', '/cms/styles', '/cms/content'] },
     ],
     // Deliberately NO appAdminPubs - relayAdmin is never registerApp()-registered as an ordinary
     // app-admin, exactly the self-provisioned-participant scenario this test guards.
@@ -106,14 +106,17 @@ test('a relay-admin who is ALSO a self-provisioned multiuser participant: their 
   const pMount = pw.document.querySelector('qu-app-shell');
   const { router: pRouter } = startPlatform({ space: personalSpace, mountEl: pMount, window: pw, resolveTimeout: 500 });
   await waitUntil(() => pMount.innerHTML.length > 0, { timeout: 5000 });
-  pRouter.navigate('/cms/cms');
-  // Same "wait for wirePages()'s own tail to have actually run, not just for the form element to
-  // exist" reasoning as the global-space wait below - the self-provisioned "__cms__" template
-  // (installCms()'s own doc comment) is ALSO registered via registerContentName(), so its presence
-  // in the template list is a readiness signal that's actually tied to this Space's own registry
-  // writes having landed, not just to renderPage() having run.
+  // Visit /cms/templates FIRST, purely as a READINESS signal: the self-provisioned "__cms__"
+  // template (installCms()'s own doc comment) is registered via registerContentName(), so its
+  // presence in the template list is tied to this Space's OWN self-provisioning writes having
+  // actually landed - unlike the Content list (installCms()'s own pages are deliberately never
+  // publishRoute()d - "/cms* are maintenance routes" - so it starts out genuinely empty and can't
+  // serve as this same signal).
+  pRouter.navigate('/cms/cms/templates');
   await waitUntil(() => [...pMount.querySelectorAll('[data-qu-bind="cms-template-list"] button')].some((b) => b.textContent === '__cms__'), { timeout: 4000 });
-  const pForm = pMount.querySelector('form[data-qu-action="cms-page-form"]');
+  pRouter.navigate('/cms/cms/content');
+  await waitUntil(() => pMount.querySelector('form[data-qu-action="cms-content-form"]'), { timeout: 4000 });
+  const pForm = pMount.querySelector('form[data-qu-action="cms-content-form"]');
   pForm.querySelector('[name="route"]').value = '/';
   pForm.querySelector('[name="title"]').value = 'PERSONAL PAGE';
   pForm.querySelector('[name="content"]').value = '<p>personal</p>';
@@ -123,36 +126,36 @@ test('a relay-admin who is ALSO a self-provisioned multiuser participant: their 
 
   // --- Global space: same relay-admin visits "#/admin/cms/cms" (the GLOBAL shell's own editor). ---
   const globalSpace = await connect('global');
-  const { window: gw } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/admin/cms/cms' });
+  const { window: gw } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/admin/cms/cms/content' });
   const gMount = gw.document.querySelector('qu-app-shell');
   const { router: gRouter } = startPlatform({ space: globalSpace, mountEl: gMount, window: gw, resolveTimeout: 500 });
   // Wait for the page LIST to actually show the pre-existing "/cms" route, not just for the form
   // element to exist in the DOM - wirePages()'s own tail (which computes `anchor` and calls
   // holdRegistry()/refreshList()) runs AFTER renderPage() has already set innerHTML, so the form
   // can be present in the DOM slightly before wireCms() has actually finished wiring it up.
-  await waitUntil(() => [...gMount.querySelectorAll('[data-qu-bind="cms-page-list"] li')].some((li) => li.textContent === '/cms'), { timeout: 5000 });
-  const gForm = gMount.querySelector('form[data-qu-action="cms-page-form"]');
+  await waitUntil(() => [...gMount.querySelectorAll('[data-qu-bind="cms-content-list"] li')].some((li) => li.textContent === '/cms'), { timeout: 5000 });
+  const gForm = gMount.querySelector('form[data-qu-action="cms-content-form"]');
   gForm.querySelector('[name="route"]').value = '/';
   gForm.querySelector('[name="title"]').value = 'GLOBAL PAGE';
   gForm.querySelector('[name="content"]').value = '<p>global</p>';
   submit(gForm, gw);
   await waitUntil(() => /best.tigt/.test(gForm.querySelector('[data-qu-status]')?.textContent ?? ''), { timeout: 4000 });
 
-  const gListItems = [...gMount.querySelectorAll('[data-qu-bind="cms-page-list"] li')].map((li) => li.textContent);
-  assert.deepEqual(new Set(gListItems), new Set(['/', '/cms']), 'the GLOBAL editor\'s own "Seiten" list shows only global routes, never the personal page');
+  const gListItems = [...gMount.querySelectorAll('[data-qu-bind="cms-content-list"] li')].map((li) => li.textContent);
+  assert.deepEqual(new Set(gListItems), new Set(['/', '/cms', '/cms/templates', '/cms/styles', '/cms/content']), 'the GLOBAL editor\'s own "Inhalt" list shows only global routes, never the personal page');
   gRouter.stop();
 
   // Re-open the PERSONAL editor as a genuinely FRESH connection (no local state to fall back on -
   // this is the exact condition that used to expose the bug) and check ITS list.
   const personalSpace2 = await connect('personal-2');
-  const { window: pw2 } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/cms/cms' });
+  const { window: pw2 } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/cms/cms/content' });
   const pMount2 = pw2.document.querySelector('qu-app-shell');
   const { router: pRouter2 } = startPlatform({ space: personalSpace2, mountEl: pMount2, window: pw2, resolveTimeout: 500 });
   await waitUntil(() => {
-    const items = [...pMount2.querySelectorAll('[data-qu-bind="cms-page-list"] li')];
+    const items = [...pMount2.querySelectorAll('[data-qu-bind="cms-content-list"] li')];
     return items.length > 0 && items.some((li) => li.textContent === '/');
   }, { timeout: 5000 });
-  const pListItems = [...pMount2.querySelectorAll('[data-qu-bind="cms-page-list"] li')].map((li) => li.textContent);
+  const pListItems = [...pMount2.querySelectorAll('[data-qu-bind="cms-content-list"] li')].map((li) => li.textContent);
   assert.deepEqual(pListItems, ['/'], 'the PERSONAL editor\'s own "Seiten" list, read from a genuinely FRESH connection, actually shows the page that was just created - not silently empty');
   pRouter2.stop();
 
