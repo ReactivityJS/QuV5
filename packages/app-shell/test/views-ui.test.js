@@ -121,10 +121,15 @@ test('a relay-admin builds a Gästebuch-like app entirely through the admin cons
     // Navigates to the app's own CMS editor INDEX and self-provisions it (one Page per registered
     // section, `admin-sections.js`'s own doc comment) - then on to the "Content" section
     // specifically, where the unified Page+View editor lives - the SAME editor view-editor.test.js
-    // already proves in detail, reached a different way here.
+    // already proves in detail, reached a different way here. CLICKING the rendered link itself
+    // (not `router.navigate()` straight to the known route) is the point: `wireCmsNav()`'s own doc
+    // comment on the real, previously-shipped bug this proves is fixed - a link hardcoded at install
+    // time to `#/cms/content` would 404 for this "notesboard" app, reached here via admin delegation
+    // (`#/admin/notesboard/cms`, not the bare `#/cms` the built-in reference "cms" demo app happens
+    // to sit at) - the ONLY reason that bug went unnoticed by every earlier version of this test.
     await waitUntil(() => window.location.hash === '#/admin/notesboard/cms', { timeout: 6000 });
-    await waitUntil(() => mountEl.querySelector('a[href="#/cms/content"]'), { timeout: 6000 });
-    router.navigate('/admin/notesboard/cms/content');
+    await waitUntil(() => mountEl.querySelector('a[href="#/admin/notesboard/cms/content"]'), { timeout: 6000 });
+    mountEl.querySelector('a[href="#/admin/notesboard/cms/content"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
     await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-content-form"]'), { timeout: 6000 });
     // A short settle margin - `renderGlobalShell()` calls `wireInstalledApps()` BEFORE `wireCms()`
     // (sequentially, not `Promise.all`'d together the way `wireCms()`'s own registered sections are) -
