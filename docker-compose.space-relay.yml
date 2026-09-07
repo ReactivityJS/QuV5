@@ -2,19 +2,25 @@ services:
   # The DEFAULT service (architecture.md §7, docs/app-shell-arbeitsauftrag.md) - `docker compose up`
   # alone now starts THIS: @qu/app-shell in PLATFORM mode (a Relay-Admin-owned #/admin console + as
   # many CMS-managed shell-apps as you register, docs §19-21), not the old hardcoded chat demo below
-  # (which moved to the opt-in "legacy-chat" profile - see its own comment further down). Starts fine
-  # with zero configuration (a setup page instead of an app/platform) - the fastest path to an
-  # actually-configured platform, including the built-in admin console and one CMS-managed demo
-  # shell-app, is ONE command run from anywhere with network access to this relay's URL (ideally
-  # from OUTSIDE this container's own lifecycle entirely - your own laptop, a CI runner - and not
-  # tied to any particular deployment method - see its own doc comment on why):
+  # (which moved to the opt-in "legacy-chat" profile - see its own comment further down). Starts with
+  # ZERO configuration into PLATFORM mode already (a landing page, "noch keine Anwendung installiert",
+  # not a setup screen) - relay-server.js's own "BOOTSTRAP RELAY-ADMIN" doc comment: this relay
+  # always admits a self-generated bootstrap relay-admin, persisted at /data/relay-bootstrap-admin.json
+  # (the volume below), on top of QU_RELAY_ADMINS below, so PLATFORM mode never actually needs that
+  # env var populated just to exist. The fastest path to an ACTUALLY-configured platform (the built-in
+  # admin console installed, one CMS-managed demo shell-app) is still ONE command, run from anywhere
+  # with network access to this relay's URL - but now it can use THAT auto-generated identity (`docker
+  # cp <container>:/data/relay-bootstrap-admin.json .` first, or a bind-mounted volume) instead of
+  # generating a separate one and pasting its pubkey below + redeploying:
   #
-  #   node packages/app-shell/bin/bootstrap-platform.mjs --relay ws://<this-host>:8081
+  #   node packages/app-shell/bin/bootstrap-platform.mjs --relay ws://<this-host>:8081 --dir <wherever you copied it to>
   #
-  # It prints an environment: block (QU_RELAY_ADMINS) to paste below yourself and redeploy with - it
-  # never writes this file or any deployment config for you. See the root README.md's "Deploying the
-  # App Shell" section and docs/v5-space-core-guide.md §10 for the full walkthrough and every env var
-  # below.
+  # (`--dir` must point at a directory containing THAT file renamed/copied to `relay-admin.json` - see
+  # `bootstrap-platform.mjs`'s own `--dir`/`ensureIdentity()` doc comment; a future revision may teach
+  # it to read `relay-bootstrap-admin.json` directly.) Prefer your OWN pubkey in QU_RELAY_ADMINS below
+  # instead if you'd rather not rely on a filesystem-retrieved identity at all - see that var's own
+  # comment. See the root README.md's "Deploying the App Shell" section and docs/v5-space-core-guide.md
+  # §10 for the full walkthrough and every env var below.
   #
   # RUNNING IT VIA `docker exec` INSTEAD (e.g. `docker exec -it <container> npm run
   # bootstrap:platform` - common on managed platforms like Rancher/Kubernetes where exposing an
@@ -62,10 +68,19 @@ services:
       # needs - see @qu/space-core's kinds.js/kind-schema.js own doc comment on the 'relay-admins'
       # ACL mode, and relay-server.js's own doc comment. ANY pubkey works the moment it's listed
       # here, including an operator's own already-existing browser identity - no separate admin
-      # identity to generate or import. Empty/unset still starts the relay (so it CAN be
-      # bootstrapped - see packages/app-shell/bin/install-admin-console.mjs) but nobody can write
-      # qu-platform-apps or the admin console yet.
+      # identity to generate or import. Empty/unset still starts PLATFORM mode anyway (see
+      # QU_RELAY_BOOTSTRAP_ADMIN right below) rather than falling back to single-app mode.
       QU_RELAY_ADMINS: ${QU_RELAY_ADMINS:-}
+      # Default true (unset here = true) - relay-server.js's own "BOOTSTRAP RELAY-ADMIN" doc comment
+      # in full: this relay ALWAYS also admits a self-generated bootstrap relay-admin identity,
+      # persisted at /data/relay-bootstrap-admin.json (the SAME volume below - no second volume
+      # needed) - on top of QU_RELAY_ADMINS above, never instead of it, solving the chicken-and-egg
+      # problem of needing a pubkey configured before anyone can register/administer anything at
+      # all. Retrieve that file (docker cp / a bind-mounted volume) to import it as your own browser
+      # identity, or just add your OWN pubkey to QU_RELAY_ADMINS above and ignore it. Set to the
+      # exact string "false" to disable entirely - a deployment that wants ONLY the explicitly-
+      # configured list above to ever matter.
+      QU_RELAY_BOOTSTRAP_ADMIN: ${QU_RELAY_BOOTSTRAP_ADMIN:-}
       # OPTIONAL - qu-page/qu-template/qu-style are 'content'-ACL (self-certifying per-owner grants,
       # @qu/app-core's kinds.js), not 'members'-ACL, so an app-admin needs no entry here just to
       # WRITE their own content. Only relevant for an app's OWN, separately-defined 'members'-ACL

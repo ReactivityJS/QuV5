@@ -117,10 +117,30 @@ now the DEFAULT service - no `--profile` needed. Works the same under
 `docker stack deploy` (Swarm) - see "Docker Swarm / `docker stack`" below
 for the one thing that's different there (pre-built images).
 
-Starts fine with zero configuration (a setup page instead of a platform).
-Getting to an actually-configured platform is always the SAME two steps,
-regardless of how you deploy - Compose, `docker stack`, Kubernetes, bare
-metal:
+Starts with ZERO configuration already in PLATFORM mode (a landing page,
+"noch keine Anwendung installiert," not a setup screen) - the relay
+always admits a self-generated bootstrap relay-admin identity, persisted at
+`/data/relay-bootstrap-admin.json` inside its own persistent volume (see
+`relay-server.js`'s own "BOOTSTRAP RELAY-ADMIN" doc comment;
+`QU_RELAY_BOOTSTRAP_ADMIN=false` disables it if you'd rather rely only on
+an explicitly-configured `QU_RELAY_ADMINS`). Getting to an
+ACTUALLY-configured platform (the built-in admin console installed, one
+CMS-managed demo shell-app) is always the SAME two steps, regardless of how
+you deploy - Compose, `docker stack`, Kubernetes, bare metal - except now
+you can skip the "paste `QU_RELAY_ADMINS` and redeploy" round trip
+entirely by retrieving that auto-generated identity file instead of
+generating your own:
+
+```sh
+docker cp <container>:/data/relay-bootstrap-admin.json ./relay-admin.json
+npm run bootstrap:platform -- --relay ws://<your-host>:8081 --dir .
+```
+
+(`--dir` must point at a directory containing that file named exactly
+`relay-admin.json` - `bootstrap-platform.mjs`'s own `ensureIdentity()`
+reads that specific filename.) Prefer your own pubkey in `QU_RELAY_ADMINS`
+instead if you'd rather not depend on a filesystem-retrieved identity at
+all - the ORIGINAL two-step flow below still works exactly as documented:
 
 ```sh
 npm run bootstrap:platform
