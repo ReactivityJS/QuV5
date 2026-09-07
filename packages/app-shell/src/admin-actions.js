@@ -61,11 +61,12 @@
  * gate keeps `#/admin/...` from rendering for them at all.
  */
 import { QuCrypto } from '@qu/core';
-import { registerApp, setAppMode, setAppBundleVersion, unregisterApp, nullGlobalAppContent, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
+import { registerApp, setAppMode, setAppBundleVersion, addSharedLists, unregisterApp, nullGlobalAppContent, publishGlobalRoute, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
 import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
 import { installForum } from '../forum-bundle.js';
+import { installGlobalCms } from '../cms-bundle.js';
 import { verifyWritesAcked } from './verify-writes.js';
 import { discoveredApps } from '../apps-registry.generated.js';
 
@@ -221,6 +222,53 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
 
         const status = doc.createElement('span');
         status.setAttribute('data-qu-status', '');
+
+        // "Views/Seiten (CMS)" - self-provisions (idempotent, `cms-bundle.js`'s own
+        // `installGlobalCms()` doc comment: "re-running is harmless") this app's OWN
+        // Templates/Styles/Pages/VIEWS editor at `#/admin/<prefix>/cms`
+        // (`parseAdminSubPath()`/`renderGlobalShell()`'s existing delegation - already wired,
+        // nothing new there) if it doesn't exist yet, then navigates there. THE POINT: any
+        // `realm: 'global'` app - including one with no bundle.js at all, just a bare
+        // `registerApp()` - gets a full Page+View authoring UI this way, `createGlobalView()`'s
+        // own `route`/`template` params already connecting a path to a live, generated feed
+        // (`docs/example-apps.md`'s own "Gästebuch nachbauen, nur per UI" walkthrough has the
+        // full worked example, including the "form above/below the list" case: create the View
+        // WITH a route first, THEN edit the auto-created wrapper page's own content afterward to
+        // wrap the `<div data-qu-view>` in whatever surrounding markup is wanted - there is no
+        // separate "header/footer" field, the wrapper page IS ordinary, freely editable content).
+        // Optional - a shared-list name to ADD to this app's own registration before opening the
+        // CMS editor (`dev.js`'s `addSharedLists()` own doc comment on why this exists at all: a
+        // Gästebuch-style "many visitors contribute" View, built ENTIRELY through that editor's own
+        // View form, needs its list's name registered SOMEWHERE first - there is no `bundle.js`
+        // install step to have done that for an app created this way). Leave blank for a Page-
+        // sourced View (single-author content) - those need no shared list at all.
+        const sharedListInput = doc.createElement('input');
+        sharedListInput.placeholder = 'neue shared-list (optional)';
+        sharedListInput.style.marginRight = '0.25rem';
+        li.appendChild(sharedListInput);
+
+        const cmsBtn = doc.createElement('button');
+        cmsBtn.type = 'button';
+        cmsBtn.textContent = 'Views/Seiten (CMS)';
+        cmsBtn.style.marginRight = '0.25rem';
+        cmsBtn.addEventListener('click', async () => {
+          status.textContent = '';
+          try {
+            const newList = sharedListInput.value.trim();
+            if (newList) {
+              await addSharedLists(mainSpace, { prefix: app.prefix, sharedLists: [newList] });
+              await new Promise((resolve) => setTimeout(resolve, 400)); // settle - the live resolver needs a moment to start watching this new name before anything writes to it.
+              sharedListInput.value = '';
+            }
+            await publishGlobalRoute(mainSpace, app.prefix, { route: '/cms', title: 'CMS' });
+            await new Promise((resolve) => setTimeout(resolve, 400)); // settle - see publishGlobalRoute()'s own doc comment on why a page write right after needs this.
+            await installGlobalCms(mainSpace, app.prefix);
+            doc.defaultView.location.hash = `/admin/${app.prefix}/cms`;
+          } catch (err) {
+            status.textContent = `Fehler: ${err.message}`;
+          }
+        });
+        li.appendChild(cmsBtn);
 
         for (const mode of ['off', 'global', 'multiuser', 'personal']) {
           const btn = doc.createElement('button');

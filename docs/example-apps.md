@@ -44,8 +44,13 @@ immediately, no Dev API calls of your own needed. The code below still shows
 the UNDERLYING primitives these bundles are built from (useful for a NEW app
 in this shape, e.g. a Live-Ticker or Geo Chase wanting the same "content
 features as reusable building blocks" - the reason the View-rendering code
-lives in `@qu/app-shell` rather than baked into the CMS). Chat (§4) remains a
-sketch only - no installable bundle exists for it yet.
+lives in `@qu/app-shell` rather than baked into the CMS).
+
+**Chat (§4) is also real now** - `apps/chat/` (`bundle.js`/`actions.js`/
+`index.js`), installed the exact same one-click way. It lives under `/apps/`
+rather than next to Guestbook/Blog/Forum in `packages/app-shell/` for a
+structural reason, not a maturity one: see `apps/README.md`'s own "Template +
+Data vs. genuine code" dividing line, and §5 below.
 
 **Two corrections the SHIPPED bundles make that the sketches below still
 predate:**
@@ -291,6 +296,123 @@ work for anything beyond "a simple form":**
 - **Editing/deleting a sent message**: same "ONLY ADDITIVE" constraint as
   the Forum's replies above.
 
+## 5. Building an app entirely through the admin console - no bundle.js, no script
+
+Every primitive §1-§4 use by hand (a `sharedListKind`-backed feed, a
+route-bound `viewKind`) is ALSO reachable purely through the admin
+console's own rendered UI, with zero Dev API calls of your own - the exact
+mechanism `guestbook-bundle.js`/etc. are themselves built on, just driven
+by forms instead of a script. Concretely, for a brand-new
+"Notizbrett"-style board (a public, many-author feed - structurally
+identical to §1's Guestbook):
+
+1. **Register a blank `realm: 'global'` app** - `#/admin`'s "App
+   registrieren" form, or (for now) a direct `registerApp(space, {prefix,
+   name, realm: 'global'})` call - no installer, no `bundle.js`.
+2. In the resulting app's row, type a **new shared-list name** (e.g.
+   `notesboard-entries`) into the field next to **"Views/Seiten (CMS)"**
+   and click it. This does two things, in order: `addSharedLists()`
+   (`@qu/app-core`'s `dev.js` - the relay has to be told a `'members'`-ACL
+   list's NAME before anything can write to it, same reasoning `sharedLists`
+   already documents for a bundle's own install step) registers the list,
+   then `installGlobalCms()` self-provisions this app's own Templates/
+   Styles/Pages/**Views** editor (`cms-bundle.js`) and navigates to
+   `#/admin/<prefix>/cms`.
+3. In the rendered **"Views (live Feeds)"** section, create a View: a
+   name, `sources: [{"type":"shared-list","name":"notesboard-entries"}]`,
+   `sortBy: "timestamp"`, an `itemTemplate`, and - the part that connects a
+   PATH to this generated View - a **route** (e.g. `/`). Submitting
+   self-registers the View's own name too (`addGlobalViewNames()`,
+   automatic, the same "tell the relay the name before writing it" step,
+   no separate button for this one - the form already knows the name the
+   moment it's typed) and auto-creates a wrapper page at that route
+   containing just `<div data-qu-view="...">`.
+4. **Header/footer, e.g. a sign-form above or below the list** (the
+   concrete case that started this whole section: a Gästebuch-style page
+   needs BOTH a feed AND a way to add to it): there is no separate
+   "header"/"footer" field - the auto-created wrapper page from step 3 is
+   itself ordinary, freely editable content. Go to the **"Seiten"** section
+   of the SAME editor, load that page (its route matches what you typed in
+   step 3), and edit its `content` to wrap the existing
+   `<div data-qu-view="...">` in whatever markup is wanted, e.g.:
+   ```html
+   <h1>Notizbrett</h1>
+   <div data-qu-view="notesboard-feed"></div>
+   <form data-qu-action="???"> ... </form>
+   ```
+   The View itself never needs to change for this - only the page around it.
+   **The one real gap today**: there is no GENERIC, attribute-driven form
+   convention yet for "push an entry into an arbitrary named shared list"
+   the way `guestbook-actions.js`'s own `data-qu-action="guestbook-form"`
+   is specific to Guestbook's own wiring - writing to a shared list from a
+   page built this way currently still needs SOME framework-provided
+   wiring for that exact `data-qu-action` name to exist (a real, open
+   generalization, not yet built - `guestbook-actions.js`'s own wiring is
+   ALREADY almost this generic, reading the list name off `data-qu-list`
+   rather than hardcoding it; only the ACTION NAME itself is still
+   Guestbook-specific).
+
+This is genuinely how far you can get with ZERO files today for an app
+that fits "Template + `qu-list`/`qu-bind`/`qu-view` data source" - see
+`apps/README.md`'s own dividing line for what does and doesn't qualify,
+and §6 below for the file-based side of that line.
+
+## 6. `/apps/*` - when a Template genuinely isn't enough
+
+`apps/README.md` has the full convention (`apps/<name>/index.js`,
+discovered at build time, administered identically to §1-§4 through the
+SAME admin console). Chat (§4) is the first resident, kept deliberately
+simple for now (one shared list, one View - it could, today, have been
+built via §5's own UI-only workflow instead). The reason it lives here
+regardless: the planned direction for it - sharing a live location,
+message reactions, a Slots-style extension point other apps register
+actions/UI into (the QuV3 precedent this project is drawing on: a shared
+menu/toolbar that apps contribute entries to without the host needing to
+know about them in advance) - is genuine per-message CODE, not a
+different shape of content a Template could express. `architecture.md`'s
+own still-open "app modules" question is answered for exactly this shape
+of app now; genuine custom EXECUTION logic beyond "a real relay write" per
+interaction (a Geo Chase's own game rules, a Live-Ticker's event-scoring)
+remains real, separate future work.
+
+## Personal-instance routing: the additive `/u/<ref>/` scheme
+
+Guestbook and Blog (§1-§2) also support a PERSONAL instance per visitor,
+additive to the app's own global one (never replacing what the bare prefix
+means - `boot.js`'s `renderMultiUserRoute()` own top doc comment has the
+full reasoning): `#/<prefix>/u/<ref>/`, where `ref` is `"me"` (the
+default) or another identity's own base64url pubkey.
+
+**The same address also works WITHOUT the literal `"u/"` marker** - a bare
+pubkey segment is unambiguous enough on its own (the exact same "does this
+look like a pubkey" test `PlatformRuntime`'s own top-level prefix fallback
+already uses, `boot.js`'s `parseMultiUserSubPath()` own doc comment): `#/
+blog/<pub>/` reaches that identity's own feed, `#/blog/<pub>/post/<slug>`
+one of their own posts - not just the longer `#/blog/u/<pub>/post/<slug>`
+form. `"me"` is not a valid pubkey and only ever works with the explicit
+`/u/me/` spelling - self-provisioning stays gated on that literal string,
+never inferred from "this happens to be my own pubkey" (reading someone
+ELSE's still-empty page must never conjure content into THEIR name).
+
+Concretely, for Blog:
+
+| Route | Resolves to |
+|---|---|
+| `#/blog/` | the relay-admin-curated GLOBAL feed |
+| `#/blog/<pub>/` | that identity's own personal blog's index |
+| `#/blog/<pub>/post/<slug>` | one of their own posts |
+
+Posts stay nested under the owner's own address (`/post/<slug>`, not a
+flat `/blog/<slug>` sitting directly next to the index) rather than at some
+independent, owner-agnostic path - this is a real constraint, not a
+stylistic choice: a personal post is self-owned content, addressed as
+`(ownerPub, kind, route)` (`kinds.js`'s own doc comment) - the router needs
+to already know BOTH pieces to resolve anything at all, and the URL itself
+is the only place both are available without a separate slug→owner lookup
+registry (a real, buildable primitive, just not one that exists today, and
+arguably not worth building only to shave one path segment off a URL that
+already reads perfectly clearly with it).
+
 ## Where the four examples actually differ
 
 | | New Kind needed? | Who may post | Structure |
@@ -300,11 +422,11 @@ work for anything beyond "a simple form":**
 | Forum | No (`sharedListKind`, twice) | any Space member | one list of topics, one list of replies PER topic |
 | Chat | No (`sharedListKind`) | any Space member | one flat list, no per-item substructure |
 
-None of the four needed a new Kind-Schema, a filesystem-based "app
-module," or any change to `@qu/space-core`/`@qu/space-transport` - the
-generic primitives (self-owned content, member-writable shared lists,
-live merging Views) already cover this whole class of app. See
-architecture.md's own still-open "app modules" question for what
-WOULD eventually need more than content: genuine custom EXECUTION logic
-(e.g. game rules for a "Geo Chase," a Live-Ticker's own event-scoring),
-not just a different shape of content.
+None of the four needed a new Kind-Schema, and building one at all (§5)
+turned out to be optional even for a brand-new app, never mind a change to
+`@qu/space-core`/`@qu/space-transport` - the generic primitives (self-owned
+content, member-writable shared lists, live merging Views) already cover
+this whole class of app. §6/`apps/README.md` covers what genuinely needs
+more: custom EXECUTION logic (e.g. game rules for a "Geo Chase," a
+Live-Ticker's own event-scoring, Chat's own planned location/reactions/
+Slots work), not just a different shape of content.

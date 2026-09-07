@@ -143,13 +143,41 @@ function renderAdminUnauthorized({ mountEl, doc }) {
  * that function's own doc comment on why the default flipped away from
  * the global shell (discoverability: a first-time visitor has no reason to
  * know or paste their own pubkey just to reach their OWN space).
+ *
+ * ALSO recognizes the SAME thing spelled without the `/u/` marker at all -
+ * `/<pubkey>/<rest>` - for an ordinary `mode: 'global'`/`'personal'` app's
+ * own ADDITIVE personal route (`renderMultiUserRoute()`'s own doc comment
+ * on `routeNamespace`): `#/blog/<pub>/` for that identity's own feed,
+ * `#/blog/<pub>/<slug>` for one of their own posts - `docs/example-apps.md`'s
+ * own worked example. Safe to accept unconditionally, no `/u/` needed to
+ * disambiguate: a real base64url-encoded 32-byte pubkey (`QuCrypto.
+ * fromBase64Url()`, the SAME check `PlatformRuntime`'s own top-level
+ * "unregistered prefix = literal owner id" fallback already makes) is a
+ * ~43-character string that will not, in practice, collide with an
+ * ordinary content route someone typed by hand. `"me"` is NOT a valid
+ * pubkey and never matches this shorter form on purpose - it stays
+ * reachable only via the explicit `/u/me/` spelling (this file's own
+ * `renderMultiUserRoute()` doc comment on why self-provisioning is
+ * deliberately gated on `ref === 'me'` specifically, never inferred from
+ * "some 32-byte value that happens to be this identity's own pubkey").
  * @param {string} subPath
  * @returns {{ref: string, userSubPath: string}|null}
  */
 function parseMultiUserSubPath(subPath) {
-  const match = /^\/u\/([^/]+)(\/.*)?$/.exec(subPath ?? '');
-  if (!match) return null;
-  return { ref: match[1], userSubPath: match[2] || '/' };
+  const explicit = /^\/u\/([^/]+)(\/.*)?$/.exec(subPath ?? '');
+  if (explicit) return { ref: explicit[1], userSubPath: explicit[2] || '/' };
+  const bare = /^\/([^/]+)(\/.*)?$/.exec(subPath ?? '');
+  if (bare && looksLikePubkey(bare[1])) return { ref: bare[1], userSubPath: bare[2] || '/' };
+  return null;
+}
+
+/** `parseMultiUserSubPath()`'s own "does this segment even look like a pubkey" check - `resolveUserRef()`'s own doc comment already does the REAL, authoritative decode; this is just a cheaper pre-filter so an ordinary route segment (e.g. a Blog's own global "/post/hallo") is never even attempted as one. */
+function looksLikePubkey(segment) {
+  try {
+    return QuCrypto.fromBase64Url(segment).length === 32;
+  } catch {
+    return false;
+  }
 }
 
 /**

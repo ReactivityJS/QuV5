@@ -41,6 +41,8 @@ export {
   registerApp,
   setAppMode,
   setAppBundleVersion,
+  addSharedLists,
+  addGlobalViewNames,
   unregisterApp,
   nullGlobalAppContent,
   createGlobalApp,

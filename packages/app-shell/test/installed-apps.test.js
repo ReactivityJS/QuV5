@@ -388,6 +388,44 @@ test('Blog: a visitor\'s own personal blog (#/blog/u/me/) lets ANY Space member 
   }
 });
 
+test('Blog: the personal-instance route also works WITHOUT the "/u/" marker - a bare pubkey segment is enough (#/blog/<pub>/... , not just #/blog/u/<pub>/...)', async () => {
+  const author = await actor();
+  const relay = await bootRelay({ extraActors: [author] });
+  try {
+    const adminSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl: adminMountEl, router: adminRouter } = mountAdmin(adminSpace);
+    await installViaForm(adminMountEl, 'blog', 'blog');
+    adminRouter.stop();
+
+    const authorSpace = await relay.connect(author);
+    const authorPub = QuCrypto.toBase64Url(author.signingPub);
+    const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/blog/u/me/' });
+    const mountEl = window.document.querySelector('qu-app-shell');
+    const { router } = startPlatform({ space: authorSpace, mountEl, window, resolveTimeout: 1500 });
+
+    // Self-provisions + publishes via the already-proven LONG form ("Blog: a visitor's own personal
+    // blog..." above) - this test is purely about the ALTERNATE URL spelling to REACH the same
+    // content afterward, not about publishing itself.
+    await waitUntil(() => mountEl.querySelector('form[data-qu-action="blog-post-form"]'));
+    const form = mountEl.querySelector('form[data-qu-action="blog-post-form"]');
+    form.querySelector('[name="title"]').value = 'Kurzform-Test';
+    form.querySelector('[name="slug"]').value = 'kurzform-post';
+    form.querySelector('[name="content"]').value = '<p>Erreichbar auch ohne "/u/".</p>';
+    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await waitUntil(() => /bestätigt/.test(form.querySelector('[data-qu-status]')?.textContent ?? ''), { timeout: 6000 });
+
+    // The SHORT form - no "/u/" at all - `boot.js`'s `parseMultiUserSubPath()` own doc comment on
+    // why a bare base64url pubkey segment is unambiguous enough on its own - resolves against the
+    // exact SAME self-owned content the "/u/<pub>/" long form does.
+    router.navigate(`/blog/${authorPub}/post/kurzform-post`);
+    await waitUntil(() => mountEl.textContent.includes('Erreichbar auch ohne "/u/".'), { timeout: 8000 });
+
+    router.stop();
+  } finally {
+    await relay.close();
+  }
+});
+
 test('Guestbook: mode:"personal" replaces the bare prefix with a read-only aggregate feed merged across every visitor\'s own personal instance', async () => {
   const visitor = await actor();
   const relay = await bootRelay({ extraActors: [visitor] });

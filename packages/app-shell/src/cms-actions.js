@@ -117,6 +117,7 @@ import {
   editView,
   createGlobalView,
   editGlobalView,
+  addGlobalViewNames,
 } from '@qu/app-core';
 import { verifyWritesAcked } from './verify-writes.js';
 import { deriveOwnerNodeId } from '@qu/space-core';
@@ -587,6 +588,15 @@ async function wireViewEditor({ mountEl, doc, space, global = false, prefix, own
         if (mode === 'edit') {
           await verifyWritesAcked(space, id, () => editGlobalView(space, prefix, { name, route, template, sources, sortBy, sortOrder, limit, itemTemplate, timeout: 2000 }));
         } else {
+          // A NEW View's name has to be told to the relay BEFORE writing it - `dev.js`'s
+          // `addGlobalViewNames()` own doc comment on why (the SAME "no registry of its own to
+          // watch" gap `registerApp()`'s own `globalViewNames` param exists for at INSTALL time -
+          // this is that same registration, just for a View created LATER, through this form,
+          // whose name wasn't known back then). Real, settled BEFORE the write, same "register,
+          // settle, then write" ordering every other dynamically-named Kind in this codebase
+          // already follows (shared lists, a global app's own route registry).
+          await addGlobalViewNames(space, { prefix, globalViewNames: [name] });
+          await new Promise((resolve) => setTimeout(resolve, 400));
           await verifyWritesAcked(space, id, () => createGlobalView(space, prefix, { name, route, template, sources, sortBy, sortOrder, limit, itemTemplate }));
         }
       } else if (mode === 'edit') {
