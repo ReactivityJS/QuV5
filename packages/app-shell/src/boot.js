@@ -19,7 +19,7 @@ import { renderPage } from '@qu/app-renderer';
 import { wireAdminConsole } from './admin-actions.js';
 import { wireCms } from './cms-actions.js';
 import { wireViews } from './view-actions.js';
-import { wireInstalledApps, provisionPersonalInstance } from './installed-apps-actions.js';
+import { wireInstalledApps, provisionPersonalInstance, wirePersonalUpdateBanner } from './installed-apps-actions.js';
 import { installCms } from '../cms-bundle.js';
 
 /**
@@ -45,7 +45,7 @@ const GLOBAL_KINDS = {
 
 /** @param {{mountEl: Element, doc: Document, platform: PlatformRuntime, space: import('@qu/space-core').Space}} params - shown when no registered app's prefix (nor a well-formed owner id) matches the current route. The one piece of `startPlatform()` UI that ISN'T Qu content: by definition nothing here resolved, so there is no content to fetch it from - same "Framework Default" posture `@qu/app-renderer` already takes for a single app's own unresolved routes. */
 async function renderLandingPage({ mountEl, doc, platform, space }) {
-  // Filters out `mode: 'off'` global apps - kinds.js's own doc comment on the three states requires
+  // Filters out `mode: 'off'` global apps - kinds.js's own doc comment on the four states requires
   // an "off" app to be INDISTINGUISHABLE from one never registered at all; a landing-page link that
   // 404s the moment it's clicked would violate that for ordinary visitors (an admin still sees it,
   // deliberately, in the admin console's own apps list - that one needs to stay reachable to turn it
@@ -130,7 +130,7 @@ function renderAdminUnauthorized({ mountEl, doc }) {
 
 /**
  * Recognizes a `realm: 'global'`, `mode: 'multiuser'` app's EXPLICIT
- * per-user sub-namespace (kinds.js's own doc comment on the three states) -
+ * per-user sub-namespace (kinds.js's own doc comment on the four states) -
  * `/u/<ref>/<rest>` where `ref` is either the literal string `"me"` (the
  * CURRENTLY signed-in identity - the default anyway, see `startPlatform()`,
  * so this form is rarely typed by hand) or another identity's own
@@ -279,8 +279,9 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
     renderPage({ mountEl, doc: window.document, templateHtml: null, page: null, css: '', styleId });
     return;
   }
+  let updateAvailable = false;
   if (ref === 'me') {
-    if (routeNamespace) await provisionPersonalInstance({ space, prefix: routeNamespace.slice(1), personalBundle });
+    if (routeNamespace) ({ updateAvailable } = await provisionPersonalInstance({ space, prefix: routeNamespace.slice(1), personalBundle }));
     else await ensureSelfProvisioned(space, ownerPub);
   }
   const runtime = new AppRuntime(space, { appAdminPub: ownerPub });
@@ -301,6 +302,10 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   // additive `/u/<ref>/` case) - `view-actions.js`'s own `wireViews()` doc comment on why
   // mode:'multiuser''s own bare-prefix case (`routeNamespace: ''`) deliberately opts out unchanged.
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: ownerPub, routeNamespace, userRef: ref });
+  // Only ever for `ref === 'me'` (`updateAvailable` stays `false` otherwise) - `installed-apps-
+  // actions.js`'s own `wirePersonalUpdateBanner()` doc comment on why an update button on someone
+  // ELSE's own personal instance would be actively wrong, not just pointless.
+  if (updateAvailable) wirePersonalUpdateBanner({ mountEl, doc: window.document, space, prefix: routeNamespace.slice(1), personalBundle });
 }
 
 /**
@@ -326,6 +331,46 @@ async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeo
   renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
   await wireInstalledApps({ mountEl, doc: window.document, space });
   await wireCms({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), global: true, prefix });
+  await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
+}
+
+/**
+ * Renders a `mode: 'personal'` app's own bare `#/<prefix>/...` - kinds.js's
+ * own `platformAppsKind` doc comment on this mode in full: no single
+ * relay-admin-authored page here (that's `renderGlobalShell()`'s job, for
+ * `'global'` mode), just a READ-ONLY, framework-generated shell around the
+ * well-known `<prefix>-aggregate-feed` View - a plain `[data-qu-view]`
+ * element `wireViews()` already knows how to wire, exactly the same
+ * mechanism (and exactly as reusable/app-agnostic) as any View a CMS page
+ * embeds. This function itself never learns what "guestbook" or "blog"
+ * even mean - an app opts into `mode: 'personal'` meaning anything at all
+ * simply by creating an `adminViewKind` at that name at install time (e.g.
+ * `guestbook-bundle.js`'s `installGuestbook()`, sourcing it from the SAME
+ * shared list every visitor's own personal instance already writes into -
+ * `installed-apps-actions.js`'s own doc comment on `PERSONAL_INSTALLERS`).
+ * If no such View exists (an app with no aggregate-feed story at all, or
+ * one not yet installed under the new scheme), `wireViews()`'s own
+ * `resolveView()` call is a correct no-op - the shell renders with an
+ * empty feed, not an error, same "unresolved View, unresolved page" posture
+ * every other `[data-qu-view]` already has.
+ *
+ * Deliberately synthesized markup, not a stored `qu-admin-page` - there is
+ * no ROUTE to resolve here (a bare `mode: 'personal'` prefix has no
+ * relay-admin-authored page to compete with, and shouldn't grow one just to
+ * hold this single `<div>`), the same "framework HTML, never content
+ * authored via CMS" posture `renderAdminUnauthorized()` already uses
+ * elsewhere in this file. Only the FEED root (`subPath: '/'`) is handled -
+ * there is no per-item permalink here yet (an aggregated entry, e.g. a
+ * shared-list guestbook signature, has no route of its own to deep-link to
+ * in the first place - `view-actions.js`'s own `renderItem()` doc comment
+ * on why some items expose raw fields instead of a route); a deeper
+ * `subPath` simply renders the same feed, same as any unmatched sub-route
+ * elsewhere falling back to its parent.
+ */
+async function renderAggregateShell({ space, mountEl, window, styleId, prefix }) {
+  mountEl.quSpace = space;
+  const page = { title: prefix, content: `<div data-qu-view="${prefix}-aggregate-feed"></div>` };
+  renderPage({ mountEl, doc: window.document, templateHtml: null, page, css: '', styleId });
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
 }
 
@@ -506,11 +551,12 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
       }
 
       if (isGlobal) {
-        // ADDITIVE personal route, an ordinary mode:'global' app's own `/u/<ref>/...` - never
-        // replaces what the bare prefix means (that's `mode: 'multiuser'`'s own job, above) - see
-        // renderMultiUserRoute()'s own doc comment on `routeNamespace`/`personalBundle` for the full
-        // "why prefixed, why this and not multiuser" reasoning. A bare prefix with no `/u/` segment
-        // falls through to the global shell exactly as before.
+        // ADDITIVE personal route, an ordinary mode:'global'/'personal' app's own `/u/<ref>/...` -
+        // never replaces what the bare prefix means (that's `mode: 'multiuser'`'s own job, above) -
+        // see renderMultiUserRoute()'s own doc comment on `routeNamespace`/`personalBundle` for the
+        // full "why prefixed, why this and not multiuser" reasoning. A bare prefix with no `/u/`
+        // segment falls through to the global shell (`'global'` mode) or the aggregate feed
+        // (`'personal'` mode, right below) exactly as before.
         const userRoute = parseMultiUserSubPath(match.subPath);
         if (userRoute) {
           await renderMultiUserRoute({
@@ -523,6 +569,10 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
             routeNamespace: `/${match.prefix}`,
             personalBundle: match.personalBundle,
           });
+          return;
+        }
+        if (match.mode === 'personal') {
+          await renderAggregateShell({ space, mountEl, window, styleId, prefix: match.prefix });
           return;
         }
         await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: match.prefix, subPath: match.subPath });

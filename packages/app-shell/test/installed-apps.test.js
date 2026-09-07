@@ -39,7 +39,7 @@ import { QuCrypto } from '@qu/core';
 import { Space } from '@qu/space-core';
 import { createWsServerHub, WsClientTransport, createRelayForwarder } from '@qu/space-transport';
 import { createMemoryStore } from '@qu/space-storage';
-import { installGlobalAppBundle, registerApp, publishGlobalRoute } from '@qu/app-core';
+import { installGlobalAppBundle, registerApp, publishGlobalRoute, setAppMode, setAppBundleVersion } from '@qu/app-core';
 import { createLiveAppResolveKindSchema } from '../src/live-app-resolver.js';
 import { startPlatform } from '../src/boot.js';
 import { adminConsoleBundle } from '../admin-console-bundle.js';
@@ -381,6 +381,136 @@ test('Blog: a visitor\'s own personal blog (#/blog/u/me/) lets ANY Space member 
     // timeout (a real, occasionally-slow relay round trip, not a logic bug).
     router.navigate('/blog/u/me/post/eigener-post');
     await waitUntil(() => mountEl.textContent.includes('Ganz allein mein Blog.'), { timeout: 8000 });
+
+    router.stop();
+  } finally {
+    await relay.close();
+  }
+});
+
+test('Guestbook: mode:"personal" replaces the bare prefix with a read-only aggregate feed merged across every visitor\'s own personal instance', async () => {
+  const visitor = await actor();
+  const relay = await bootRelay({ extraActors: [visitor] });
+  try {
+    const adminSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl: adminMountEl, router: adminRouter } = mountAdmin(adminSpace);
+    await installViaForm(adminMountEl, 'guestbook', 'board');
+    // A short settle wait BEFORE calling into the Dev API again on the SAME `adminSpace` -
+    // `installViaForm()`'s own confirmation already proves the registerApp() write itself was
+    // acked, but the admin console's own `renderList()` (called right after, inside the submit
+    // handler) does its own `resolveApps()` read of that SAME registry Node - `useNode()`+
+    // `release()`, tearing the local Y.Doc back down exactly the way `dev.js`'s own
+    // `getOrSyncRegistryNode()` doc comment describes elsewhere - so a `setAppMode()` call fired
+    // immediately after can otherwise race a resync still in flight.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Flip to mode:"personal" via the real Dev API - the admin console's own mode-toggle UI (the
+    // exact same `setAppMode()` call) is already covered end to end by `admin-mode-toggle.test.js`;
+    // this test's own focus is the AGGREGATE FEED rendering behind it, not re-proving the button.
+    await setAppMode(adminSpace, { prefix: 'board', mode: 'personal' });
+    adminRouter.stop();
+
+    const visitorSpace = await relay.connect(visitor);
+    const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/board/u/me/' });
+    const mountEl = window.document.querySelector('qu-app-shell');
+    const { router } = startPlatform({ space: visitorSpace, mountEl, window, resolveTimeout: 1500 });
+
+    await waitUntil(() => mountEl.querySelector('form[data-qu-action="guestbook-form"]'));
+    const form = mountEl.querySelector('form[data-qu-action="guestbook-form"]');
+    form.querySelector('[name="name"]').value = 'Dana';
+    form.querySelector('[name="message"]').value = 'Ich trage mich in den Feed ein.';
+    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await waitUntil(() => /bestätigt/.test(form.querySelector('[data-qu-status]')?.textContent ?? ''));
+
+    // The bare prefix - no "/u/" segment at all - now shows the AGGREGATE feed, not a relay-admin-
+    // authored page: no `guestbook-form` there any more (`mode: 'personal'` has no such page), just
+    // the merged, read-only `<prefix>-aggregate-feed` View picking up Dana's own entry.
+    router.navigate('/board/');
+    await waitUntil(() => mountEl.querySelector('[data-qu-view="board-aggregate-feed"]')?.textContent.includes('Ich trage mich in den Feed ein.'), { timeout: 4000 });
+    assert.ok(!mountEl.querySelector('form[data-qu-action="guestbook-form"]'), 'mode:"personal"\'s own bare prefix is read-only - no sign-form there');
+
+    router.stop();
+  } finally {
+    await relay.close();
+  }
+});
+
+test('Guestbook: the admin console\'s "Update verfügbar" button re-applies the bundle\'s current content and clears itself once done', async () => {
+  const relay = await bootRelay();
+  try {
+    const adminSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl, router, platform } = mountAdmin(adminSpace);
+    await installViaForm(mountEl, 'guestbook', 'diary');
+    await new Promise((resolve) => setTimeout(resolve, 300)); // settle wait - see the "personal" test above's own doc comment on why.
+
+    // Simulate an OLDER install - `setAppBundleVersion()` (the exact primitive a real prior
+    // "Update" click would have bumped) rolled back to "never updated", the only state that
+    // actually shows the button.
+    await setAppBundleVersion(adminSpace, { prefix: 'diary', bundleVersion: 0 });
+    // `wireAdminConsole()`'s own `renderList()` is pull-based, not reactively subscribed to the
+    // registry (`admin-mode-toggle.test.js`'s own tests only ever see a refresh because THEIR OWN
+    // click handlers explicitly call `renderList()` afterward) - this direct Dev-API write (mimicking
+    // some other actor's own prior update, not a click in THIS session) needs an explicit re-render
+    // to become visible at all; a bare re-navigate to the SAME hash is a no-op (`HashRouter.navigate()`'s
+    // own doc comment - no `hashchange` fires for an unchanged `location.hash`), so this goes to
+    // `/admin/` (a different hash string) and back, forcing `wireAdminConsole()` to re-wire and
+    // re-render fresh.
+    router.navigate('/admin/');
+    await waitUntil(() => mountEl.querySelector('[data-qu-bind="platform-apps-list"] li'));
+
+    function diaryListItem() {
+      return [...mountEl.querySelectorAll('[data-qu-bind="platform-apps-list"] li')].find((li) => li.textContent.includes('#/diary'));
+    }
+    await waitUntil(() => [...(diaryListItem()?.querySelectorAll('button') ?? [])].some((b) => b.textContent === 'Update verfügbar'));
+    let li = diaryListItem();
+    const updateBtn = [...li.querySelectorAll('button')].find((b) => b.textContent === 'Update verfügbar');
+    assert.ok(updateBtn, '"Update verfügbar" shows once the registered bundleVersion (0) is behind the bundle\'s own current version');
+    updateBtn.dispatchEvent(new mountEl.ownerDocument.defaultView.Event('click', { bubbles: true, cancelable: true }));
+
+    await waitUntil(() => ![...(diaryListItem()?.querySelectorAll('button') ?? [])].some((b) => b.textContent === 'Update verfügbar'), { timeout: 4000 });
+    assert.ok(!diaryListItem()?.querySelector('[data-qu-status]')?.textContent, 'no error surfaced - the update actually succeeded');
+
+    const apps = await platform.resolveApps({ timeout: 1000 });
+    const diary = apps.find((a) => a.prefix === 'diary');
+    assert.equal(diary.bundleVersion, 1, 'setAppBundleVersion() recorded the bundle\'s own current version after the update');
+
+    router.stop();
+  } finally {
+    await relay.close();
+  }
+});
+
+test('Guestbook: "Deinstallieren" retracts the registration and clears the global content, making the prefix unreachable again', async () => {
+  const relay = await bootRelay();
+  try {
+    const adminSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl, router } = mountAdmin(adminSpace);
+    await installViaForm(mountEl, 'guestbook', 'notes');
+
+    function notesListItem() {
+      return [...mountEl.querySelectorAll('[data-qu-bind="platform-apps-list"] li')].find((li) => li.textContent.includes('#/notes'));
+    }
+    await waitUntil(() => notesListItem());
+    const uninstallBtn = [...notesListItem().querySelectorAll('button')].find((b) => b.textContent === 'Deinstallieren');
+    assert.ok(uninstallBtn, '"Deinstallieren" is offered for every realm:"global" entry');
+    uninstallBtn.dispatchEvent(new mountEl.ownerDocument.defaultView.Event('click', { bubbles: true, cancelable: true }));
+
+    await waitUntil(() => !notesListItem(), { timeout: 4000 });
+
+    // The bare prefix is now indistinguishable from never having been registered - the landing
+    // page, not the app, not a broken/blank shell. Checked from a BRAND-NEW identity/connection,
+    // not `adminSpace`'s own (already-torn-down-and-resynced-several-times-over) one, so this
+    // genuinely proves the retraction is visible to anyone, not just an artifact of the admin
+    // console's own already-open session.
+    const outsider = await actor();
+    const outsiderSpace = await relay.connect(outsider);
+    const { window: outsiderWindow } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/notes/' });
+    const outsiderMount = outsiderWindow.document.querySelector('qu-app-shell');
+    const { router: outsiderRouter, platform: outsiderPlatform } = startPlatform({ space: outsiderSpace, mountEl: outsiderMount, window: outsiderWindow, resolveTimeout: 1500 });
+    await waitUntil(() => outsiderMount.textContent.includes('Qu App Shell'), { timeout: 6000 });
+    assert.ok(!outsiderMount.querySelector('form[data-qu-action="guestbook-form"]'), 'the uninstalled app\'s own content is gone, not just its registry entry');
+    const apps = await outsiderPlatform.resolveApps({ timeout: 2000 });
+    assert.ok(!apps.some((a) => a.prefix === 'notes'), 'resolveApps() no longer lists the retracted prefix at all, even from a completely fresh connection');
+    outsiderRouter.stop();
 
     router.stop();
   } finally {

@@ -19,18 +19,44 @@
  * anchored purely by its own NAME (`sharedListAnchor()`, kinds.js), never
  * by an owner identity - unaffected by any of this, still just `prefix`
  * itself as the list's name.
+ *
+ * INSTALL vs. UPDATE, DELIBERATELY SEPARATE CODE PATHS, sharing only their
+ * field data: `installX()` always writes via `create*()` DIRECTLY - fast,
+ * and safe, since `registerApp()`-then-`install()` ordering (`admin-
+ * actions.js`'s own doc comment) guarantees a fresh prefix never has this
+ * content yet. `updateX()` goes through `bundle-upsert.js`'s edit-with-
+ * create-fallback helpers instead - safe to call on an ALREADY-installed
+ * prefix (`bundle-upsert.js`'s own top doc comment), at the cost of one
+ * doomed-to-fail `edit()` attempt (a real, measured multi-second wait) for
+ * any field that turns out not to exist yet. Routing `installX()` through
+ * `updateX()` was tried first and reverted - it made every fresh install
+ * pay that same doomed-`edit()` cost for EVERY field, multiple seconds
+ * added to ordinary app installation for no benefit (there is nothing to
+ * "update" yet, the prefix is brand new by construction). The `FIELDS`
+ * helpers below keep the actual markup/View config in exactly ONE place
+ * regardless.
  */
 import { createGlobalPage, publishGlobalRoute, createGlobalView, createPage, publishRoute, createView } from '@qu/app-core';
 import { QuCrypto } from '@qu/core';
+import { upsertGlobalPage, upsertGlobalView, upsertPage, upsertView } from './bundle-upsert.js';
 
-/** @param {import('@qu/space-core').Space} space @param {{prefix: string}} params */
-export async function installGuestbook(space, { prefix }) {
-  // Route published BEFORE the page is created - `@qu/app-shell`'s `live-app-resolver.js` only
-  // classifies a global app's page write correctly once it has observed the route in
-  // `adminRouteRegistryKind` (`createGlobalView()`'s own doc comment has the full reasoning).
-  await publishGlobalRoute(space, prefix, { route: '/', title: 'Gästebuch' });
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  await createGlobalPage(space, prefix, {
+/**
+ * Bumped whenever this bundle's own shipped content (the markup/View config
+ * below, NOT a visitor's own entries) meaningfully changes - compared
+ * against a registered app's own `bundleVersion` (GLOBAL instance,
+ * `admin-actions.js`'s own doc comment) / a personal page's own
+ * `data.bundleVersion` (PERSONAL instance, `installed-apps-actions.js`'s own
+ * doc comment) to decide whether an "Update verfügbar" affordance shows at
+ * all. Bump this, and only this, the next time either the global or
+ * personal FIELDS below change in a way worth re-applying to already-
+ * installed instances.
+ */
+export const GUESTBOOK_VERSION = 1;
+
+const GLOBAL_ITEM_TEMPLATE = '<p><strong><qu-slot name="title"></qu-slot>:</strong> <qu-slot name="excerpt"></qu-slot></p>';
+
+function globalPageFields(prefix) {
+  return {
     route: '/',
     title: 'Gästebuch',
     content: `<h1>Gästebuch</h1>
@@ -42,14 +68,53 @@ export async function installGuestbook(space, { prefix }) {
 </form>
 <h2>Einträge</h2>
 <div data-qu-view="${prefix}-feed"></div>`,
-  });
-  await createGlobalView(space, prefix, {
-    name: `${prefix}-feed`,
-    sources: [{ type: 'shared-list', name: prefix }],
-    sortBy: 'timestamp',
-    sortOrder: 'desc',
-    itemTemplate: '<p><strong><qu-slot name="title"></qu-slot>:</strong> <qu-slot name="excerpt"></qu-slot></p>',
-  });
+  };
+}
+
+function globalFeedViewFields(prefix) {
+  return { name: `${prefix}-feed`, sources: [{ type: 'shared-list', name: prefix }], sortBy: 'timestamp', sortOrder: 'desc', itemTemplate: GLOBAL_ITEM_TEMPLATE };
+}
+
+/**
+ * The read-only, UNFILTERED merge of `<prefix>:personal` (the same shared
+ * list every visitor's own personal guestbook writes into,
+ * `installPersonalGuestbook()`'s own doc comment) - `boot.js`'s
+ * `renderAggregateShell()` own doc comment on why `mode: 'personal'` needs
+ * it. Installed unconditionally, regardless of this app's current `mode` -
+ * cheap to always have, harmless when `mode` never uses it.
+ */
+function aggregateFeedViewFields(prefix) {
+  return { name: `${prefix}-aggregate-feed`, sources: [{ type: 'shared-list', name: `${prefix}:personal` }], sortBy: 'timestamp', sortOrder: 'desc', itemTemplate: GLOBAL_ITEM_TEMPLATE };
+}
+
+/** @param {import('@qu/space-core').Space} space @param {{prefix: string}} params */
+export async function installGuestbook(space, { prefix }) {
+  // Route published BEFORE the page is created - `@qu/app-shell`'s `live-app-resolver.js` only
+  // classifies a global app's page write correctly once it has observed the route in
+  // `adminRouteRegistryKind` (`createGlobalView()`'s own doc comment has the full reasoning).
+  await publishGlobalRoute(space, prefix, { route: '/', title: 'Gästebuch' });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  await createGlobalPage(space, prefix, globalPageFields(prefix));
+  await createGlobalView(space, prefix, globalFeedViewFields(prefix));
+  await createGlobalView(space, prefix, aggregateFeedViewFields(prefix));
+}
+
+/**
+ * Re-applies this bundle's own GLOBAL content in place - the admin
+ * console's own "Update verfügbar" button (`admin-actions.js`'s own doc
+ * comment) calls this for an ALREADY-installed prefix, via `bundle-
+ * upsert.js`'s edit-with-create-fallback helpers - safe on existing
+ * content, unlike a raw `createGlobalPage()`/`createGlobalView()` call
+ * would be (this file's own top doc comment has the full "why never
+ * routed through `installGuestbook()`" reasoning). Never touches
+ * `<prefix>:personal` or any visitor's own entries in it - only the
+ * page/View DEFINITIONS this bundle itself owns.
+ */
+export async function updateGuestbook(space, { prefix }) {
+  await publishGlobalRoute(space, prefix, { route: '/', title: 'Gästebuch' }); // harmless no-op re-publish - publishGlobalRoute()'s own "deduplicates by route" doc comment.
+  await upsertGlobalPage(space, prefix, globalPageFields(prefix));
+  await upsertGlobalView(space, prefix, globalFeedViewFields(prefix));
+  await upsertGlobalView(space, prefix, aggregateFeedViewFields(prefix));
 }
 
 /**
@@ -80,13 +145,12 @@ export async function installGuestbook(space, { prefix }) {
  * every entry it pushes with that SAME owner, not just the plain
  * `{name, message, ts}` the global guestbook's entries carry.
  */
-export async function installPersonalGuestbook(space, { prefix }) {
-  const ownerPub = QuCrypto.toBase64(space.identity.signingPub);
+function personalPageFields(prefix, ownerPub) {
   const listName = `${prefix}:personal`;
-  const route = `/${prefix}/`;
-  await createPage(space, {
-    route,
+  return {
+    route: `/${prefix}/`,
     title: 'Mein Gästebuch',
+    data: { bundleVersion: GUESTBOOK_VERSION },
     content: `<h1>Mein Gästebuch</h1>
 <form data-qu-action="guestbook-form" data-qu-list="${listName}" data-qu-owner="${ownerPub}">
   <label>Name: <input name="name" required></label><br>
@@ -96,13 +160,46 @@ export async function installPersonalGuestbook(space, { prefix }) {
 </form>
 <h2>Einträge</h2>
 <div data-qu-view="${prefix}-personal-feed"></div>`,
-  });
-  await publishRoute(space, { route, title: 'Mein Gästebuch' });
-  await createView(space, {
+  };
+}
+
+function personalFeedViewFields(prefix, ownerPub) {
+  return {
     name: `${prefix}-personal-feed`,
-    sources: [{ type: 'shared-list', name: listName, filter: { ownerPub } }],
+    sources: [{ type: 'shared-list', name: `${prefix}:personal`, filter: { ownerPub } }],
     sortBy: 'timestamp',
     sortOrder: 'desc',
-    itemTemplate: '<p><strong><qu-slot name="title"></qu-slot>:</strong> <qu-slot name="excerpt"></qu-slot></p>',
-  });
+    itemTemplate: GLOBAL_ITEM_TEMPLATE,
+  };
+}
+
+export async function installPersonalGuestbook(space, { prefix }) {
+  const ownerPub = QuCrypto.toBase64(space.identity.signingPub);
+  const route = `/${prefix}/`;
+  await createPage(space, personalPageFields(prefix, ownerPub));
+  await publishRoute(space, { route, title: 'Mein Gästebuch' });
+  await createView(space, personalFeedViewFields(prefix, ownerPub));
+}
+
+/**
+ * Re-applies THIS VISITOR's own personal guestbook content in place - the
+ * self-service counterpart to `updateGuestbook()`'s relay-admin-only
+ * update, called from the SAME visitor's own personal-instance page (a
+ * small framework-injected "Update verfügbar" affordance,
+ * `installed-apps-actions.js`'s own doc comment) whenever their stored
+ * `data.bundleVersion` is older than `GUESTBOOK_VERSION` - no relay-admin
+ * cooperation needed, exactly as expected for self-owned `'content'`-ACL
+ * Nodes. Uses `bundle-upsert.js`'s edit-with-create-fallback helpers, same
+ * "never routed through installX()" reasoning as `updateGuestbook()`'s own
+ * doc comment. Never touches this visitor's own already-pushed entries in
+ * `<prefix>:personal` - only the page/View DEFINITIONS this bundle itself
+ * owns, stamped with the CURRENT `GUESTBOOK_VERSION` in the page's own
+ * `data` field (`pageKind`'s own doc comment on that field) each time.
+ */
+export async function updatePersonalGuestbook(space, { prefix }) {
+  const ownerPub = QuCrypto.toBase64(space.identity.signingPub);
+  const route = `/${prefix}/`;
+  await upsertPage(space, personalPageFields(prefix, ownerPub));
+  await publishRoute(space, { route, title: 'Mein Gästebuch' });
+  await upsertView(space, personalFeedViewFields(prefix, ownerPub));
 }
