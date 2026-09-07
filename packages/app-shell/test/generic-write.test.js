@@ -102,37 +102,40 @@ test('data-qu-action="qu-write": a page built purely through the CMS gets a GENE
     const { installGlobalCms } = await import('../cms-bundle.js');
     await installGlobalCms(adminSpace, 'signboard');
 
-    window.location.hash = '/admin/signboard/cms';
-    await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-view-form"]'));
+    window.location.hash = '/admin/signboard/cms/content';
+    await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-content-form"]'));
     await new Promise((resolve) => setTimeout(resolve, 500)); // see views-ui.test.js's own doc comment on this exact settle margin.
 
-    const viewForm = mountEl.querySelector('form[data-qu-action="cms-view-form"]');
+    const viewForm = mountEl.querySelector('form[data-qu-action="cms-content-form"]');
+    const sourceTypeSelect = viewForm.querySelector('[name="sourceType"]');
+    sourceTypeSelect.value = 'shared-list';
+    sourceTypeSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
     viewForm.querySelector('[name="name"]').value = 'signboard-feed';
     viewForm.querySelector('[name="route"]').value = '/';
-    viewForm.querySelector('[name="sources"]').value = JSON.stringify([{ type: 'shared-list', name: 'signboard-entries' }]);
+    viewForm.querySelector('[name="listName"]').value = 'signboard-entries';
     viewForm.querySelector('[name="sortBy"]').value = 'timestamp';
     viewForm.querySelector('[name="itemTemplate"]').value = '<p><strong><qu-slot name="title"></qu-slot>:</strong> <qu-slot name="excerpt"></qu-slot></p>';
     viewForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
     await waitUntil(() => /bestätigt/.test(viewForm.querySelector('[data-qu-status]')?.textContent ?? ''));
 
-    // Step 4 of docs/example-apps.md §5: load the auto-created wrapper page (route "/") in the
-    // "Seiten" editor and wrap its existing <div data-qu-view> in a GENERIC write form - purely
-    // declarative attributes, no data-qu-action code of this app's own anywhere. `wirePages()`'s own
-    // "Seiten" list is a one-shot `resolveRoutes()` read (not live-subscribed) taken when the CMS
-    // page was FIRST wired, before `createGlobalView({route: '/'})` above ever published this route -
-    // re-navigating away and back re-wires the CMS fresh, the same "Seiten" list a genuine second
-    // visit would see.
+    // Step 4 of docs/example-apps.md §5: load the auto-created wrapper page (route "/") back from
+    // the SAME unified Content list and wrap its existing <div data-qu-view> in a GENERIC write form
+    // - purely declarative attributes, no data-qu-action code of this app's own anywhere. The
+    // Content list is a one-shot `resolveRoutes()` read (not live-subscribed) taken when this page
+    // was FIRST wired, before `createView({route: '/'})` above ever published this route -
+    // re-navigating away and back re-wires the CMS fresh, the same list a genuine second visit
+    // would see.
     window.location.hash = '/admin/';
     await waitUntil(() => window.location.hash === '#/admin/');
-    window.location.hash = '/admin/signboard/cms';
-    await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-view-form"]'));
+    window.location.hash = '/admin/signboard/cms/content';
+    await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-content-form"]'));
     await new Promise((resolve) => setTimeout(resolve, 500));
-    await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].some((b) => b.textContent === '/'));
-    const pageBtn = [...mountEl.querySelectorAll('[data-qu-bind="cms-page-list"] button')].find((b) => b.textContent === '/');
+    await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-content-list"] button')].some((b) => b.textContent === '/'));
+    const pageBtn = [...mountEl.querySelectorAll('[data-qu-bind="cms-content-list"] button')].find((b) => b.textContent === '/');
     pageBtn.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
-    await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-page-form"] [name="content"]').value.includes('signboard-feed'));
+    await waitUntil(() => mountEl.querySelector('form[data-qu-action="cms-content-form"] [name="content"]').value.includes('signboard-feed'));
 
-    const pageForm = mountEl.querySelector('form[data-qu-action="cms-page-form"]');
+    const pageForm = mountEl.querySelector('form[data-qu-action="cms-content-form"]');
     const contentField = pageForm.querySelector('[name="content"]');
     contentField.value = `<h1>Aushang</h1>
 ${contentField.value}

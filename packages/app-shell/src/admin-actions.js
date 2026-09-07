@@ -61,12 +61,12 @@
  * gate keeps `#/admin/...` from rendering for them at all.
  */
 import { QuCrypto } from '@qu/core';
-import { registerApp, setAppMode, setAppBundleVersion, setAppConfig, addSharedLists, unregisterApp, nullGlobalAppContent, publishGlobalRoute, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
+import { registerApp, setAppMode, setAppBundleVersion, setAppConfig, addSharedLists, addGlobalTemplateNames, unregisterApp, nullGlobalAppContent, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
 import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
 import { installForum } from '../forum-bundle.js';
-import { installGlobalCms } from '../cms-bundle.js';
+import { installGlobalCms, cmsBundle } from '../cms-bundle.js';
 import { verifyWritesAcked } from './verify-writes.js';
 import { discoveredApps } from '../apps-registry.generated.js';
 
@@ -260,8 +260,17 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
               await new Promise((resolve) => setTimeout(resolve, 400)); // settle - the live resolver needs a moment to start watching this new name before anything writes to it.
               sharedListInput.value = '';
             }
-            await publishGlobalRoute(mainSpace, app.prefix, { route: '/cms', title: 'CMS' });
-            await new Promise((resolve) => setTimeout(resolve, 400)); // settle - see publishGlobalRoute()'s own doc comment on why a page write right after needs this.
+            // ALWAYS declare "__cms__" (cmsBundle.template.name) here, unconditionally - a REAL,
+            // previously-shipped bug this fixes: unlike the built-in admin console's own hardcoded
+            // "main" template, installGlobalCms()'s own template write below was silently REJECTED
+            // for any OTHER prefix (kinds.js's own platformAppsKind doc comment on why) until the
+            // relay was told to expect this exact name for THIS prefix - addGlobalTemplateNames()
+            // dedupes, so re-clicking this button for an app that already declared it is a no-op.
+            await addGlobalTemplateNames(mainSpace, { prefix: app.prefix, globalTemplateNames: [cmsBundle.template.name] });
+            await new Promise((resolve) => setTimeout(resolve, 400)); // settle - same reasoning as addSharedLists() above.
+            // installGlobalCms() itself now publishes EVERY one of its own pages' routes (the /cms
+            // index AND one per registered section) before writing each - no separate publishGlobalRoute()
+            // call needed here any more (cms-bundle.js's own installGlobalCms() doc comment).
             await installGlobalCms(mainSpace, app.prefix);
             doc.defaultView.location.hash = `/admin/${app.prefix}/cms`;
           } catch (err) {

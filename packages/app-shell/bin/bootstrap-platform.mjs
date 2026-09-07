@@ -3,32 +3,36 @@
  * PLATFORM BOOTSTRAP — `npm run bootstrap:platform`. Two independent jobs,
  * always run in this order but decoupled from HOW you deploy:
  *
- *   1. Generate (or load) a `relay-admin` identity and print the exact
- *      `environment:` block your deployment needs -
- *      `docker-compose.space-relay.yml`, a `docker stack deploy` stack
- *      file, a Kubernetes manifest, systemd env vars, whatever you
- *      actually use. This script NEVER writes that config for you and
- *      NEVER assumes anything about your deployment method (no `.env`
- *      file, no container filesystem, no `docker exec`/`docker compose`
- *      awareness at all) - `QU_RELAY_ADMINS` is read by the relay at BOOT
- *      time only (same static-list posture `QU_MEMBERS_JSON` already takes
- *      - see `relay-server.js`'s own doc comment on why), so YOU decide how
- *      that config reaches your relay and gets it (re)started with it -
- *      this script only ever talks to the relay over its public URL
- *      (`--relay`), exactly like `bin/install-admin-console.mjs` already
- *      does, so it works identically regardless of whether that relay lives
- *      in a Compose service, a Swarm/`docker stack` service, a Kubernetes
- *      Pod, or bare metal. `relay-admin` is the ONLY identity this script
- *      needs any static config for at all - see "WHY THERE IS NO
- *      SECOND/APP-ADMIN IDENTITY ANY MORE" below.
- *   2. Once the relay is actually reachable AND configured with that
- *      exact list (verified by attempting a real write and checking it
- *      gets acked - a relay still running the OLD config accepts the
- *      connection fine but silently drops the write), installs the admin
- *      console AND registers the built-in "cms" app as a `realm: 'global'`,
- *      `mode: 'multiuser'` app (kinds.js's own doc comment on the three
- *      administrable states) - replacing what used to be several separate
- *      manual steps with one, idempotent, safe-to-re-run command.
+ *   1. Obtain a `relay-admin` identity to sign with - `ensureRelayAdminIdentity()`
+ *      below PREFERS the relay's OWN auto-generated bootstrap-admin identity
+ *      (`relay-server.js`'s own "BOOTSTRAP RELAY-ADMIN" doc comment,
+ *      `<QU_RELAY_DATA_DIR>/relay-bootstrap-admin.json`) when `--dir`/
+ *      `QU_BOOTSTRAP_DIR` finds it there - that identity is ALREADY,
+ *      unconditionally trusted by the relay itself, so this script's writes
+ *      just succeed immediately, NO `QU_RELAY_ADMINS` config or redeploy
+ *      needed at all. Only falls back to generating/loading a SEPARATE
+ *      `relay-admin.json` of its own (and printing the `environment:` block
+ *      below for you to paste in and redeploy with) when no bootstrap file
+ *      is found at `dir` - e.g. `QU_RELAY_BOOTSTRAP_ADMIN=false`, or `dir`
+ *      genuinely has no access to the relay's own storage. Either way, this
+ *      script NEVER writes deployment config for you and NEVER assumes
+ *      anything about your deployment method - it only ever talks to the
+ *      relay over its public URL (`--relay`), exactly like
+ *      `bin/install-admin-console.mjs` already does, so it works
+ *      identically regardless of whether that relay lives in a Compose
+ *      service, a Swarm/`docker stack` service, a Kubernetes Pod, or bare
+ *      metal. `relay-admin` is the ONLY identity this script needs any
+ *      static config for at all (in the fallback case) - see "WHY THERE IS
+ *      NO SECOND/APP-ADMIN IDENTITY ANY MORE" below.
+ *   2. Once the relay is actually reachable AND this identity's writes are
+ *      genuinely accepted (verified by attempting a real write and checking
+ *      it gets acked - a relay still running the OLD config, or one where
+ *      this identity was never admitted, accepts the connection fine but
+ *      silently drops the write), installs the admin console AND registers
+ *      the built-in "cms" app as a `realm: 'global'`, `mode: 'multiuser'`
+ *      app (kinds.js's own doc comment on the three administrable states) -
+ *      replacing what used to be several separate manual steps with one,
+ *      idempotent, safe-to-re-run command.
  *
  * WHY THERE IS NO SECOND/APP-ADMIN IDENTITY ANY MORE: earlier revisions of
  * this script also generated a `demo-app-admin` identity and seeded an
@@ -50,49 +54,57 @@
  * app-admin's private key to lose or share, so no second identity is needed
  * for it either.
  *
- * TWO RUNS ARE NORMAL ON A FRESH SETUP, NOT A BUG: run it once to get the
- * config block, paste it into your OWN deployment config, redeploy
+ * NORMALLY ONE RUN IS ENOUGH NOW: pointing `--dir`/`QU_BOOTSTRAP_DIR` at the
+ * relay's OWN `QU_RELAY_DATA_DIR` (trivially true `docker exec`ing into the
+ * SAME container the relay runs in, e.g. `--dir /data`) means
+ * `ensureRelayAdminIdentity()` finds the relay's own already-trusted
+ * bootstrap identity immediately - no config block to paste, no redeploy,
+ * no second run. TWO (OR MORE) RUNS ARE STILL NORMAL, NOT A BUG, in the
+ * FALLBACK case (no bootstrap file found at `dir`): run it once to get the
+ * printed config block, paste it into your OWN deployment config, redeploy
  * however you redeploy, then run it again (same command, same `--dir`) to
- * actually install content - it reuses the SAME already-generated identity
- * the second time, never regenerating it. Every write here is idempotent or
- * dedup-checked (see inline comments), so a THIRD, later run (e.g. to
- * re-install a newer admin console) is a harmless no-op too - PROVIDED
- * `--dir`/`QU_BOOTSTRAP_DIR` points at storage that actually SURVIVES a
- * redeploy (see "PERSISTING THE IDENTITY DIRECTORY" below) - otherwise
- * every run looks like a totally fresh setup, forever.
+ * actually install content - it reuses the SAME already-generated
+ * `relay-admin.json` the second time, never regenerating it. Every write
+ * here is idempotent or dedup-checked (see inline comments), so a THIRD,
+ * later run (e.g. to re-install a newer admin console) is a harmless no-op
+ * too - PROVIDED `--dir`/`QU_BOOTSTRAP_DIR` points at storage that actually
+ * SURVIVES a redeploy in that fallback case (see "PERSISTING THE FALLBACK
+ * IDENTITY" below) - otherwise every run looks like a totally fresh setup,
+ * forever.
  *
- * PERSISTING THE IDENTITY DIRECTORY - A REAL FOOTGUN, NOT HYPOTHETICAL:
- * this script's whole "run it, paste the printed config, redeploy, run it
- * again" flow only works if the SAME `relay-admin` keypair is found on the
- * SECOND run - `ensureIdentity()` below only generates a fresh keypair when
- * NOTHING is found at `<dir>/relay-admin.json`. The default `--dir` (next
- * to this script, inside the npm package/image) lives on the CONTAINER's
- * own ephemeral filesystem - fine for `docker exec`ing into an
- * ALREADY-RUNNING container repeatedly (the same container, same
- * filesystem), but GONE the instant that container is recreated (any
- * redeploy: `docker compose up` after a pull, `docker stack deploy`, a
- * Kubernetes rollout, ...), because nothing mounts that path as a volume.
- * The symptom is exactly "a brand-new relay-admin pubkey on every redeploy,
- * `QU_RELAY_ADMINS` printed again from scratch, the OLD relay-admin's
- * already-installed admin console/cms content becomes un-writable by the
- * NEW one" - not a bug in the ACL/live-resolver machinery itself
- * (architecture.md's own "A fifth ACL mode" section), a deployment footgun
- * in how this ONE script is invoked. Two ways to avoid it:
+ * PERSISTING THE FALLBACK IDENTITY - A REAL FOOTGUN, NOT HYPOTHETICAL, IN
+ * THE FALLBACK CASE ONLY (no `relay-bootstrap-admin.json` found at `dir` -
+ * the PREFERRED, bootstrap-file case above needs no persistence concern of
+ * its own at all, since the relay ALREADY persists that file under its own
+ * `QU_RELAY_DATA_DIR`): this fallback's own "run it, paste the printed
+ * config, redeploy, run it again" flow only works if the SAME
+ * `relay-admin` keypair is found on the SECOND run - `ensureIdentity()`
+ * below only generates a fresh keypair when NOTHING is found at
+ * `<dir>/relay-admin.json`. The default `--dir` (next to this script,
+ * inside the npm package/image) lives on the CONTAINER's own ephemeral
+ * filesystem - fine for `docker exec`ing into an ALREADY-RUNNING container
+ * repeatedly (the same container, same filesystem), but GONE the instant
+ * that container is recreated (any redeploy: `docker compose up` after a
+ * pull, `docker stack deploy`, a Kubernetes rollout, ...), because nothing
+ * mounts that path as a volume. The symptom is exactly "a brand-new
+ * relay-admin pubkey on every redeploy, `QU_RELAY_ADMINS` printed again
+ * from scratch, the OLD relay-admin's already-installed admin console/cms
+ * content becomes un-writable by the NEW one" - not a bug in the
+ * ACL/live-resolver machinery itself (architecture.md's own "A fifth ACL
+ * mode" section), a deployment footgun in how this ONE fallback path is
+ * invoked. Two ways to avoid it (or just use the preferred, bootstrap-file
+ * path above instead, which needs neither):
  *   1. Run this script from OUTSIDE the relay's own container lifecycle
  *      entirely (your own laptop, a CI runner, a separate small utility
  *      container) - `--dir` then naturally persists on THAT machine,
  *      untouched by the relay's own redeploys. This is the intended,
  *      documented flow (root README.md's "Deploying the App Shell").
  *   2. If you genuinely need to `docker exec` into the SAME container
- *      that gets redeployed (common with managed platforms like Rancher/
- *      Kubernetes where exposing an extra port or running a separate
- *      toolchain is inconvenient), point `--dir`/`QU_BOOTSTRAP_DIR` at a
- *      path backed by a volume that SURVIVES container recreation - see
- *      `docker-compose.space-relay.yml`'s own `qu-app-shell-relay-admin-
- *      identity` volume (mounted at `/admin-identity`, `QU_BOOTSTRAP_DIR`
- *      defaults to it there) for the reference setup. Whichever you pick,
- *      back up that directory like you would any other private key -
- *      losing it means generating a NEW relay-admin identity.
+ *      that gets redeployed AND the bootstrap-file path above doesn't
+ *      apply, point `--dir`/`QU_BOOTSTRAP_DIR` at a path backed by a volume
+ *      that SURVIVES container recreation. Whichever you pick, back up
+ *      that directory like you would any other private key - losing it
+ *      means generating a NEW relay-admin identity.
  *
  * MEMBERSHIP: `QU_RELAY_ADMINS` is the ONE static list this script needs
  * printed - it is the ONLY way to become a relay-admin (write-ACL for both
@@ -143,10 +155,8 @@ function parseArgs(argv) {
   return opts;
 }
 
-/** Same local, single-file-per-identity persistence `bin/install-admin-console.mjs` already uses - see that file's own doc comment. */
-async function ensureIdentity(name, dir) {
-  await mkdir(dir, { recursive: true });
-  const file = join(dir, `${name}.json`);
+/** Reads an already-encoded identity file (`relay-identity.js`'s own `{signingKey,signingPub,xPrivateKey,xPublicKey}` base64 shape - the SAME shape `ensureIdentity()` below writes, and the SAME shape `relay-server.js`'s `ensureBootstrapAdmin()` writes at `relay-bootstrap-admin.json`) - `null` if it doesn't exist yet. Never generates one - the caller decides what "not found" means. */
+async function readIdentityFile(file) {
   try {
     const raw = JSON.parse(await readFile(file, 'utf8'));
     return {
@@ -157,7 +167,16 @@ async function ensureIdentity(name, dir) {
     };
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
+    return null;
   }
+}
+
+/** Same local, single-file-per-identity persistence `bin/install-admin-console.mjs` already uses - see that file's own doc comment. */
+async function ensureIdentity(name, dir) {
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, `${name}.json`);
+  const existing = await readIdentityFile(file);
+  if (existing) return existing;
   const kp = await QuCrypto.generateKeypair();
   const identity = { signingKey: kp.privateKey, signingPub: kp.publicKey, xPrivateKey: kp.xPrivateKey, xPublicKey: kp.xPublicKey };
   await writeFile(
@@ -175,6 +194,46 @@ async function ensureIdentity(name, dir) {
     'utf8'
   );
   return identity;
+}
+
+/**
+ * PREFERS THE RELAY'S OWN AUTO-GENERATED BOOTSTRAP-ADMIN IDENTITY over
+ * generating a separate one of this script's own - `relay-server.js`'s own
+ * "BOOTSTRAP RELAY-ADMIN" doc comment: that identity, persisted at
+ * `<QU_RELAY_DATA_DIR>/relay-bootstrap-admin.json`, is ALREADY,
+ * unconditionally admitted as a relay-admin by the relay itself, no
+ * `QU_RELAY_ADMINS` config needed at all. This was previously the ONE gap
+ * left in that feature (this file's own doc comment used to say "a future
+ * revision may teach it to read `relay-bootstrap-admin.json` directly" -
+ * this is that revision): without it, this script always generated its OWN,
+ * separate, NOT-yet-trusted `relay-admin.json` identity regardless, so
+ * every fresh setup still needed the manual "paste `QU_RELAY_ADMINS`,
+ * redeploy, re-run" round trip this whole bootstrap mechanism exists to
+ * avoid.
+ *
+ * Checked FIRST, before ever generating anything of this script's own -
+ * safe/correct because BOTH files share the exact same
+ * `{signingKey,signingPub,xPrivateKey,xPublicKey}` shape
+ * (`relay-identity.js`'s own `encodeIdentity()`/`decodeIdentity()`).
+ * Requires `dir` to actually be (a copy of, or a shared mount of) the
+ * relay's own `QU_RELAY_DATA_DIR` - trivially true when this script runs
+ * via `docker exec` INSIDE the same container the relay itself runs in,
+ * pointed at the SAME `/data` volume (`docker-compose.space-relay.yml`'s
+ * own `QU_BOOTSTRAP_DIR` default) - no second, separate identity volume
+ * needed for that case any more. Falls back to `ensureIdentity('relay-admin',
+ * dir)` (generating one on first use, exactly as before) when no bootstrap
+ * file is found at `dir` - e.g. `QU_RELAY_BOOTSTRAP_ADMIN=false`, or `dir`
+ * genuinely doesn't share storage with the relay (running this script from
+ * a laptop with no access to the relay's own volume) - the printed
+ * `QU_RELAY_ADMINS` config block later in `main()` is still the right
+ * answer in that case, unchanged.
+ * @returns {Promise<{identity: object, usedBootstrapFile: boolean}>}
+ */
+async function ensureRelayAdminIdentity(dir) {
+  await mkdir(dir, { recursive: true });
+  const bootstrapIdentity = await readIdentityFile(join(dir, 'relay-bootstrap-admin.json'));
+  if (bootstrapIdentity) return { identity: bootstrapIdentity, usedBootstrapFile: true };
+  return { identity: await ensureIdentity('relay-admin', dir), usedBootstrapFile: false };
 }
 
 /**
@@ -241,26 +300,30 @@ async function main() {
 
   console.log('Qu V5 — Platform bootstrap\n');
 
-  // Neither --dir nor QU_BOOTSTRAP_DIR was given - the identity directory defaults to a path next
-  // to this script, INSIDE the npm package/container image. That's fine run repeatedly against the
-  // SAME already-running container, but is silently wiped by ANY redeploy (a fresh container has a
-  // fresh filesystem) - see this file's own top doc comment, "PERSISTING THE IDENTITY DIRECTORY",
-  // for the real, observed symptom (a brand-new relay-admin pubkey printed on every redeploy) and
-  // the two ways to actually fix it.
-  if (dir === DEFAULT_DIR) {
-    console.warn(
-      '⚠  --dir/QU_BOOTSTRAP_DIR not set - using the default, which does NOT survive a container\n' +
-        '   redeploy/recreation. If you are running this via `docker exec` into a container that will\n' +
-        '   later be redeployed, your relay-admin identity WILL change on the next redeploy unless you\n' +
-        '   point --dir/QU_BOOTSTRAP_DIR at a volume that survives it - see this script\'s own top doc\n' +
-        '   comment ("PERSISTING THE IDENTITY DIRECTORY") and docker-compose.space-relay.yml\'s\n' +
-        '   qu-app-shell-relay-admin-identity volume for the reference setup.\n'
-    );
-  }
-
-  const relayAdmin = await ensureIdentity('relay-admin', dir);
+  const { identity: relayAdmin, usedBootstrapFile } = await ensureRelayAdminIdentity(dir);
   console.log(`  relay-admin  pub: ${QuCrypto.toBase64(relayAdmin.signingPub)}`);
-  console.log(`  (private key stays local, under ${dir})\n`);
+  if (usedBootstrapFile) {
+    console.log(`  using the RELAY's OWN auto-generated bootstrap-admin identity (found at ${join(dir, 'relay-bootstrap-admin.json')})`);
+    console.log('  - already trusted by the relay itself, no QU_RELAY_ADMINS config/redeploy needed.\n');
+  } else {
+    // Only reached in the FALLBACK case (no relay-bootstrap-admin.json found at `dir`) - the
+    // "PERSISTING THE FALLBACK IDENTITY" footgun this file's own top doc comment describes in full
+    // only applies here; the bootstrap-file path above needs no such volume of its own at all.
+    if (dir === DEFAULT_DIR) {
+      console.warn(
+        '⚠  --dir/QU_BOOTSTRAP_DIR not set (and no relay-bootstrap-admin.json found there either) -\n' +
+          '   generating a SEPARATE identity at a path next to this script, INSIDE the npm package/\n' +
+          '   container image. That is fine run repeatedly against the SAME already-running container,\n' +
+          '   but is silently wiped by ANY redeploy (a fresh container has a fresh filesystem). If you\n' +
+          '   are running this via `docker exec` into a container that will later be redeployed, either\n' +
+          '   point --dir/QU_BOOTSTRAP_DIR at the relay\'s own QU_RELAY_DATA_DIR (reuses ITS bootstrap\n' +
+          '   identity instead - no volume of your own needed), or at a SEPARATE volume that survives\n' +
+          '   redeploys if you genuinely want a different identity - see this script\'s own top doc\n' +
+          '   comment ("PERSISTING THE FALLBACK IDENTITY").\n'
+      );
+    }
+    console.log(`  (private key stays local, under ${dir})\n`);
+  }
 
   console.log(`Checking ${httpBase}/healthz ...`);
   const healthy = await waitForHealthy(httpBase, { attempts: 5, interval: 800 });
@@ -334,7 +397,12 @@ async function main() {
   const prefixRegistered = existingApps.some((a) => a.prefix === prefix);
   if (!prefixRegistered) {
     console.log(`  registering "#/${prefix}" (realm: 'global', mode: 'multiuser')...`);
-    await registerApp(mainSpace, { prefix, name: 'CMS', realm: 'global', mode: 'multiuser' });
+    // globalTemplateNames: [cmsBundle.template.name] - a REAL, previously-shipped bug this fixes:
+    // installGlobalCms() below writes a template under THIS prefix, and unlike the built-in admin
+    // console's own hardcoded "main" template, an undeclared global template name is silently
+    // REJECTED (kinds.js's own platformAppsKind doc comment on why) - declaring it here, upfront,
+    // is what makes that write actually succeed for any prefix other than "admin".
+    await registerApp(mainSpace, { prefix, name: 'CMS', realm: 'global', mode: 'multiuser', globalTemplateNames: [cmsBundle.template.name] });
     await waitUntilAllWritesAcked(mainWrites);
     await new Promise((resolve) => setTimeout(resolve, 300)); // let the relay's live resolver start watching this app's own route registry.
   } else {
@@ -346,11 +414,13 @@ async function main() {
   if (cmsGlobalAlreadyInstalled) {
     console.log(`  "#/${prefix}"'s global shell already installed - skipping (edit it live at #/admin/${prefix}/cms once bootstrapped).`);
   } else {
-    console.log(`  publishing "#/${prefix}"'s global route(s)...`);
+    console.log(`  publishing "#/${prefix}"'s landing route...`);
+    // Just "/" here - installGlobalCms() below now publishes EVERY one of its OWN pages' routes
+    // itself (the /cms index and one per registered section), no separate pre-publish needed for
+    // those any more (cms-bundle.js's own installGlobalCms() doc comment).
     await publishGlobalRoute(mainSpace, prefix, { route: '/', title: 'CMS' });
-    await publishGlobalRoute(mainSpace, prefix, { route: cmsBundle.page.route, title: cmsBundle.page.title });
     await waitUntilAllWritesAcked(mainWrites);
-    await new Promise((resolve) => setTimeout(resolve, 300)); // let the relay observe both new routes before the page content writes follow.
+    await new Promise((resolve) => setTimeout(resolve, 300)); // let the relay observe the new route before the page content write follows.
     console.log(`  installing "#/${prefix}"'s global landing page + CMS editor...`);
     await createGlobalApp(mainSpace, prefix, { name: 'CMS', rootTemplate: cmsBundle.template.name, defaultRoute: '/' });
     await installGlobalCms(mainSpace, prefix); // writes the __cms__ template + its own /cms editor page.
@@ -368,11 +438,17 @@ async function main() {
   mainTransport.close();
 
   if (!mainOk) {
-    console.log('\n⚠ Some writes were never write-acked by the relay - it is reachable, but NOT (yet) running');
-    console.log('  with this identity\'s config (a relay ignores QU_RELAY_ADMINS changes until it is');
-    console.log('  actually (re)started with it - a plain restart of an already-running process/container');
-    console.log('  does NOT re-read it by itself either, the process/container needs to be RECREATED with');
-    console.log('  the new config).\n');
+    console.log('\n⚠ Some writes were never write-acked by the relay - it is reachable, but this identity is');
+    if (usedBootstrapFile) {
+      console.log('  not (yet) actually trusted by it - QU_RELAY_BOOTSTRAP_ADMIN may be disabled on this relay,');
+      console.log('  or --dir/QU_BOOTSTRAP_DIR is not genuinely pointed at THIS relay\'s own QU_RELAY_DATA_DIR');
+      console.log('  (a stale copy, or a different relay entirely).\n');
+    } else {
+      console.log('  not (yet) running with this identity\'s config (a relay ignores QU_RELAY_ADMINS changes');
+      console.log('  until it is actually (re)started with it - a plain restart of an already-running');
+      console.log('  process/container does NOT re-read it by itself either, the process/container needs to');
+      console.log('  be RECREATED with the new config).\n');
+    }
     printConfigBlock({ relayAdmin });
     console.log('Update your deployment with that config and redeploy/recreate it (however you deploy),');
     console.log('then re-run this exact command - it reuses the same identity and finishes from here.');

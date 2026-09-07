@@ -48,18 +48,34 @@
  * result whenever ANY ONE of them fires.
  */
 import { deriveOwnerNodeId } from '@qu/space-core';
-import { routeRegistryKind, sharedListKind, sharedListAnchor } from './kinds.js';
+import { routeRegistryKind, sharedListKind, sharedListAnchor, adminRouteRegistryKind, globalAppAnchor } from './kinds.js';
 
 function normalize({ title = '', excerpt = '', route = null, timestamp = null, raw = null }) {
   return { title, excerpt, route, timestamp, raw };
 }
 
 export const VIEW_SOURCE_ADAPTERS = {
-  /** @param {{prefix?: string}} params - `prefix` (optional) keeps only routes starting with it, e.g. `'/blog/'` - "a blog is just pages under one route prefix" (this file's own top doc comment). Omit for every published route. */
+  /**
+   * @param {{prefix?: string, ownerPrefix?: string}} params - `prefix` (optional) keeps only routes
+   * starting with it, e.g. `'/blog/'` - "a blog is just pages under one route prefix" (this file's
+   * own top doc comment). Omit for every published route.
+   *
+   * `ownerPrefix` (optional) - CROSS-APP sourcing: reads a DIFFERENT `realm: 'global'` app's own
+   * route registry (`adminRouteRegistryKind`, anchored on `globalAppAnchor(ownerPrefix)`) instead of
+   * THIS View's own owner - the "app-übergreifend" Views requirement (the user's own framing): a
+   * View defined under one app's CMS can still merge/filter another app's own Pages into its feed.
+   * Omit entirely (unchanged, pre-existing behavior) for the common case, a View reading its OWN
+   * app's Pages. A `'shared-list'` source (below) already works cross-app with NO such param at all -
+   * a shared list's id is anchored on a hash of its own NAME (`sharedListAnchor()`), never on any
+   * app's identity, so any View may already source ANY shared list by name regardless of which app
+   * registered it.
+   */
   pages: {
     async open(space, { appAdminPub, kinds }, params) {
-      const registryKind = kinds?.routeRegistryKind ?? routeRegistryKind;
-      const id = await deriveOwnerNodeId(appAdminPub, registryKind.kind);
+      const crossApp = !!params?.ownerPrefix;
+      const registryKind = crossApp ? adminRouteRegistryKind : (kinds?.routeRegistryKind ?? routeRegistryKind);
+      const owner = crossApp ? await globalAppAnchor(params.ownerPrefix) : appAdminPub;
+      const id = await deriveOwnerNodeId(owner, registryKind.kind);
       const { node, release } = await space.useNode(id, registryKind);
       const field = node.field('routes');
       const read = async () =>

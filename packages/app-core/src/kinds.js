@@ -229,7 +229,7 @@ export const platformAppsKind = publicMeta(
   defineKind('qu-platform-apps', {
     fields: {
       /**
-       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser'|'personal', sharedLists?: string[], globalViewNames?: string[], personalBundle?: string, appType?: string, bundleVersion?: number, config?: Record<string, unknown>, removed?: true}>`
+       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser'|'personal', sharedLists?: string[], globalViewNames?: string[], globalTemplateNames?: string[], globalStyleNames?: string[], personalBundle?: string, appType?: string, bundleVersion?: number, config?: Record<string, unknown>, removed?: true}>`
        * - see `dev.js`'s `registerApp()`/`setAppMode()`/`setAppBundleVersion()`/
        * `setAppConfig()`/`unregisterApp()`, `platform.js`'s `PlatformRuntime`. `realm: 'global'` entries (`appAdminPub: null`)
        * route into content ANY configured relay-admin collectively
@@ -329,6 +329,24 @@ export const platformAppsKind = publicMeta(
        * SAME `routeScheme` down to a visitor's own personal-instance
        * installer as the relay-admin picked for the global one.
        *
+       * `globalTemplateNames`/`globalStyleNames` (optional, `realm: 'global'`
+       * only) - `dev.js`'s `createGlobalTemplate()`/`createGlobalStyle()` own
+       * doc comment on the gap this closes: unlike a global app's PAGE routes
+       * (discovered LIVE by `live-app-resolver.js` watching
+       * `adminRouteRegistryKind`), templates/styles have no registry of
+       * their own to watch - a NEW template/style name is classified
+       * correctly ONLY if the relay already knows to expect it, otherwise it
+       * silently misclassifies against the generic `'content'`-ACL fallback
+       * and REJECTS the write (no grant exists for a `'relay-admins'`-ACL
+       * Kind - that mode has no self-grant concept at all). The built-in
+       * admin console's own `"main"` template is hardcoded as always-known
+       * (`live-app-resolver.js`'s own `KNOWN_GLOBAL_TEMPLATE_NAMES`) - ANY
+       * OTHER global app installing its own template/style (e.g.
+       * `installGlobalCms()`'s own `__cms__` template, for a `realm: 'global'`
+       * app that isn't "admin") MUST list its name(s) here at registration
+       * time, the exact same "tell the relay before writing it" requirement
+       * `globalViewNames`/`sharedLists` already have, one Kind over.
+       *
        * `removed` (optional, `true` when present) - `unregisterApp()`'s own
        * marker: this prefix's registration is retracted, exactly as
        * thoroughly as if it had never been registered at all
@@ -386,6 +404,21 @@ export const pageKind = publicMeta(
        * deliberately NOT this field's job).
        */
       data: { shape: 'atomic', visibility: 'public' },
+      /**
+       * A `qu-style` NAME (same "name, resolved via content-id.js at render
+       * time" convention `template` above already uses) to load for THIS
+       * page specifically, instead of falling back to the Manifest's own
+       * single, app-wide `theme` style (`appManifestKind`'s own `theme`
+       * field) - `runtime.js`'s `AppRuntime.resolveRoute()` prefers this
+       * over `manifest.theme` when set, auto-loaded the exact same way the
+       * manifest theme already is (a page/template author never has to
+       * reference it from markup or JS - `boot.js`'s `renderPage()` already
+       * receives the resolved `css` string as one more plan field, same
+       * shape as before this existed). `null`/unset (the default) keeps the
+       * pre-existing "one app-wide theme for every page" behavior
+       * unchanged - fully backward compatible.
+       */
+      style: { shape: 'atomic', visibility: 'public' },
     },
     acl: { write: 'content' },
   })
@@ -683,6 +716,8 @@ export const adminPageKind = publicMeta(
       template: { shape: 'atomic', visibility: 'public' },
       content: { shape: 'text', visibility: 'public' },
       data: { shape: 'atomic', visibility: 'public' },
+      /** Global-app counterpart to `pageKind.style` - see that field's own doc comment (identical reasoning: resolves against `createGlobalStyle()`'s own `adminStyleKind` instead of the self-owned one). */
+      style: { shape: 'atomic', visibility: 'public' },
     },
     acl: { write: 'relay-admins' },
   })
@@ -722,9 +757,11 @@ export const adminStyleKind = publicMeta(
  * already applies to `qu-platform-apps` itself), so a relay-admin creating
  * a brand-new page under an EXISTING global app needs no relay restart -
  * unlike `templateRegistryKind`/`styleRegistryKind`, this one has no global
- * counterpart yet (templates/styles stay a smaller, more static set for
- * global apps for now - a deliberate, separate scope boundary, not an
- * oversight).
+ * counterpart at all (templates/styles are a smaller, deliberately more
+ * static set for global apps - not discovered by watching a live registry
+ * the way page routes are). A new template/style name still needs no relay
+ * restart, just an upfront declaration instead of a registry to watch -
+ * `platformAppsKind`'s own `globalTemplateNames`/`globalStyleNames` fields.
  */
 export const adminRouteRegistryKind = publicMeta(
   defineKind('qu-admin-route-registry', {

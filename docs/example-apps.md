@@ -144,8 +144,9 @@ A NEW post is just another `createPage()` + `publishRoute()` call - the
 index View picks it up live, no re-publish of the index itself needed
 (`view-sources.js`'s `'pages'` adapter observes the route registry's own
 `routes` list field). Publishing through the CMS editor instead of the Dev
-API works identically - `cms-actions.js`'s `wirePages()` already calls
-`publishRoute()` on every save.
+API works identically - `cms-actions.js`'s `wireContent()` (its "Inhalt"
+section, content-source "Text/HTML") already calls `publishRoute()` on
+every save.
 
 **A "user-feed" combining a blog AND a guestbook** (the motivating example
 for Views existing at all) is simply a View with both source types at
@@ -315,26 +316,39 @@ identical to §1's Guestbook):
    (`@qu/app-core`'s `dev.js` - the relay has to be told a `'members'`-ACL
    list's NAME before anything can write to it, same reasoning `sharedLists`
    already documents for a bundle's own install step) registers the list,
-   then `installGlobalCms()` self-provisions this app's own Templates/
-   Styles/Pages/**Views** editor (`cms-bundle.js`) and navigates to
-   `#/admin/<prefix>/cms`.
-3. In the rendered **"Views (live Feeds)"** section, create a View: a
-   name, `sources: [{"type":"shared-list","name":"notesboard-entries"}]`,
-   `sortBy: "timestamp"`, an `itemTemplate`, and - the part that connects a
-   PATH to this generated View - a **route** (e.g. `/`). Submitting
-   self-registers the View's own name too (`addGlobalViewNames()`,
-   automatic, the same "tell the relay the name before writing it" step,
-   no separate button for this one - the form already knows the name the
-   moment it's typed) and auto-creates a wrapper page at that route
-   containing just `<div data-qu-view="...">`.
+   then `installGlobalCms()` self-provisions this app's own admin editor
+   (`cms-bundle.js`) and navigates to `#/admin/<prefix>/cms` - a small INDEX
+   page linking to every REGISTERED admin section (`@qu/app-shell`'s
+   `src/admin-sections.js` - "Templates," "Styles," "Inhalt (Seiten &
+   Views)" today; a `/apps/*` app can add its own the same way, see that
+   file's own doc comment), each its OWN bookmarkable route
+   (`#/admin/<prefix>/cms/content`, etc.) - nothing here is hardcoded to a
+   fixed set of sections, `cms-bundle.js` builds these pages by iterating
+   whatever is currently registered.
+3. Open **"Inhalt (Seiten & Views)"** and create an entry: a **Pfad**
+   (route, e.g. `/`), content-source **"Geteilte Liste"**, the **Listen-Name**
+   (`notesboard-entries`), a **Sortieren nach** (`timestamp`), and an
+   **Item-Template**. This ONE form replaces what used to be two separate
+   "Seiten"/"Views" sections - `src/cms-actions.js`'s own `wireContent()`
+   doc comment has the full field reference, including the "Name" field
+   (optional here - derived from the route when left blank) and the
+   "Erweitert" JSON override for combining MULTIPLE different source types
+   in one View (architecture.md's own flagship "Blog + Gästebuch combined
+   feed" example - the simple picker only ever builds one source type at a
+   time). Submitting self-registers the View's own name too
+   (`addGlobalViewNames()`, automatic - no separate button for this one,
+   the form already knows the name the moment it's built) and auto-creates
+   a wrapper page at the given route containing just
+   `<div data-qu-view="...">`.
 4. **Header/footer, e.g. a sign-form above or below the list** (the
    concrete case that started this whole section: a Gästebuch-style page
    needs BOTH a feed AND a way to add to it): there is no separate
    "header"/"footer" field - the auto-created wrapper page from step 3 is
-   itself ordinary, freely editable content. Go to the **"Seiten"** section
-   of the SAME editor, load that page (its route matches what you typed in
-   step 3), and edit its `content` to wrap the existing
-   `<div data-qu-view="...">` in a GENERIC, fully declarative write form -
+   itself ordinary, freely editable content. In the SAME "Inhalt" list,
+   click that same route again - it loads back in as plain "Text/HTML" (the
+   wrapper page's own raw content, `<div data-qu-view="...">` included) -
+   and edit its content to wrap the existing `<div>` in a GENERIC, fully
+   declarative write form -
    `generic-write-actions.js`'s own `data-qu-action="qu-write"` convention,
    wired unconditionally alongside every other reference app
    (`installed-apps-actions.js`'s `wireInstalledApps()`), so it needs no
@@ -362,6 +376,30 @@ identical to §1's Guestbook):
    `generic-write-actions.js`'s own top doc comment for the full attribute
    reference, and the "Date-based archive routing" section below for why a
    route template like that one is worth building at all.
+5. **Style, optional**: the Content form's own "Style" field takes a style
+   NAME already created under "Styles" (or left blank for the app's own
+   single, Manifest-level theme, unchanged pre-existing behavior) -
+   auto-loaded for THIS entry alone, no markup or JS reference needed
+   (`kinds.js`'s `pageKind` own `style` field doc comment, `runtime.js`'s
+   `AppRuntime.resolveRoute()` for how it's resolved). Useful the moment two
+   different sections of the same app want visibly different looks (a
+   Gästebuch feed vs. a moderation panel, say) without a full second app.
+
+**App-übergreifende ("cross-app") Views** - the SAME "Inhalt" form, content
+source "Seiten-Filter," has a **"Ziel-App-Präfix"** field: leave it blank to
+filter THIS app's own pages, or type a DIFFERENT registered prefix to pull
+IN that app's own published pages instead (`view-sources.js`'s own
+`'pages'` adapter doc comment on `ownerPrefix`). "Geteilte Liste" sources
+already work across apps with no extra field at all - a shared list's own
+id is a hash of its NAME, never scoped to any one app - so a Guestbook
+installed under `gaestebuch` and a Chat installed under `chat` could both
+feed the SAME aggregate View if they happened to share a list name (they
+don't, by convention, but nothing stops a bespoke View from reading BOTH
+lists via the "Erweitert" JSON override). A relay-admin who wants a
+DEDICATED workspace for building such cross-app feeds needs no special
+setup - just register a bare app (e.g. prefix `views`, step 1 above) and
+use ITS OWN "Inhalt" section for exactly that; there is no separate
+"Views area" bolted onto the platform anywhere.
 
 This is genuinely how far you can get with ZERO files today for an app
 that fits "Template + `qu-list`/`qu-bind`/`qu-view` data source" - see
@@ -385,6 +423,75 @@ own still-open "app modules" question is answered for exactly this shape
 of app now; genuine custom EXECUTION logic beyond "a real relay write" per
 interaction (a Geo Chase's own game rules, a Live-Ticker's event-scoring)
 remains real, separate future work.
+
+## Deploying Guestbook, Blog, and Forum via the Views UI, no `bundle.js`
+
+§1-§3's own shipped bundles (`guestbook-bundle.js`/`blog-bundle.js`/
+`forum-bundle.js`) exist as one-click reference installers, but every one
+of them is ALSO fully buildable through §5's own "Inhalt (Seiten & Views)"
+editor alone - useful the moment you want a variant that deviates even
+slightly from the shipped default (a different sort order, an extra filter
+field, a custom item template) without forking a `bundle.js` file. Each
+walkthrough below assumes step 1 already ran (`registerApp({prefix,
+realm: 'global'})`) for whatever prefix you choose.
+
+**Guestbook-style feed** (§1) - exactly the §5 walkthrough already gives in
+full: one "Geteilte Liste" entry (`listName`, e.g. `gaestebuch-entries`),
+route `/`, `sortBy: timestamp`, an `itemTemplate`. Nothing else needed - a
+Guestbook IS the reference case the whole unified editor was designed
+around.
+
+**Blog-style index** (§2) - a Blog's own POSTS stay ordinary Pages
+(content-source "Text/HTML," one per post, route e.g. `/post/erster-post`)
+- there is no way around writing each post as its own "Inhalt" entry, the
+same "a blog post is just a page" posture §2 itself explains, UI-driven
+instead of Dev-API-driven. The INDEX, though, is a single View built ONCE:
+content-source "Seiten-Filter," **Pfad-Präfix-Filter** `/post/`, route `/`,
+`sortBy: title`, `itemTemplate` containing an `<a data-qu-view-link>`. Every
+NEW post published afterward (another "Text/HTML" entry under `/post/...`)
+shows up in that SAME index live, no re-save of the View itself needed -
+`view-sources.js`'s `'pages'` adapter watches the route registry, not a
+fixed snapshot. Want the "date-segmented route" archive capability
+`blog-bundle.js`'s own `routeScheme` gives the shipped installer (see
+"Date-based archive routing" below)? Just type the date into each post's
+own **Pfad** by hand (`/post/2026/09/07/erster-post`) - the SAME
+prefix-filtered index View, or a narrower one (`Pfad-Präfix-Filter:
+/post/2026/09/`), picks it up identically either way; there is nothing
+`routeScheme` does at the STORAGE level that typing the path yourself
+doesn't already achieve, it only automates the typing.
+
+**Forum-style topics+replies** (§3) - the one case that genuinely needs
+TWO Views plus a manually-built topic/reply write form, since a forum's
+"start a topic" step has no single-field equivalent in the unified editor
+(`forum-bundle.js`'s own top doc comment on why topics/replies are
+`'members'`-ACL shared-list entries, never a `qu-page` per topic - the
+same reasoning applies here, UI-built or not):
+1. **Topics index**: content-source "Geteilte Liste", `listName:
+   forum-topics`, route `/forum`, `sortBy: timestamp`, `sortOrder: desc`,
+   `itemTemplate` with an `<a data-qu-view-link>` reading each entry's own
+   `route` field (`sharedListKind`'s entries may carry one, §3's own doc
+   comment) - so a topic entry needs to be PUSHED with its own `route`
+   already set (`{name: title, message: "von " + author, ts, route:
+   "/forum/topic/" + topicId}`) - this ONE list serves double duty as both
+   "start a topic" (push a new entry) and "read the topic index" (the View
+   above), same as `forum-bundle.js`'s own Dev-API version.
+2. **Per-topic replies**: since a topic's own reply list NAME is only known
+   once a topic exists (`forum-topic-<id>`, chosen per-topic at push time),
+   register each one via `addSharedLists()` as topics get created (a small
+   piece of glue code `forum-bundle.js` already has and the pure-UI path
+   does not avoid needing) - then one MORE "Geteilte Liste" View per topic
+   page (`listName: forum-topic-<id>`, no route of its own - embedded via
+   `<div data-qu-view="...">` on that topic's own manually-created "Text/
+   HTML" page instead, alongside a `data-qu-action="qu-write"` reply form
+   targeting the SAME list name).
+   Building this ENTIRELY without any glue code at all - a relay-admin
+   never running so much as `addSharedLists()` by hand - is real, open
+   future work (it would need the reply list's own name to self-register
+   the moment a topic-start write creates it, the same class of "a Kind
+   whose name is chosen at write time, not install time" gap `sharedLists`
+   already solves for the INSTALL-time case); `forum-bundle.js`'s own
+   installer remains the practical choice for Forum specifically, unlike
+   Guestbook/Blog where the pure-UI path is genuinely just as easy.
 
 ## Personal-instance routing: the additive `/u/<ref>/` scheme
 

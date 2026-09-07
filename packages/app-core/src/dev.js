@@ -195,9 +195,9 @@ export async function createStyle(space, { name, css }) {
   return node;
 }
 
-/** Creates a page at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-page', route)` - see `createTemplate()`'s own doc comment. `template` is a template NAME (resolved via content-id.js at render time), not a Node id. `data` is optional STRUCTURED content beyond the single `content` blob - see kinds.js's `pageKind` own doc comment on its `data` field (an arbitrary JSON object, one extra named `<qu-slot>` filled per top-level key). Does NOT auto-register into `routeRegistryKind` (unlike `createTemplate()`/`createStyle()`'s own registries) - call `publishRoute()` separately, unchanged pre-existing behavior. */
-export async function createPage(space, { route, title, template = null, content = '', data = null }) {
-  return space.createNode(pageKind, { route, title, template, content, data }, { path: route });
+/** Creates a page at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-page', route)` - see `createTemplate()`'s own doc comment. `template` is a template NAME (resolved via content-id.js at render time), not a Node id. `data` is optional STRUCTURED content beyond the single `content` blob - see kinds.js's `pageKind` own doc comment on its `data` field (an arbitrary JSON object, one extra named `<qu-slot>` filled per top-level key). `style` (optional) is a `qu-style` NAME to load for THIS page instead of the app Manifest's own single `theme` - `kinds.js`'s `pageKind` own doc comment, `runtime.js`'s `AppRuntime.resolveRoute()` for how it's auto-loaded. Does NOT auto-register into `routeRegistryKind` (unlike `createTemplate()`/`createStyle()`'s own registries) - call `publishRoute()` separately, unchanged pre-existing behavior. */
+export async function createPage(space, { route, title, template = null, content = '', data = null, style = null }) {
+  return space.createNode(pageKind, { route, title, template, content, data, style }, { path: route });
 }
 
 /**
@@ -259,8 +259,8 @@ export async function editStyle(space, { name, css, ownerPub = space.identity.si
   return node;
 }
 
-/** Page counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). Only fields actually passed are updated; omit `title`/`template`/`content`/`data` to leave them unchanged. `title`/`template`/`data` are `'atomic'`-shape (`field.set()`); `content` is `'text'`-shape, see `replaceText()`'s own doc comment. `data` is kinds.js's `pageKind` own structured-data field (see its doc comment) - passing it REPLACES the whole object (an `'atomic'` field is one opaque last-write-wins value, not merged key-by-key). */
-export async function editPage(space, { route, title, template, content, data, ownerPub = space.identity.signingPub, timeout } = {}) {
+/** Page counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). Only fields actually passed are updated; omit `title`/`template`/`content`/`data`/`style` to leave them unchanged. `title`/`template`/`data`/`style` are `'atomic'`-shape (`field.set()`); `content` is `'text'`-shape, see `replaceText()`'s own doc comment. `data` is kinds.js's `pageKind` own structured-data field (see its doc comment) - passing it REPLACES the whole object (an `'atomic'` field is one opaque last-write-wins value, not merged key-by-key). `style` - see `createPage()`'s own doc comment; pass `null` explicitly to revert to the app Manifest's own `theme`. */
+export async function editPage(space, { route, title, template, content, data, style, ownerPub = space.identity.signingPub, timeout } = {}) {
   const id = await deriveContentNodeId(ownerPub, pageKind.kind, route);
   const { node, release } = await space.useNode(id, pageKind);
   // Wait for BOTH title AND content (separate envelopes - see resolver.js's own resolvePage() doc
@@ -279,6 +279,7 @@ export async function editPage(space, { route, title, template, content, data, o
   if (template !== undefined) await node.field('template').set(template);
   if (content !== undefined) replaceText(node.field('content'), content);
   if (data !== undefined) await node.field('data').set(data);
+  if (style !== undefined) await node.field('style').set(style);
   release();
   return node;
 }
@@ -479,7 +480,7 @@ export async function pushToSharedList(space, name, entry) {
  * @param {{name: string, sources: Array<{type: string, [k: string]: *}>, sortBy?: string|null, sortOrder?: 'asc'|'desc', limit?: number|null, itemTemplate: string}} params
  */
 /**
- * @param {{name: string, route?: string|null, template?: string|null, sources: Array<{type: string, [k: string]: *}>, sortBy?: string|null, sortOrder?: 'asc'|'desc', limit?: number|null, itemTemplate: string}} params -
+ * @param {{name: string, route?: string|null, template?: string|null, sources: Array<{type: string, [k: string]: *}>, sortBy?: string|null, sortOrder?: 'asc'|'desc', limit?: number|null, itemTemplate: string, style?: string|null}} params -
  *   `route` (optional) makes this View directly visitable, "Views
  *   zusammenklickbar wie bei Drupal" (the user's own framing) - when
  *   given, this ALSO `createPage()`s + `publishRoute()`s a plain wrapper
@@ -489,17 +490,21 @@ export async function pushToSharedList(space, name, entry) {
  *   more than this same embed convention, auto-wired). `template`
  *   (optional, only meaningful together with `route`) is that wrapper
  *   page's own `template` name, same as `createPage()`'s own `template`
- *   param - omit for no wrapping template (a bare, unstyled feed).
+ *   param - omit for no wrapping template (a bare, unstyled feed). `style`
+ *   (optional, only meaningful together with `route`) is that SAME wrapper
+ *   page's own `style` override (`createPage()`'s/`kinds.js`'s `pageKind`
+ *   own doc comment) - omit for the app Manifest's own single theme,
+ *   unchanged pre-existing behavior.
  *   Omitting `route` entirely (unchanged, pre-existing behavior) creates
  *   an EMBED-ONLY View, meant to be referenced from `<div data-qu-view=
  *   "name">` inside some OTHER, separately-authored page's own content -
  *   the right choice whenever a feed needs to sit alongside other content
  *   (a sidebar, a form on the same page) rather than being the WHOLE page.
  */
-export async function createView(space, { name, route = null, template = null, sources, sortBy = null, sortOrder = 'desc', limit = null, itemTemplate }) {
+export async function createView(space, { name, route = null, template = null, sources, sortBy = null, sortOrder = 'desc', limit = null, itemTemplate, style = null }) {
   const node = await space.createNode(viewKind, { sources, sortBy, sortOrder, limit, itemTemplate, route, template }, { path: name });
   if (route) {
-    await createPage(space, { route, title: name, template, content: `<div data-qu-view="${name}"></div>` });
+    await createPage(space, { route, title: name, template, content: `<div data-qu-view="${name}"></div>`, style });
     await publishRoute(space, { route, title: name });
   }
   return node;
@@ -737,8 +742,16 @@ export async function installAppBundle(space, bundle) {
  *   kinds.js's own `platformAppsKind` doc comment on both; `setAppBundleVersion()`
  *   right below updates `bundleVersion` alone for an already-registered prefix,
  *   the same "push a newer entry, same prefix" pattern `setAppMode()` uses.
+ *
+ *   `globalTemplateNames`/`globalStyleNames` (optional, `realm: 'global'`
+ *   only) - see kinds.js's own `platformAppsKind` doc comment on both: a
+ *   REAL, observed failure mode this closes - `createGlobalTemplate()`/
+ *   `createGlobalStyle()` writes for a prefix OTHER than the built-in admin
+ *   console's own hardcoded `"main"` template are silently REJECTED (no
+ *   `'relay-admins'`-ACL classification exists for a name the relay was
+ *   never told about) unless listed here at registration time.
  */
-export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode, sharedLists, globalViewNames, personalBundle, appType, bundleVersion }) {
+export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode, sharedLists, globalViewNames, globalTemplateNames, globalStyleNames, personalBundle, appType, bundleVersion }) {
   // getOrSyncRegistryNode(), not a blind `space.getNode(id) ?? createNode()` - the SAME "never
   // re-createNode() over a Node that already exists, just torn down locally between two calls"
   // reasoning that function's own doc comment already documents for an app's per-owner registries -
@@ -755,6 +768,8 @@ export async function registerApp(space, { prefix, appAdminPub, name, realm = 'm
   if (realm === 'global' && mode) entry.mode = mode;
   if (sharedLists?.length) entry.sharedLists = sharedLists;
   if (realm === 'global' && globalViewNames?.length) entry.globalViewNames = globalViewNames;
+  if (realm === 'global' && globalTemplateNames?.length) entry.globalTemplateNames = globalTemplateNames;
+  if (realm === 'global' && globalStyleNames?.length) entry.globalStyleNames = globalStyleNames;
   if (realm === 'global' && personalBundle) entry.personalBundle = personalBundle;
   if (realm === 'global' && appType) entry.appType = appType;
   if (realm === 'global' && bundleVersion !== undefined) entry.bundleVersion = bundleVersion;
@@ -866,6 +881,39 @@ export async function addGlobalViewNames(space, { prefix, globalViewNames }) {
 }
 
 /**
+ * `addSharedLists()`'s own counterpart for `globalTemplateNames` - identical
+ * "push a newer entry, everything else carried over, deduplicated" pattern.
+ * `kinds.js`'s own `platformAppsKind` doc comment on the real, observed
+ * failure this (and `registerApp()`'s own `globalTemplateNames` param) fixes:
+ * a `createGlobalTemplate()` write for any prefix OTHER than the built-in
+ * admin console's hardcoded `"main"` template is silently REJECTED unless
+ * the relay was told to expect that name first - exactly here, for an
+ * ALREADY-registered app that never declared it upfront.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{prefix: string, globalTemplateNames: string[]}} params
+ */
+export async function addGlobalTemplateNames(space, { prefix, globalTemplateNames }) {
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
+  const apps = (await node.field('apps').toArray()).filter(Boolean);
+  const current = [...apps].reverse().find((a) => a.prefix === prefix);
+  if (!current) throw new Error(`addGlobalTemplateNames: "${prefix}" is not a registered app - registerApp() it first.`);
+  const merged = [...new Set([...(current.globalTemplateNames ?? []), ...globalTemplateNames])];
+  await node.field('apps').push({ ...current, globalTemplateNames: merged });
+  return node;
+}
+
+/** `addGlobalTemplateNames()`'s own counterpart for `globalStyleNames` - see that function's own doc comment (identical reasoning, `createGlobalStyle()` instead of `createGlobalTemplate()`). */
+export async function addGlobalStyleNames(space, { prefix, globalStyleNames }) {
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
+  const apps = (await node.field('apps').toArray()).filter(Boolean);
+  const current = [...apps].reverse().find((a) => a.prefix === prefix);
+  if (!current) throw new Error(`addGlobalStyleNames: "${prefix}" is not a registered app - registerApp() it first.`);
+  const merged = [...new Set([...(current.globalStyleNames ?? []), ...globalStyleNames])];
+  await node.field('apps').push({ ...current, globalStyleNames: merged });
+  return node;
+}
+
+/**
  * MERGES fields into an ALREADY-registered `realm: 'global'` app's own free-
  * form `config` bag (kinds.js's own `platformAppsKind` doc comment on why
  * this exists at all, and its `blog-bundle.js` `routeScheme` example) - same
@@ -939,18 +987,19 @@ export async function createGlobalApp(space, prefix, { name, version = '1.0', ro
 /**
  * Global-app counterpart to `createTemplate()` - see `createGlobalApp()`'s
  * own doc comment on `prefix`. UNLIKE `createGlobalPage()`, this has no
- * registry `@qu/app-shell`'s `live-app-resolver.js` watches yet (kinds.js's
- * own "GLOBAL APP CONTENT" doc comment - "TEMPLATES/STYLES stay a smaller,
- * more static set... a deliberate, separate scope boundary"), so a relay
- * only classifies THIS write correctly if `name` is in the STATIC
- * `templateNames` list `createAppResolveKindSchema()` was configured with
- * for `prefix` - true for the built-in admin console (`['main']`, its
- * OWN default) but NOT for any other, dynamically-registered global app
- * unless a deployment wires its own static list. Calling this for a
- * dynamically-registered global app's non-default template name will
- * silently fail (the relay misclassifies it against the ordinary
- * `'content'`-ACL fallback and rejects the write) until that gap is
- * closed - real, separate future work, not attempted in this pass.
+ * registry `@qu/app-shell`'s `live-app-resolver.js` watches to discover
+ * `name` FROM - a relay only classifies THIS write correctly if `name` is
+ * in the `templateNames` list `createAppResolveKindSchema()` was configured
+ * with for `prefix`, so `name` MUST be declared upfront: either hardcoded
+ * for the built-in admin console (`live-app-resolver.js`'s own
+ * `KNOWN_GLOBAL_TEMPLATE_NAMES`, `['main']`), or via `registerApp()`'s own
+ * `globalTemplateNames` param (or `addGlobalTemplateNames()` for an
+ * already-registered prefix) for any OTHER global app - `kinds.js`'s own
+ * `platformAppsKind` doc comment on the real, previously-shipped failure
+ * this closes: calling this for an UNDECLARED template name still silently
+ * fails (misclassified against the generic `'content'`-ACL fallback,
+ * write rejected) exactly as before - the fix is declaring the name, not a
+ * change to this function itself.
  */
 export async function createGlobalTemplate(space, prefix, { name, html }) {
   const anchor = await cachedGlobalAppAnchor(prefix);
@@ -958,18 +1007,18 @@ export async function createGlobalTemplate(space, prefix, { name, html }) {
   return space.createNode(adminTemplateKind, { html }, { id });
 }
 
-/** Global-app counterpart to `createStyle()` - see `createGlobalTemplate()`'s own doc comment (including its "not yet dynamically discoverable" caveat - identical here for `styleNames`). */
+/** Global-app counterpart to `createStyle()` - see `createGlobalTemplate()`'s own doc comment (including the "declare the name via `registerApp()`'s `globalStyleNames`/`addGlobalStyleNames()` first" requirement - identical here, just the sibling field). */
 export async function createGlobalStyle(space, prefix, { name, css }) {
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminStyleKind.kind, name);
   return space.createNode(adminStyleKind, { css }, { id });
 }
 
-/** Global-app counterpart to `createPage()` - see `createGlobalApp()`'s own doc comment on `prefix`. */
-export async function createGlobalPage(space, prefix, { route, title, template = null, content = '' }) {
+/** Global-app counterpart to `createPage()` - see `createGlobalApp()`'s own doc comment on `prefix`, and `createPage()`'s own on `style`. */
+export async function createGlobalPage(space, prefix, { route, title, template = null, content = '', style = null }) {
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
-  return space.createNode(adminPageKind, { route, title, template, content }, { id });
+  return space.createNode(adminPageKind, { route, title, template, content, style }, { id });
 }
 
 /** Global-app counterpart to `installAppBundle()` - see that function's own doc comment; identical shape, writes the `qu-admin-*` Kinds via the four functions just above, all anchored on `prefix` (see `createGlobalApp()`'s own doc comment). No `routes`/route-registry counterpart yet - not needed for the built-in admin console's one page (see this package's own README on the reference bundle). */
@@ -1020,7 +1069,7 @@ export async function editGlobalStyle(space, prefix, { name, css, timeout } = {}
 }
 
 /** Global-app counterpart to `editPage()` - see `editGlobalTemplate()`'s own doc comment, and `editPage()`'s own on the per-field update semantics (only fields actually passed are updated). */
-export async function editGlobalPage(space, prefix, { route, title, template, content, data, timeout } = {}) {
+export async function editGlobalPage(space, prefix, { route, title, template, content, data, style, timeout } = {}) {
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
   const { node, release } = await space.useNode(id, adminPageKind);
@@ -1036,6 +1085,7 @@ export async function editGlobalPage(space, prefix, { route, title, template, co
   if (template !== undefined) await node.field('template').set(template);
   if (content !== undefined) replaceText(node.field('content'), content);
   if (data !== undefined) await node.field('data').set(data);
+  if (style !== undefined) await node.field('style').set(style);
   release();
   return node;
 }
@@ -1111,7 +1161,7 @@ export async function publishGlobalRoute(space, prefix, { route, title }) {
  * identity would - kinds.js's own doc comment has the full "real, observed
  * bug" story). Same `route`/`template` auto-wrapper-page behavior as
  * `createView()`, just through `createGlobalPage()`/`publishGlobalRoute()`
- * instead of their self-owned counterparts - INCLUDING `wirePages()`'s own
+ * instead of their self-owned counterparts - INCLUDING `wireContent()`'s own
  * global-mode ORDERING requirement (`@qu/app-shell`'s `cms-actions.js`'s
  * own doc comment on it, in full): `publishGlobalRoute()` FIRST, a short
  * settle wait, THEN `createGlobalPage()` - `@qu/app-shell`'s
@@ -1123,14 +1173,14 @@ export async function publishGlobalRoute(space, prefix, { route, title }) {
  * 'main'` apps (self-owned `'content'`-ACL, classified by OWNER alone, no
  * per-route registration needed) - never copy that order here.
  */
-export async function createGlobalView(space, prefix, { name, route = null, template = null, sources, sortBy = null, sortOrder = 'desc', limit = null, itemTemplate }) {
+export async function createGlobalView(space, prefix, { name, route = null, template = null, sources, sortBy = null, sortOrder = 'desc', limit = null, itemTemplate, style = null }) {
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminViewKind.kind, name);
   const node = await space.createNode(adminViewKind, { sources, sortBy, sortOrder, limit, itemTemplate, route, template }, { id });
   if (route) {
     await publishGlobalRoute(space, prefix, { route, title: name });
     await new Promise((resolve) => setTimeout(resolve, 400));
-    await createGlobalPage(space, prefix, { route, title: name, template, content: `<div data-qu-view="${name}"></div>` });
+    await createGlobalPage(space, prefix, { route, title: name, template, content: `<div data-qu-view="${name}"></div>`, style });
   }
   return node;
 }

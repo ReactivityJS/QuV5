@@ -44,6 +44,8 @@ export {
   setAppConfig,
   addSharedLists,
   addGlobalViewNames,
+  addGlobalTemplateNames,
+  addGlobalStyleNames,
   unregisterApp,
   nullGlobalAppContent,
   createGlobalApp,

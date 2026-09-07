@@ -87,10 +87,10 @@ test('a relay-admin registers "cms" as a multiuser global app; two independent v
 
   // Navigate to her own CMS editor (bare prefix, still no "/u/me/") and create a page through the
   // rendered form - never calling the Dev API directly, proving the write path end to end.
-  aliceRouter.navigate('/cms/cms');
-  await waitUntil(() => aliceMount.querySelector('form[data-qu-action="cms-page-form"]'), { timeout: 4000 });
+  aliceRouter.navigate('/cms/cms/content');
+  await waitUntil(() => aliceMount.querySelector('form[data-qu-action="cms-content-form"]'), { timeout: 4000 });
 
-  const alicePageForm = aliceMount.querySelector('form[data-qu-action="cms-page-form"]');
+  const alicePageForm = aliceMount.querySelector('form[data-qu-action="cms-content-form"]');
   alicePageForm.querySelector('[name="route"]').value = '/';
   alicePageForm.querySelector('[name="title"]').value = "Alice's Seite";
   alicePageForm.querySelector('[name="content"]').value = '<p>Hallo von Alice</p>';
@@ -109,10 +109,10 @@ test('a relay-admin registers "cms" as a multiuser global app; two independent v
   const { router: bobRouter } = startPlatform({ space: bobSpace, mountEl: bobMount, window: bobWindow, resolveTimeout: 500 });
 
   await waitUntil(() => bobMount.innerHTML.length > 0, { timeout: 5000 });
-  bobRouter.navigate('/cms/u/me/cms');
-  await waitUntil(() => bobMount.querySelector('form[data-qu-action="cms-page-form"]'), { timeout: 4000 });
+  bobRouter.navigate('/cms/u/me/cms/content');
+  await waitUntil(() => bobMount.querySelector('form[data-qu-action="cms-content-form"]'), { timeout: 4000 });
 
-  const bobPageForm = bobMount.querySelector('form[data-qu-action="cms-page-form"]');
+  const bobPageForm = bobMount.querySelector('form[data-qu-action="cms-content-form"]');
   bobPageForm.querySelector('[name="route"]').value = '/';
   bobPageForm.querySelector('[name="title"]').value = "Bob's Seite";
   bobPageForm.querySelector('[name="content"]').value = '<p>Hallo von Bob</p>';
@@ -164,6 +164,6 @@ test('a relay-admin registers "cms" as a multiuser global app; two independent v
   const { router: carolRouter } = startPlatform({ space: carolSpace, mountEl: carolMount, window: carolWindow, resolveTimeout: 500 });
 
   await waitUntil(() => carolMount.textContent.includes('Qu App Shell'), { timeout: 4000 });
-  assert.ok(!carolMount.querySelector('[data-qu-bind="cms-page-list"]'), '"cms" in mode:"off" must be unreachable - the landing page, not the app, must render');
+  assert.ok(!carolMount.querySelector('[data-qu-bind="cms-content-list"]'), '"cms" in mode:"off" must be unreachable - the landing page, not the app, must render');
   carolRouter.stop();
 });

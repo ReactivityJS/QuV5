@@ -56,18 +56,26 @@ export class AppRuntime {
    * matching Page (`null` = no such route - the caller's cue to render a
    * "not found" fallback, docs §16's "Framework Default"), that Page's own
    * `template` (falling back to the Manifest's `rootTemplate` if the Page
-   * didn't declare one), and the Manifest's `theme` stylesheet.
+   * didn't declare one), and a stylesheet - the Page's OWN `style`
+   * (`kinds.js`'s `pageKind` own doc comment) if it declared one, else the
+   * Manifest's single, app-wide `theme` (unchanged, pre-existing fallback -
+   * a page never declaring its own style keeps behaving exactly as before
+   * this field existed). Either way `css` is auto-loaded into the render
+   * plan here, same as always - a page/template author never references it
+   * from markup or JS, they only ever pick a style NAME in the CMS editor.
    * @param {string} route
    * @returns {Promise<{manifest: object|null, page: object|null, templateHtml: string|null, css: string}>}
    */
   async resolveRoute(route, options) {
-    // Independent reads (neither depends on the other's RESULT, only `templateName` below depends
-    // on both) - run concurrently instead of back-to-back, each its own subscribe+wait round trip.
+    // Independent reads (neither depends on the other's RESULT, only `templateName`/`styleName`
+    // below depend on both) - run concurrently instead of back-to-back, each its own subscribe+wait
+    // round trip.
     const [manifest, page] = await Promise.all([this._resolver.resolveManifest(options), this._resolver.resolvePage(route, options)]);
     const templateName = page?.template ?? manifest?.rootTemplate ?? null;
+    const styleName = page?.style ?? manifest?.theme ?? null;
     const [templateHtml, css] = await Promise.all([
       templateName ? this._resolver.resolveTemplate(templateName, options) : null,
-      manifest?.theme ? this._resolver.resolveStyle(manifest.theme, options) : '',
+      styleName ? this._resolver.resolveStyle(styleName, options) : '',
     ]);
     return { manifest, page, templateHtml, css };
   }
