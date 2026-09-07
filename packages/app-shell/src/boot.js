@@ -288,6 +288,11 @@ async function ensureSelfProvisioned(space, ownerPub) {
  *     `registerApp()` own doc comment) says WHICH reference app's own
  *     personal-instance installer to self-provision instead of the generic
  *     CMS starter - `installed-apps-actions.js`'s `provisionPersonalInstance()`.
+ *     `config` (this app's own `qu-platform-apps` `config`, `match.config`
+ *     straight off `PlatformRuntime.resolveForPath()` - kinds.js's own doc
+ *     comment) is threaded down to that SAME installer, so a visitor's
+ *     personal instance follows whatever install-time option (Blog's own
+ *     `routeScheme`) the relay-admin picked for the global one.
  *
  * SELF-PROVISIONING, `ref === "me"` ONLY: a brand-new visitor's own
  * identity has no content at this route yet the very first time they reach
@@ -300,7 +305,7 @@ async function ensureSelfProvisioned(space, ownerPub) {
  * name) - reading stays side-effect-free regardless of what's actually
  * there.
  */
-async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ref, userSubPath, routeNamespace = '', personalBundle }) {
+async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ref, userSubPath, routeNamespace = '', personalBundle, config }) {
   const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
   const ownerPub = resolveUserRef(ref, space);
   if (!ownerPub) {
@@ -309,7 +314,7 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   }
   let updateAvailable = false;
   if (ref === 'me') {
-    if (routeNamespace) ({ updateAvailable } = await provisionPersonalInstance({ space, prefix: routeNamespace.slice(1), personalBundle }));
+    if (routeNamespace) ({ updateAvailable } = await provisionPersonalInstance({ space, prefix: routeNamespace.slice(1), personalBundle, config }));
     else await ensureSelfProvisioned(space, ownerPub);
   }
   const runtime = new AppRuntime(space, { appAdminPub: ownerPub });
@@ -333,7 +338,7 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   // Only ever for `ref === 'me'` (`updateAvailable` stays `false` otherwise) - `installed-apps-
   // actions.js`'s own `wirePersonalUpdateBanner()` doc comment on why an update button on someone
   // ELSE's own personal instance would be actively wrong, not just pointless.
-  if (updateAvailable) wirePersonalUpdateBanner({ mountEl, doc: window.document, space, prefix: routeNamespace.slice(1), personalBundle });
+  if (updateAvailable) wirePersonalUpdateBanner({ mountEl, doc: window.document, space, prefix: routeNamespace.slice(1), personalBundle, config });
 }
 
 /**
@@ -596,6 +601,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
             ...userRoute,
             routeNamespace: `/${match.prefix}`,
             personalBundle: match.personalBundle,
+            config: match.config,
           });
           return;
         }

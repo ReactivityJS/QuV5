@@ -334,23 +334,34 @@ identical to §1's Guestbook):
    itself ordinary, freely editable content. Go to the **"Seiten"** section
    of the SAME editor, load that page (its route matches what you typed in
    step 3), and edit its `content` to wrap the existing
-   `<div data-qu-view="...">` in whatever markup is wanted, e.g.:
+   `<div data-qu-view="...">` in a GENERIC, fully declarative write form -
+   `generic-write-actions.js`'s own `data-qu-action="qu-write"` convention,
+   wired unconditionally alongside every other reference app
+   (`installed-apps-actions.js`'s `wireInstalledApps()`), so it needs no
+   registration step of its own:
    ```html
    <h1>Notizbrett</h1>
    <div data-qu-view="notesboard-feed"></div>
-   <form data-qu-action="???"> ... </form>
+   <form data-qu-action="qu-write" data-qu-target="shared-list" data-qu-list="notesboard-entries">
+     <input name="name" placeholder="Name">
+     <input name="message" placeholder="Nachricht">
+     <button type="submit">Eintragen</button>
+     <p data-qu-status></p>
+   </form>
    ```
-   The View itself never needs to change for this - only the page around it.
-   **The one real gap today**: there is no GENERIC, attribute-driven form
-   convention yet for "push an entry into an arbitrary named shared list"
-   the way `guestbook-actions.js`'s own `data-qu-action="guestbook-form"`
-   is specific to Guestbook's own wiring - writing to a shared list from a
-   page built this way currently still needs SOME framework-provided
-   wiring for that exact `data-qu-action` name to exist (a real, open
-   generalization, not yet built - `guestbook-actions.js`'s own wiring is
-   ALREADY almost this generic, reading the list name off `data-qu-list`
-   rather than hardcoding it; only the ACTION NAME itself is still
-   Guestbook-specific).
+   Every NAMED field (`name`/`message` here) becomes one key of the pushed
+   entry, plus an automatic `ts: Date.now()` - the SAME `{name, message,
+   ts}` shape the `'shared-list'` View source adapter already expects
+   (`view-sources.js`'s own doc comment), so the feed above picks up a
+   submission immediately, live, no reload. The View itself never needs to
+   change for this - only the page around it. `data-qu-target="page"`
+   (`data-qu-route="/post/{yyyy}/{mm}/{dd}/{slug}"`, say) is the SAME
+   convention's other shape - publishing a brand-new PAGE instead of a
+   shared-list entry, `data-qu-scope="global"` + `data-qu-prefix="..."` for
+   a relay-admin-only write, self-owned by default - see
+   `generic-write-actions.js`'s own top doc comment for the full attribute
+   reference, and the "Date-based archive routing" section below for why a
+   route template like that one is worth building at all.
 
 This is genuinely how far you can get with ZERO files today for an app
 that fits "Template + `qu-list`/`qu-bind`/`qu-view` data source" - see
@@ -412,6 +423,74 @@ is the only place both are available without a separate slug→owner lookup
 registry (a real, buildable primitive, just not one that exists today, and
 arguably not worth building only to shave one path segment off a URL that
 already reads perfectly clearly with it).
+
+## Date-based archive routing for Blog: `routeScheme`
+
+A QuV3 requirement raised again here: a blog post's own route segmented by
+date (`yyyy/mm/dd`, or just `yyyy/mm`, or `yyyy`) so a year/month/day
+ARCHIVE view is possible at all. The short answer for the Yjs-based V5
+storage layer: **yes, still worth having, and it costs no new resolver
+code** - `view-sources.js`'s `'pages'` View source already filters by a
+plain STRING PREFIX on the route (`§2`'s own `prefix: '/blog/'` for the
+whole-blog index); once a post's own route is itself hierarchical
+(`/post/2026/09/07/erster-post` rather than the flat `/post/erster-post`
+default), that SAME `prefix` param already gives a year (`/post/2026/`), a
+month (`/post/2026/09/`), or a day (`/post/2026/09/07/`) archive for free -
+one MORE `viewKind` per granularity wanted, nothing else.
+
+Blog's own admin-console install form (`admin-console-bundle.js`) offers a
+**"Datums-Schema für Beiträge"** `<select>` - `flat` (the pre-existing,
+unprefixed default), `yyyy`, `yyyy/mm`, or `yyyy/mm/dd`
+(`qu-placeholders.js`'s own `ROUTE_SCHEMES` map). The choice is persisted
+into the app's own `qu-platform-apps` `config` (`kinds.js`'s own doc
+comment, `dev.js`'s `setAppConfig()`) so a LATER "Update verfügbar" click,
+or a visitor's own personal-blog self-provisioning, picks the SAME scheme
+back up automatically. Concretely, choosing `yyyy/mm/dd` bakes a
+`data-qu-route-template="/post/{yyyy}/{mm}/{dd}/{slug}"` attribute onto the
+Blog's own post form (`blog-bundle.js`); `blog-actions.js`'s `wireBlog()`
+resolves it at SUBMIT time via `qu-placeholders.js`'s `resolvePlaceholders()`
+- `{yyyy}`/`{mm}`/`{dd}` from TODAY's date, `{slug}` from the form's own
+field - so a post published today always lands under today's own archive
+segment, permanently (never recomputed later; the route is fixed the
+moment the page is created, same as any other content-addressed Node).
+
+Building an actual archive View is then just ANOTHER `createGlobalView()`
+call (or the SAME "Views/Seiten (CMS)" editor §5 describes), narrower than
+Blog's own unfiltered index:
+
+```js
+import { createGlobalView } from '@qu/app-core';
+
+await createGlobalView(space, 'blog', {
+  name: 'blog-2026-09',
+  sources: [{ type: 'pages', prefix: '/post/2026/09/' }],
+  sortBy: 'title',
+  sortOrder: 'asc',
+  route: '/2026/09',
+  itemTemplate: '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a></p>',
+});
+```
+
+**Not attempted here**: a SINGLE archive View that reads the currently
+VISITED month straight off the URL (`#/blog/2026/09` rendering that
+month's own posts without a separate View per month) - today's Views are
+static, pre-configured records (`view-sources.js`'s own top doc comment:
+"`config` is read ONCE... editing a View's `sources`... only takes effect
+the NEXT time"), so this would need the router itself to extract date
+segments and pass them into View resolution as a dynamic parameter, the
+same class of extension `boot.js`'s own personal-instance `{ref}` capture
+already does for identity - real, separate, buildable future work, not
+needed for the "one archive View per month a relay-admin explicitly wants"
+case above.
+
+**Beyond dates**: `qu-placeholders.js`'s `AMBIENT_PLACEHOLDERS` is a small,
+explicitly extensible map (currently `{yyyy}`/`{mm}`/`{dd}`/`{pub}`) - a
+future `{alias}` (once a human-readable alias registry exists), or any
+other ambient value a route/list-name template might want, is a ONE-LINE
+addition there, usable immediately from every declaratively-configured
+template in the app shell (a `routeScheme`, a `data-qu-route`/`data-qu-list`
+on a generic write form, §5's own `notesboard-entries` example) with no
+change anywhere else.
 
 ## Where the four examples actually differ
 

@@ -124,11 +124,19 @@ function mountAdmin(space) {
   return { window, mountEl, router, platform };
 }
 
-/** Fills and submits one of the admin console's "Beispiel-App installieren" forms for `appType`, waiting for its own confirmation status. */
-async function installViaForm(mountEl, appType, prefix) {
+/**
+ * Fills and submits one of the admin console's "Beispiel-App installieren"
+ * forms for `appType`, waiting for its own confirmation status. `fields`
+ * (optional) sets any OTHER named field on the SAME form beyond `prefix`
+ * (e.g. Blog's own `routeScheme` `<select>`) - `admin-actions.js`'s own
+ * generic submit handler picks up every named field regardless, so this
+ * helper stays a thin, generic wrapper rather than growing a per-app param.
+ */
+async function installViaForm(mountEl, appType, prefix, fields = {}) {
   await waitUntil(() => mountEl.querySelector(`form[data-qu-action="install-app"][data-app-type="${appType}"]`));
   const form = mountEl.querySelector(`form[data-qu-action="install-app"][data-app-type="${appType}"]`);
   form.querySelector('input[name="prefix"]').value = prefix;
+  for (const [name, value] of Object.entries(fields)) form.querySelector(`[name="${name}"]`).value = value;
   form.dispatchEvent(new mountEl.ownerDocument.defaultView.Event('submit', { bubbles: true, cancelable: true }));
   await waitUntil(() => /installiert/.test(form.querySelector('[data-qu-status]')?.textContent ?? ''), { timeout: 6000 });
 }
@@ -419,6 +427,92 @@ test('Blog: the personal-instance route also works WITHOUT the "/u/" marker - a 
     // exact SAME self-owned content the "/u/<pub>/" long form does.
     router.navigate(`/blog/${authorPub}/post/kurzform-post`);
     await waitUntil(() => mountEl.textContent.includes('Erreichbar auch ohne "/u/".'), { timeout: 8000 });
+
+    router.stop();
+  } finally {
+    await relay.close();
+  }
+});
+
+test('Blog: routeScheme:"yyyy/mm/dd" segments a post\'s own route by TODAY\'S date, and an archive View\'s existing "pages" prefix filter picks it up for free', async () => {
+  const relay = await bootRelay();
+  try {
+    const adminSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl: adminMountEl, router: adminRouter } = mountAdmin(adminSpace);
+    // The "Datums-Schema für Beiträge" `<select>` (`admin-console-bundle.js`'s own Blog form) -
+    // `installViaForm()`'s own doc comment on why any named field beyond `prefix` just works here.
+    await installViaForm(adminMountEl, 'blog', 'blog', { routeScheme: 'yyyy/mm/dd' });
+    adminRouter.stop();
+
+    const authorSpace = await relay.connect(relay.relayAdmin);
+    const { window, mountEl, router } = mountAdmin(authorSpace);
+    router.navigate('/blog/');
+    await waitUntil(() => mountEl.querySelector('form[data-qu-action="blog-post-form"]'));
+    const form = mountEl.querySelector('form[data-qu-action="blog-post-form"]');
+    form.querySelector('[name="title"]').value = 'Datierter Beitrag';
+    form.querySelector('[name="slug"]').value = 'datierter-beitrag';
+    form.querySelector('[name="content"]').value = '<p>Dieser Post traegt sein eigenes Datum im Pfad.</p>';
+    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await waitUntil(() => /bestätigt/.test(form.querySelector('[data-qu-status]')?.textContent ?? ''), { timeout: 6000 });
+
+    const now = new Date();
+    const yyyy = String(now.getFullYear());
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const postRoute = `/post/${yyyy}/${mm}/${dd}/datierter-beitrag`;
+
+    // The index View (unfiltered "pages" source, `prefix: '/post/'`) already picked this up
+    // regardless of routeScheme - what THIS test actually proves is the route itself carries the
+    // date segments, so a NARROWER "pages" prefix (a year/month/day archive - `qu-placeholders.js`'s
+    // own `ROUTE_SCHEMES` doc comment) can filter down to them with zero new resolver code.
+    await waitUntil(() => mountEl.querySelector('[data-qu-view] a[data-qu-view-link]'));
+    const link = mountEl.querySelector('[data-qu-view] a[data-qu-view-link]');
+    assert.equal(link.getAttribute('href'), `#${postRoute}`, 'the published post\'s own route is segmented by TODAY\'S date, not the flat /post/<slug> default');
+
+    // PREFIXED with the app's own "blog" - see the earlier "Blog: a relay-admin publishes..." test's
+    // own comment on why: `PlatformRuntime` treats the FIRST path segment as the registered app
+    // prefix, so navigating to the bare `postRoute` would be interpreted as prefix "post", not
+    // routed within "blog" at all.
+    router.navigate(`/blog${postRoute}`);
+    await waitUntil(() => mountEl.textContent.includes('Dieser Post traegt sein eigenes Datum im Pfad.'), { timeout: 8000 });
+
+    // Two archive Views, built with nothing but `view-sources.js`'s EXISTING "pages" prefix filter -
+    // one narrowed to THIS month (finds the post), one narrowed to a DIFFERENT, clearly-distinct
+    // month (finds nothing) - the "free year/month/day archive" claim `routeScheme` exists for,
+    // read back directly through the Dev/resolver layer (the SAME `openLiveView()` any rendered
+    // `[data-qu-view]` ultimately calls - `view-actions.test.js` already covers the DOM-rendering
+    // half of that, no need to re-prove it here).
+    const { createGlobalView, openLiveView, globalAppAnchor, adminRouteRegistryKind, ContentResolver, adminViewKind } = await import('@qu/app-core');
+    const anchor = await globalAppAnchor('blog');
+    await createGlobalView(authorSpace, 'blog', {
+      name: 'blog-this-month',
+      sources: [{ type: 'pages', prefix: `/post/${yyyy}/${mm}/` }],
+      sortBy: 'title',
+      itemTemplate: '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a></p>',
+    });
+    const otherMonth = mm === '01' ? '06' : '01';
+    await createGlobalView(authorSpace, 'blog', {
+      name: 'blog-other-month',
+      sources: [{ type: 'pages', prefix: `/post/${yyyy}/${otherMonth}/` }],
+      sortBy: 'title',
+      itemTemplate: '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a></p>',
+    });
+
+    const resolver = new ContentResolver(authorSpace, { appAdminPub: anchor, kinds: { viewKind: adminViewKind } });
+    const kinds = { routeRegistryKind: adminRouteRegistryKind };
+    const thisMonthConfig = await resolver.resolveView('blog-this-month', { ownerPub: anchor, timeout: 3000 });
+    const thisMonthView = await openLiveView(authorSpace, { appAdminPub: anchor, kinds, ...thisMonthConfig });
+    const otherMonthConfig = await resolver.resolveView('blog-other-month', { ownerPub: anchor, timeout: 3000 });
+    const otherMonthView = await openLiveView(authorSpace, { appAdminPub: anchor, kinds, ...otherMonthConfig });
+    try {
+      const thisMonthItems = await thisMonthView.toArray();
+      assert.ok(thisMonthItems.some((item) => item.title === 'Datierter Beitrag'), 'a "pages" View filtered to THIS month\'s own prefix finds the post');
+      const otherMonthItems = await otherMonthView.toArray();
+      assert.equal(otherMonthItems.length, 0, 'the SAME post is invisible to a "pages" View filtered to a different month\'s prefix');
+    } finally {
+      thisMonthView.close();
+      otherMonthView.close();
+    }
 
     router.stop();
   } finally {

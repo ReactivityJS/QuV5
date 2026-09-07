@@ -61,7 +61,7 @@
  * gate keeps `#/admin/...` from rendering for them at all.
  */
 import { QuCrypto } from '@qu/core';
-import { registerApp, setAppMode, setAppBundleVersion, addSharedLists, unregisterApp, nullGlobalAppContent, publishGlobalRoute, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
+import { registerApp, setAppMode, setAppBundleVersion, setAppConfig, addSharedLists, unregisterApp, nullGlobalAppContent, publishGlobalRoute, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
 import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
@@ -304,7 +304,11 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
           updateBtn.addEventListener('click', async () => {
             status.textContent = '';
             try {
-              await installer.update(mainSpace, { prefix: app.prefix });
+              // `...(app.config ?? {})` - whatever install-time OPTIONS this prefix was last
+              // configured with (Blog's own `routeScheme`, kinds.js's `platformAppsKind` `config`
+              // doc comment) - re-applying an update must never silently drop back to that
+              // installer's own DEFAULTS just because this button doesn't otherwise know them.
+              await installer.update(mainSpace, { prefix: app.prefix, ...(app.config ?? {}) });
               await setAppBundleVersion(mainSpace, { prefix: app.prefix, bundleVersion: installer.version });
               await renderList();
             } catch (err) {
@@ -402,6 +406,16 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
       status.textContent = '';
       try {
         const prefix = form.querySelector('input[name="prefix"]').value.trim();
+        // Every OTHER named field on this form (Blog's own `routeScheme` `<select>`,
+        // `admin-console-bundle.js`'s own doc comment) - passed straight through to
+        // `installer.install()` as an extra option AND persisted into this prefix's own `config`
+        // (`setAppConfig()`, below) so a LATER "Update verfügbar" click or personal-instance
+        // provisioning call can read the SAME choice back without this form needing to remember it.
+        const options = {};
+        for (const el of form.elements) {
+          if (!el.name || el.name === 'prefix' || el.type === 'submit' || el.type === 'button') continue;
+          options[el.name] = el.value;
+        }
         // REGISTER FIRST, THEN INSTALL - never the other way round: the relay only classifies THIS
         // app's own `adminPage`/`adminView`/shared-list writes correctly (`'relay-admins'`/`'members'`
         // -ACL) once its live resolver has observed this `qu-platform-apps` entry
@@ -424,7 +438,8 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
           })
         );
         await new Promise((resolve) => setTimeout(resolve, 400)); // let the relay's live resolver start watching this app's own route registry/shared lists/View names.
-        await installer.install(mainSpace, { prefix });
+        await installer.install(mainSpace, { prefix, ...options });
+        if (Object.keys(options).length) await setAppConfig(mainSpace, { prefix, config: options });
         status.textContent = `${installer.label} installiert - erreichbar unter #/${prefix}/.`;
         form.reset();
         await renderList();

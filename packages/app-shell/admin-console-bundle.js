@@ -26,6 +26,12 @@
  * prefix AND register it in one click - `admin-actions.js`'s
  * `wireAdminConsole()` doc comment has the full story on why this installs
  * into the relay-admin's OWN main Space (never a bespoke per-app identity).
+ * Any NAMED field beyond `prefix` (Blog's own `routeScheme` `<select>`
+ * below) is passed straight through to that installer's own `installX()`
+ * AND persisted into the app's `qu-platform-apps` `config` (`dev.js`'s
+ * `setAppConfig()`) - a new reference app wanting one more install-time
+ * option only ever needs to add the input here, `admin-actions.js`'s own
+ * generic submit handler needs no per-field change.
  *
  * `<div data-qu-bind="file-app-installers">` is the SAME convention's
  * DYNAMIC counterpart - `admin-actions.js`'s `wireAdminConsole()` fills it
@@ -60,6 +66,14 @@ export const adminConsoleBundle = {
 </form>
 <form data-qu-action="install-app" data-app-type="blog">
   <label>Pfad-Präfix (z.B. "blog"): <input name="prefix" required pattern="[a-z0-9\-]+"></label>
+  <label>Datums-Schema für Beiträge:
+    <select name="routeScheme">
+      <option value="flat">Kein Datum (/post/titel)</option>
+      <option value="yyyy">Jahr (/post/2026/titel)</option>
+      <option value="yyyy/mm">Jahr/Monat (/post/2026/09/titel)</option>
+      <option value="yyyy/mm/dd">Jahr/Monat/Tag (/post/2026/09/07/titel)</option>
+    </select>
+  </label>
   <button type="submit">Blog installieren</button>
   <p data-qu-status></p>
 </form>

@@ -26,10 +26,17 @@
  * `wireX()` functions already promise, just discovered instead of
  * hardcoded, so a file-based app's OWN interactivity needs no change here
  * ever again either.
+ *
+ * ALSO calls `generic-write-actions.js`'s `wireGenericWrite()` - unlike
+ * every other wiring here, that one is not "one more app," it is the fully
+ * DECLARATIVE, attribute-driven write path any hand-authored (or purely
+ * CMS-built) page can opt into with no app-specific JS at all - see that
+ * file's own top doc comment.
  */
 import { wireGuestbook } from './guestbook-actions.js';
 import { wireBlog } from './blog-actions.js';
 import { wireForum } from './forum-actions.js';
+import { wireGenericWrite } from './generic-write-actions.js';
 import { installPersonalGuestbook, updatePersonalGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
 import { installPersonalBlog, updatePersonalBlog, BLOG_VERSION } from '../blog-bundle.js';
 import { ContentResolver } from '@qu/app-core';
@@ -37,6 +44,7 @@ import { discoveredApps } from '../apps-registry.generated.js';
 
 /** @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space}} params */
 export async function wireInstalledApps({ mountEl, doc, space }) {
+  wireGenericWrite({ mountEl, doc, space });
   await Promise.all([
     wireGuestbook({ mountEl, doc, space }),
     wireBlog({ mountEl, doc, space }),
@@ -106,16 +114,22 @@ const PERSONAL_VERSIONS = {
  * button. Never updates automatically - a silent, unattended overwrite of a
  * visitor's own page on every ordinary visit is not "an update," it's a
  * surprise; this only ever offers the button, the visitor decides when.
- * @param {{space: import('@qu/space-core').Space, prefix: string, personalBundle?: string}} params
+ * `config` (optional) - this app's OWN `qu-platform-apps` `config`
+ * (`kinds.js`'s own doc comment, `boot.js`'s `match.config`) - passed
+ * straight through to the reference app's `installX()` as extra options
+ * (Blog's own `routeScheme`), so a visitor's personal instance follows the
+ * SAME convention the relay-admin picked for the global one, without this
+ * function needing to know what any particular option even means.
+ * @param {{space: import('@qu/space-core').Space, prefix: string, personalBundle?: string, config?: Record<string, unknown>}} params
  * @returns {Promise<{updateAvailable: boolean}>}
  */
-export async function provisionPersonalInstance({ space, prefix, personalBundle }) {
+export async function provisionPersonalInstance({ space, prefix, personalBundle, config }) {
   const install = PERSONAL_INSTALLERS[personalBundle];
   if (!install) return { updateAvailable: false };
   const resolver = new ContentResolver(space, { appAdminPub: space.identity.signingPub });
   const page = await resolver.resolvePage(`/${prefix}/`, { timeout: 1500 });
   if (!page) {
-    await install(space, { prefix });
+    await install(space, { prefix, ...config });
     return { updateAvailable: false };
   }
   const currentVersion = PERSONAL_VERSIONS[personalBundle];
@@ -137,9 +151,11 @@ export async function provisionPersonalInstance({ space, prefix, personalBundle 
  * content-authored markup" posture every other framework-provided
  * interactivity in this package already uses (`view-actions.js`'s own
  * `renderItem()` doc comment has the fullest version of this reasoning).
- * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, prefix: string, personalBundle: string}} params
+ * `config` (optional) - see `provisionPersonalInstance()`'s own doc comment
+ * on the identical param, threaded through to `update()` the same way.
+ * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, prefix: string, personalBundle: string, config?: Record<string, unknown>}} params
  */
-export function wirePersonalUpdateBanner({ mountEl, doc, space, prefix, personalBundle }) {
+export function wirePersonalUpdateBanner({ mountEl, doc, space, prefix, personalBundle, config }) {
   const update = PERSONAL_UPDATERS[personalBundle];
   if (!update || mountEl.querySelector('[data-qu-personal-update]')) return;
   const banner = doc.createElement('div');
@@ -153,7 +169,7 @@ export function wirePersonalUpdateBanner({ mountEl, doc, space, prefix, personal
     button.disabled = true;
     status.textContent = '';
     try {
-      await update(space, { prefix });
+      await update(space, { prefix, ...config });
       banner.remove();
     } catch (err) {
       status.textContent = ` Fehler: ${err.message}`;

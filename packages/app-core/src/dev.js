@@ -866,6 +866,26 @@ export async function addGlobalViewNames(space, { prefix, globalViewNames }) {
 }
 
 /**
+ * MERGES fields into an ALREADY-registered `realm: 'global'` app's own free-
+ * form `config` bag (kinds.js's own `platformAppsKind` doc comment on why
+ * this exists at all, and its `blog-bundle.js` `routeScheme` example) - same
+ * "push a newer entry, everything else carried over" pattern as `setAppMode()`/
+ * `setAppBundleVersion()`/`addSharedLists()`, just merging ONE KEY DEEPER
+ * (`{...current.config, ...config}`, not the whole entry) so setting one
+ * config key never clobbers another a DIFFERENT call already set.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{prefix: string, config: Record<string, unknown>}} params
+ */
+export async function setAppConfig(space, { prefix, config }) {
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
+  const apps = (await node.field('apps').toArray()).filter(Boolean);
+  const current = [...apps].reverse().find((a) => a.prefix === prefix);
+  if (!current) throw new Error(`setAppConfig: "${prefix}" is not a registered app - registerApp() it first.`);
+  await node.field('apps').push({ ...current, config: { ...(current.config ?? {}), ...config } });
+  return node;
+}
+
+/**
  * Retracts `prefix`'s own registration - kinds.js's own `platformAppsKind`
  * doc comment on the `removed` marker in full: pushes one more entry for
  * this prefix with `removed: true`, which `platform.js`'s `resolveApps()`

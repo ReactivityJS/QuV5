@@ -26,9 +26,22 @@
  * `/<prefix>/post/<slug>` instead of the global blog's bare `/post/<slug>`
  * - see `installPersonalBlog()`'s own doc comment for the full "why
  * prefixed" reasoning.
+ *
+ * `data-qu-route-template` (baked in by `blog-bundle.js`'s own
+ * `installBlog()`/`installPersonalBlog()`, e.g. `"/post/{yyyy}/{mm}/{dd}/
+ * {slug}"` for a date-segmented `routeScheme`) is resolved via
+ * `qu-placeholders.js`'s `resolvePlaceholders()` at SUBMIT time - `{slug}`
+ * comes from the form's own field, `{yyyy}`/`{mm}`/`{dd}` from TODAY's date
+ * (`AMBIENT_PLACEHOLDERS`), so a post published on a given day always lands
+ * under that day's own archive segment regardless of when it's later read.
+ * Falls back to the pre-existing flat `/post/{slug}` (or `/<prefix>/post/
+ * {slug}` for a personal one) when the attribute is absent - an
+ * already-published Blog instance from before `routeScheme` existed keeps
+ * behaving exactly as it always did.
  */
 import { createGlobalPage, publishGlobalRoute, adminPageKind, globalAppAnchor, createPage, publishRoute, pageKind, deriveContentNodeId } from '@qu/app-core';
 import { verifyWritesAcked } from './verify-writes.js';
+import { resolvePlaceholders } from './qu-placeholders.js';
 
 /** @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space}} params */
 export function wireBlog({ mountEl, doc, space }) {
@@ -36,6 +49,7 @@ export function wireBlog({ mountEl, doc, space }) {
   if (!form) return;
   const prefix = form.getAttribute('data-qu-prefix');
   const isPersonal = form.getAttribute('data-qu-mode') === 'personal';
+  const routeTemplate = form.getAttribute('data-qu-route-template') || (isPersonal ? `/${prefix}/post/{slug}` : '/post/{slug}');
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -46,15 +60,14 @@ export function wireBlog({ mountEl, doc, space }) {
       const title = form.querySelector('[name="title"]').value.trim();
       const slug = form.querySelector('[name="slug"]').value.trim();
       const content = form.querySelector('[name="content"]').value;
+      const route = resolvePlaceholders(routeTemplate, { space, fields: { slug } });
       if (isPersonal) {
-        const route = `/${prefix}/post/${slug}`;
         const id = await deriveContentNodeId(space.identity.signingPub, pageKind.kind, route);
         await verifyWritesAcked(space, id, async () => {
           await createPage(space, { route, title, content });
           await publishRoute(space, { route, title });
         });
       } else {
-        const route = `/post/${slug}`;
         const anchor = await globalAppAnchor(prefix);
         const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
         await verifyWritesAcked(space, id, async () => {
