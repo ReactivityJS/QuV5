@@ -692,11 +692,11 @@ export async function installAppBundle(space, bundle) {
  *   see kinds.js's own "GLOBAL APP CONTENT" doc comment; `prefix` itself IS
  *   the identifier `createGlobalApp()`/etc. anchor their ids on). `mode`
  *   (`realm: 'global'` only, defaults to `'global'` if omitted) - see
- *   kinds.js's own doc comment on the three states; use `setAppMode()`
+ *   kinds.js's own doc comment on the four states; use `setAppMode()`
  *   to change it later for an app already registered.
  */
 /**
- * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'global', mode?: string, sharedLists?: string[], globalViewNames?: string[]}} params
+ * @param {{prefix: string, appAdminPub?: Uint8Array, name: string, realm?: 'main'|'global', mode?: string, sharedLists?: string[], globalViewNames?: string[], personalBundle?: string}} params
  *   `sharedLists` (optional) - every `sharedListKind` NAME (`kinds.js`'s
  *   own doc comment, `pushToSharedList()`) this app's own content uses
  *   (e.g. a Guestbook app registers `[prefix]`, a Forum app registers
@@ -721,8 +721,24 @@ export async function installAppBundle(space, bundle) {
  *   'list every View this owner has' registry yet") - so its name has to be
  *   told to the relay up front, right here, the one place it's already
  *   known (the installer choosing this app's own fixed set of View names).
+ *
+ *   `personalBundle` (optional, `realm: 'global'` only) - a free-form tag
+ *   (e.g. `'guestbook'`/`'blog'`) naming WHICH reference app this prefix
+ *   is, so `@qu/app-shell`'s `boot.js`/`installed-apps-actions.js` know
+ *   which content to self-provision the FIRST time a visitor reaches their
+ *   own `#/<prefix>/u/me/` - see `boot.js`'s own doc comment on this
+ *   ADDITIVE personal route (never replaces what the bare prefix means,
+ *   unlike `mode: 'multiuser'`, which is a different, older mechanism for
+ *   a related but distinct need). Omit for a global app with no personal-
+ *   instance story at all (the built-in admin console, or any custom app) -
+ *   `#/<prefix>/u/me/` then simply resolves nothing, same as today.
+ *
+ *   `appType`/`bundleVersion` (optional, `realm: 'global'` only) - see
+ *   kinds.js's own `platformAppsKind` doc comment on both; `setAppBundleVersion()`
+ *   right below updates `bundleVersion` alone for an already-registered prefix,
+ *   the same "push a newer entry, same prefix" pattern `setAppMode()` uses.
  */
-export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode, sharedLists, globalViewNames }) {
+export async function registerApp(space, { prefix, appAdminPub, name, realm = 'main', mode, sharedLists, globalViewNames, personalBundle, appType, bundleVersion }) {
   // getOrSyncRegistryNode(), not a blind `space.getNode(id) ?? createNode()` - the SAME "never
   // re-createNode() over a Node that already exists, just torn down locally between two calls"
   // reasoning that function's own doc comment already documents for an app's per-owner registries -
@@ -739,13 +755,16 @@ export async function registerApp(space, { prefix, appAdminPub, name, realm = 'm
   if (realm === 'global' && mode) entry.mode = mode;
   if (sharedLists?.length) entry.sharedLists = sharedLists;
   if (realm === 'global' && globalViewNames?.length) entry.globalViewNames = globalViewNames;
+  if (realm === 'global' && personalBundle) entry.personalBundle = personalBundle;
+  if (realm === 'global' && appType) entry.appType = appType;
+  if (realm === 'global' && bundleVersion !== undefined) entry.bundleVersion = bundleVersion;
   await node.field('apps').push(entry);
   return node;
 }
 
 /**
  * Changes an ALREADY-REGISTERED `realm: 'global'` app's `mode` (kinds.js's
- * own doc comment on the three administrable states: `'off'`/`'global'`/
+ * own doc comment on the four administrable states: `'off'`/`'global'`/
  * `'multiuser'`) - reads the CURRENT entry for `prefix` (the last one in
  * the log - `platform.js`'s `resolveApps()` own "last write wins"
  * dedup) and re-pushes it with only `mode` changed, `name`/`appAdminPub`
@@ -765,6 +784,51 @@ export async function setAppMode(space, { prefix, mode }) {
     throw new Error(`setAppMode: "${prefix}" is realm "${current.realm ?? 'main'}" - mode only applies to realm:'global' apps.`);
   }
   await node.field('apps').push({ ...current, mode });
+  return node;
+}
+
+/**
+ * Records that `prefix`'s own GLOBAL content was just brought up to
+ * `bundleVersion` (an admin console "Update" button's own follow-up call,
+ * after re-applying a reference app's bundle via its `update()` - see
+ * `admin-actions.js`'s own doc comment) - same "push a newer entry, same
+ * prefix, everything else carried over" pattern as `setAppMode()`, just a
+ * different field. Never applies the update itself - purely bookkeeping,
+ * so a relay-admin comparing `bundleVersion` against a reference app's own
+ * current `version` constant knows whether an update is still pending.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{prefix: string, bundleVersion: number}} params
+ */
+export async function setAppBundleVersion(space, { prefix, bundleVersion }) {
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
+  const apps = (await node.field('apps').toArray()).filter(Boolean);
+  const current = [...apps].reverse().find((a) => a.prefix === prefix);
+  if (!current) throw new Error(`setAppBundleVersion: "${prefix}" is not a registered app - registerApp() it first.`);
+  await node.field('apps').push({ ...current, bundleVersion });
+  return node;
+}
+
+/**
+ * Retracts `prefix`'s own registration - kinds.js's own `platformAppsKind`
+ * doc comment on the `removed` marker in full: pushes one more entry for
+ * this prefix with `removed: true`, which `platform.js`'s `resolveApps()`
+ * then filters out of EVERY listing, not merely `resolveForPath()`'s
+ * routing - indistinguishable from never having been registered. Never
+ * touches this app's own CONTENT (a SEPARATE, best-effort step - a relay-
+ * admin's own admin console calls `nullGlobalAppContent()`, right below,
+ * alongside this for a `realm: 'global'` app's GLOBAL instance specifically -
+ * a visitor's own personal instance, if any, is self-owned and untouched
+ * either way, by design: no uninstall can ever reach into someone else's
+ * own Node). Re-`registerApp()`ing the SAME prefix afterward is a normal,
+ * later entry - "last entry wins" picks it back up exactly as if `removed`
+ * had never happened, since it is itself just one more log entry, not a
+ * standing block.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{prefix: string}} params
+ */
+export async function unregisterApp(space, { prefix }) {
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
+  await node.field('apps').push({ prefix, removed: true });
   return node;
 }
 
@@ -897,6 +961,42 @@ export async function editGlobalPage(space, prefix, { route, title, template, co
   if (data !== undefined) await node.field('data').set(data);
   release();
   return node;
+}
+
+/**
+ * BEST-EFFORT content clearing for a `realm: 'global'` app's own GLOBAL
+ * instance, paired with `unregisterApp()` by the admin console's own
+ * "Deinstallieren" button (`admin-actions.js`'s own doc comment) - NOT a
+ * genuine deletion (this Space's CRDT storage has no such primitive at all,
+ * kinds.js's own doc comment on `ListField`), just overwriting every page
+ * this prefix ever published (`adminRouteRegistryKind`'s own `routes` list -
+ * the exact same registry `publishGlobalRoute()` writes and
+ * `live-app-resolver.js` watches) down to an empty title/content via
+ * `editGlobalPage()`. A relay-admin genuinely OWNS this content
+ * (`'relay-admins'`-ACL) - unlike a visitor's own personal instance, which
+ * this function never touches at all and never could: self-owned
+ * `'content'`-ACL Nodes accept writes only from their own owner (or an
+ * explicit `grantWriter()`), so "uninstalling" an app with a
+ * `personalBundle` can only ever retract the app's own registration and
+ * clear ITS global instance - every visitor's own personal Gästebuch/Blog
+ * page (if any) remains exactly as they left it, reachable again the
+ * moment the prefix is re-registered. A page whose `editGlobalPage()` call
+ * fails (never created, or genuinely gone) is skipped, not fatal - clearing
+ * the OTHER pages this app did publish still matters.
+ * @param {import('@qu/space-core').Space} space - a relay-admin's own Space.
+ * @param {string} prefix
+ */
+export async function nullGlobalAppContent(space, prefix) {
+  const anchor = await cachedGlobalAppAnchor(prefix);
+  const node = await getOrSyncRegistryNode(space, adminRouteRegistryKind, anchor);
+  const routes = (await node.field('routes').toArray()).filter(Boolean);
+  for (const { route } of routes) {
+    try {
+      await editGlobalPage(space, prefix, { route, title: '', content: '', timeout: 1500 });
+    } catch {
+      // Not fatal - see this function's own doc comment ("skipped, not fatal").
+    }
+  }
 }
 
 /**

@@ -229,9 +229,9 @@ export const platformAppsKind = publicMeta(
   defineKind('qu-platform-apps', {
     fields: {
       /**
-       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser', sharedLists?: string[], globalViewNames?: string[]}>`
-       * - see `dev.js`'s `registerApp()`/`setAppMode()`, `platform.js`'s
-       * `PlatformRuntime`. `realm: 'global'` entries (`appAdminPub: null`)
+       * `Array<{prefix: string, appAdminPub: string|null, name: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser'|'personal', sharedLists?: string[], globalViewNames?: string[], personalBundle?: string, appType?: string, bundleVersion?: number, removed?: true}>`
+       * - see `dev.js`'s `registerApp()`/`setAppMode()`/`setAppBundleVersion()`/
+       * `unregisterApp()`, `platform.js`'s `PlatformRuntime`. `realm: 'global'` entries (`appAdminPub: null`)
        * route into content ANY configured relay-admin collectively
        * administers (see this file's own "GLOBAL APP CONTENT" doc comment)
        * instead of an ordinary owner-pubkey-addressed app - the SAME
@@ -259,23 +259,82 @@ export const platformAppsKind = publicMeta(
        *     what every `realm: 'global'` app already did before `mode`
        *     existed.
        *   - `'multiuser'` - the global/shell content stays exactly as in
-       *     `'global'` mode, PLUS every visiting identity (relay-admins
-       *     included) may additionally maintain their OWN content under
-       *     this prefix, in their own `'content'`-ACL, self-owned
-       *     namespace (`#/<prefix>/<pubkey-or-"me">/...`, `boot.js`'s
+       *     `'global'` mode (just relocated to `#/admin/<prefix>/...`,
+       *     `boot.js`'s `parseAdminSubPath()`), and the BARE prefix ITSELF
+       *     flips to mean "my own space" - every visiting identity (relay-
+       *     admins included) gets their OWN, self-provisioned, self-owned
+       *     `'content'`-ACL namespace right there
+       *     (`#/<prefix>/<pubkey-or-"me">/...`, `boot.js`'s
        *     `startPlatform()`) - deliberately NOT a relay-enforced toggle:
        *     self-owned content is, by design, never gate-able (nobody
        *     needs anyone's permission to write their OWN Node) - `mode`
        *     here only decides which ROUTING shape this app's own visitors
        *     get, never who may write what (that was always, and remains,
-       *     entirely up to each Kind's own `acl.write`).
+       *     entirely up to each Kind's own `acl.write`). Meant for a whole
+       *     personal SITE per visitor (the built-in "cms" reference app),
+       *     not a feed - see `'personal'` right below for that shape.
+       *   - `'personal'` - the ADDITIVE `#/<prefix>/u/<ref>/...` route
+       *     (`boot.js`'s `renderMultiUserRoute()`, `routeNamespace:
+       *     '/'+prefix` - the SAME mechanism `'global'` mode already grants
+       *     any app declaring a `personalBundle`) stays exactly as in
+       *     `'global'` mode, but the BARE prefix no longer shows a single
+       *     relay-admin-authored page - instead it renders a read-only,
+       *     PUBLIC AGGREGATE FEED merged across every visitor's own
+       *     personal instance (`boot.js`'s `renderAggregateShell()`,
+       *     resolving the well-known `<prefix>-personal-feed` View by
+       *     naming convention - an app opts into this by creating that
+       *     View at install time, e.g. `guestbook-bundle.js`'s
+       *     `installGuestbook()` sourcing it from the shared list every
+       *     personal instance already writes into). For a Gästebuch/Blog-
+       *     style app where "one feed everyone contributes to" already IS
+       *     the point, this replaces needing a SEPARATE, redundantly
+       *     relay-admin-curated global instance at all - unlike
+       *     `'multiuser'` above, there is no per-visitor SITE here, only
+       *     ONE shared, aggregated read surface plus each visitor's own
+       *     write-side instance.
        *
-       * Updating `mode` for an ALREADY-registered prefix is a normal
-       * `apps.push()` of a new entry with the SAME `prefix` (this list has
-       * no removal/update primitive at all, "ONLY ADDITIVE" above) - every
-       * reader treats the LAST entry for a given `prefix` as current
-       * (`platform.js`'s own `resolveForPath()`), the same log-of-states
-       * pattern, just one field deep.
+       * `bundleVersion` (optional, `realm: 'global'` only) - the version of
+       * this app's own bundled GLOBAL content last applied via
+       * `installX()`/`updateX()` (`dev.js`'s `setAppBundleVersion()`) -
+       * compared against a reference app's own current `version` constant
+       * by the admin console to decide whether to show an "Update
+       * verfügbar" affordance. Unrelated to any PERSONAL instance's own
+       * version, which travels on that instance's own page `data` field
+       * instead (`installed-apps-actions.js`'s own doc comment) - the two
+       * are administered by different people (a relay-admin here, each
+       * visitor for their own instance there) and can genuinely drift
+       * apart. `appType` (optional) - which entry of `admin-actions.js`'s
+       * own `APP_INSTALLERS` this prefix was installed from (e.g.
+       * `'guestbook'`) - lets the admin console look up that installer's
+       * current `version`/`update()` for the button above; omitted for a
+       * manually `registerApp()`ed app with no known reference bundle (no
+       * Update affordance shown for those, correctly - there is nothing to
+       * compare against).
+       *
+       * `removed` (optional, `true` when present) - `unregisterApp()`'s own
+       * marker: this prefix's registration is retracted, exactly as
+       * thoroughly as if it had never been registered at all
+       * (`platform.js`'s `resolveApps()` filters these out entirely, not
+       * just `resolveForPath()` - unlike `mode: 'off'`, which still LISTS
+       * the app, just unreachable, `removed` hides it from every listing
+       * too). The one real removal primitive this ONLY-ADDITIVE list gets -
+       * not a genuine deletion (no entry is ever erased, "additive" stays
+       * true), but every reader treats a `removed` entry as the current,
+       * final word for that prefix, the same "last entry wins" convention
+       * `mode`/`bundleVersion` updates already use, just one more field
+       * shape. Never implies the app's own CONTENT is gone - see
+       * `dev.js`'s `nullGlobalAppContent()` for the (relay-admin-owned,
+       * `realm: 'global'` GLOBAL instance only - a visitor's own personal
+       * instance is self-owned and can never be reached by an uninstall)
+       * best-effort content-clearing this pairs with in the admin console.
+       *
+       * Updating `mode`/`bundleVersion`, or retracting a prefix via
+       * `removed`, is always a normal `apps.push()` of a new entry with the
+       * SAME `prefix` (this list has no in-place update/removal primitive
+       * at all, "ONLY ADDITIVE" above) - every reader treats the LAST entry
+       * for a given `prefix` as current (`platform.js`'s own
+       * `resolveForPath()`/`resolveApps()`), the same log-of-states
+       * pattern, just more fields deep now.
        */
       apps: { shape: 'list', visibility: 'public' },
     },

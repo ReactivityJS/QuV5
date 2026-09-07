@@ -99,7 +99,7 @@ export class PlatformRuntime {
    *   UPDATE, not a second, competing app - only the LAST one for a given
    *   `prefix` is current. `mode` is only ever meaningful for `realm:
    *   'global'` entries (`undefined` for `realm: 'main'` - see kinds.js's
-   *   own doc comment on the three states), defaulting to `'global'` when
+   *   own doc comment on the four states), defaulting to `'global'` when
    *   absent so every entry from before this field existed (the built-in
    *   admin console's own original registration included) keeps behaving
    *   exactly as before.
@@ -112,12 +112,18 @@ export class PlatformRuntime {
     release();
     const byPrefix = new Map();
     for (const a of apps.filter(Boolean)) byPrefix.set(a.prefix, a); // last write per prefix wins - see this method's own doc comment.
-    return [...byPrefix.values()].map((a) => ({
-      ...a,
-      appAdminPub: a.appAdminPub ? QuCrypto.fromBase64(a.appAdminPub) : null,
-      realm: a.realm ?? 'main',
-      mode: (a.realm ?? 'main') === 'global' ? (a.mode ?? 'global') : undefined,
-    }));
+    // `removed` (kinds.js's own `platformAppsKind` doc comment on `unregisterApp()`) is filtered out
+    // HERE, not just in `resolveForPath()` below - a retracted prefix must vanish from every listing
+    // (the admin console's own app list included), not merely become unreachable the way `mode:
+    // 'off'` does.
+    return [...byPrefix.values()]
+      .filter((a) => !a.removed)
+      .map((a) => ({
+        ...a,
+        appAdminPub: a.appAdminPub ? QuCrypto.fromBase64(a.appAdminPub) : null,
+        realm: a.realm ?? 'main',
+        mode: (a.realm ?? 'main') === 'global' ? (a.mode ?? 'global') : undefined,
+      }));
   }
 
   /**
@@ -126,7 +132,7 @@ export class PlatformRuntime {
    *   `null` if `prefix` matches NEITHER a registered alias NOR a valid
    *   owner id (see this file's own top doc comment's "TWO KINDS OF
    *   MATCH"), OR if it matches a `realm: 'global'` app currently in
-   *   `mode: 'off'` (kinds.js's own doc comment on the three states) -
+   *   `mode: 'off'` (kinds.js's own doc comment on the four states) -
    *   `boot.js`'s cue to render the landing page either way, indistinguishable
    *   from "never registered" on purpose (an "off" app should look exactly
    *   as absent as one that was never installed, not like a broken one).

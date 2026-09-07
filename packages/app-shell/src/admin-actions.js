@@ -31,19 +31,25 @@
  *     visiting the bare prefix already works regardless of realm, this is
  *     just a discoverable shortcut instead of typing the URL by hand.
  *   - PER-APP CONTROLS, `realm: 'global'` entries only (kinds.js's own doc
- *     comment on the three administrable states - `mode` has no meaning for
+ *     comment on the four administrable states - `mode` has no meaning for
  *     a `realm: 'main'` app, single-owner apps were never relay-toggleable
- *     at all): one button per state (`'off'`/`'global'`/`'multiuser'`,
- *     calling `setAppMode()`, the currently-active one shown disabled), a
- *     "Verwalten" link to that app's own GLOBAL shell
+ *     at all): one button per state (`'off'`/`'global'`/`'multiuser'`/
+ *     `'personal'`, calling `setAppMode()`, the currently-active one shown
+ *     disabled), a "Verwalten" link to that app's own GLOBAL shell
  *     (`#/admin/<prefix>/` - `boot.js`'s `parseAdminSubPath()`/
  *     `renderGlobalShell()` - this doubles as the generic "app's settings
  *     page" link the built-in console offers for ANY global app, not a
  *     bespoke per-app affordance: whatever that app's own global content
  *     happens to contain, incl. a `/cms`-style editor if it installed one,
- *     lives right there), and, for `mode: 'multiuser'` specifically, an
+ *     lives right there), and, for `mode: 'multiuser'`/`'personal'`, an
  *     "Eigener Bereich" shortcut to THIS relay-admin's own per-user space
  *     (`#/<prefix>/u/me/`) - a convenience only, not a different write path.
+ *     Also an "Update verfügbar" button (only for a prefix installed from
+ *     this console's own `APP_INSTALLERS`, and only once its bundle's
+ *     current version has actually moved past what's installed) and a
+ *     "Deinstallieren" button (`unregisterApp()` + best-effort
+ *     `nullGlobalAppContent()` - `dev.js`'s own doc comments on both, and on
+ *     why a visitor's own personal instance is never reachable by either).
  *
  * WRITE-ACL, not this file, is what actually gates every write here:
  * `registerApp()`/`setAppMode()` both write `qu-platform-apps`, a
@@ -55,14 +61,17 @@
  * gate keeps `#/admin/...` from rendering for them at all.
  */
 import { QuCrypto } from '@qu/core';
-import { registerApp, setAppMode, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
+import { registerApp, setAppMode, setAppBundleVersion, unregisterApp, nullGlobalAppContent, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
 import { deriveOwnerNodeId } from '@qu/space-core';
-import { installGuestbook } from '../guestbook-bundle.js';
-import { installBlog } from '../blog-bundle.js';
+import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
+import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
 import { installForum } from '../forum-bundle.js';
 import { verifyWritesAcked } from './verify-writes.js';
 
-const MODE_LABELS = { off: 'Aus', global: 'Global', multiuser: 'Multi-User' };
+// `'personal'` (kinds.js's own `platformAppsKind` doc comment) - a read-only, aggregated feed at
+// the bare prefix instead of a relay-admin-authored page, for an app whose personal instances
+// already ARE the point (Gästebuch, Blog) rather than a per-visitor SITE (`'multiuser'`, unchanged).
+const MODE_LABELS = { off: 'Aus', global: 'Global', multiuser: 'Multi-User', personal: 'Nur Persönlich' };
 
 /**
  * ONE-CLICK REFERENCE APP INSTALLERS — each entry pairs a bundle's own
@@ -88,10 +97,55 @@ const MODE_LABELS = { off: 'Aus', global: 'Global', multiuser: 'Multi-User' };
  * installed from the same session - and, as a bonus, they get the SAME
  * mode toggle (`MODE_LABELS` below) and "Verwalten"/"Besuchen" links every
  * other global app already has, for free.
+ *
+ * `personalBundle` (Gästebuch/Blog only, omitted for Forum - see
+ * `installed-apps-actions.js`'s own `PERSONAL_INSTALLERS` doc comment on
+ * why) tags this prefix so `boot.js`'s own ADDITIVE `/u/<ref>/` route
+ * (alongside the global one, never instead of it) knows which reference
+ * app's personal-instance installer to self-provision the first time a
+ * visitor reaches `#/<prefix>/u/me/` - `dev.js`'s `registerApp()` own doc
+ * comment on the field. Gästebuch's `sharedLists` here ALSO includes
+ * `<prefix>:personal` upfront - `installPersonalGuestbook()`'s own doc
+ * comment on why: unlike the global list (`prefix` itself), a per-visitor
+ * personal guestbook's own list name can't be known until someone actually
+ * self-provisions one, so ALL of them share this ONE, pre-registered list
+ * instead, filtered per owner. Gästebuch's `viewNames` ALSO includes
+ * `<prefix>-aggregate-feed` - `guestbook-bundle.js`'s `updateGuestbook()`'s
+ * own doc comment on why `mode: 'personal'` needs it - a View the relay
+ * must be told about upfront exactly like any other (`globalViewNames`'s
+ * own doc comment in `dev.js`).
+ *
+ * `key` (this map's own key, e.g. `'guestbook'`) is ALSO stored as this
+ * prefix's `appType` at registration time - the admin console's own way of
+ * later finding this SAME entry again for an already-registered app (the
+ * "Update verfügbar" button below), without the registry itself needing to
+ * know anything about specific reference apps.
+ *
+ * `version`/`update` - this bundle's own CURRENT version constant and its
+ * idempotent re-apply function (`guestbook-bundle.js`/`blog-bundle.js`'s
+ * own `updateX()` doc comments - upsert-based, safe to call on an already-
+ * installed prefix). Compared against a registered entry's own stored
+ * `bundleVersion` to decide whether "Update verfügbar" shows at all.
  */
 const APP_INSTALLERS = {
-  guestbook: { label: 'Gästebuch', install: installGuestbook, sharedLists: (prefix) => [prefix], viewNames: (prefix) => [`${prefix}-feed`] },
-  blog: { label: 'Blog', install: installBlog, sharedLists: () => [], viewNames: (prefix) => [`${prefix}-index`] },
+  guestbook: {
+    label: 'Gästebuch',
+    install: installGuestbook,
+    update: updateGuestbook,
+    version: GUESTBOOK_VERSION,
+    sharedLists: (prefix) => [prefix, `${prefix}:personal`],
+    viewNames: (prefix) => [`${prefix}-feed`, `${prefix}-aggregate-feed`],
+    personalBundle: 'guestbook',
+  },
+  blog: {
+    label: 'Blog',
+    install: installBlog,
+    update: updateBlog,
+    version: BLOG_VERSION,
+    sharedLists: () => [],
+    viewNames: (prefix) => [`${prefix}-index`],
+    personalBundle: 'blog',
+  },
   forum: {
     label: 'Forum',
     install: installForum,
@@ -138,7 +192,11 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
         manageLink.style.marginRight = '0.5rem';
         li.appendChild(manageLink);
 
-        if (app.mode === 'multiuser') {
+        // `'multiuser'` - the bare prefix ITSELF already means "my own space" (this link is then
+        // purely a convenience, identical to just clicking "Besuchen" above). `'personal'` - the
+        // bare prefix shows the read-only aggregate feed instead, so THIS is the only link that
+        // reaches this identity's own write-side instance at all.
+        if (app.mode === 'multiuser' || app.mode === 'personal') {
           const ownLink = doc.createElement('a');
           ownLink.href = `#/${app.prefix}/u/me/`;
           ownLink.textContent = 'Eigener Bereich';
@@ -149,7 +207,7 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
         const status = doc.createElement('span');
         status.setAttribute('data-qu-status', '');
 
-        for (const mode of ['off', 'global', 'multiuser']) {
+        for (const mode of ['off', 'global', 'multiuser', 'personal']) {
           const btn = doc.createElement('button');
           btn.type = 'button';
           btn.textContent = MODE_LABELS[mode];
@@ -166,6 +224,52 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
           });
           li.appendChild(btn);
         }
+
+        // "Update verfügbar" - only for a prefix installed FROM this console's own `APP_INSTALLERS`
+        // (`app.appType` set at registration time) whose bundle's CURRENT `version` is newer than
+        // what's actually installed (`app.bundleVersion`, absent entirely on an app registered
+        // before this versioning existed - treated as "0", i.e. always outdated, same posture a
+        // personal instance's own missing `data.bundleVersion` already gets - `installed-apps-
+        // actions.js`'s own `provisionPersonalInstance()` doc comment). A manually `registerApp()`ed
+        // app (no `appType`) never shows this - there is no known bundle to compare against.
+        const installer = app.appType ? APP_INSTALLERS[app.appType] : null;
+        if (installer?.update && (app.bundleVersion ?? 0) < installer.version) {
+          const updateBtn = doc.createElement('button');
+          updateBtn.type = 'button';
+          updateBtn.textContent = 'Update verfügbar';
+          updateBtn.style.marginRight = '0.25rem';
+          updateBtn.addEventListener('click', async () => {
+            status.textContent = '';
+            try {
+              await installer.update(mainSpace, { prefix: app.prefix });
+              await setAppBundleVersion(mainSpace, { prefix: app.prefix, bundleVersion: installer.version });
+              await renderList();
+            } catch (err) {
+              status.textContent = `Fehler: ${err.message}`;
+            }
+          });
+          li.appendChild(updateBtn);
+        }
+
+        // "Deinstallieren" - retracts the registration (`unregisterApp()`) AND best-effort clears
+        // this app's own GLOBAL content (`nullGlobalAppContent()`, `dev.js`'s own doc comment on
+        // both the "not a genuine deletion" caveat and why a visitor's own personal instance, if
+        // any, is never touched by this - self-owned content this app's registration never had
+        // write access to in the first place).
+        const uninstallBtn = doc.createElement('button');
+        uninstallBtn.type = 'button';
+        uninstallBtn.textContent = 'Deinstallieren';
+        uninstallBtn.addEventListener('click', async () => {
+          status.textContent = '';
+          try {
+            await unregisterApp(mainSpace, { prefix: app.prefix });
+            await nullGlobalAppContent(mainSpace, app.prefix);
+            await renderList();
+          } catch (err) {
+            status.textContent = `Fehler: ${err.message}`;
+          }
+        });
+        li.appendChild(uninstallBtn);
         li.appendChild(status);
       }
       list.appendChild(li);
@@ -220,6 +324,9 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
             name: installer.label,
             sharedLists: installer.sharedLists(prefix),
             globalViewNames: installer.viewNames(prefix),
+            personalBundle: installer.personalBundle,
+            appType,
+            bundleVersion: installer.version,
           })
         );
         await new Promise((resolve) => setTimeout(resolve, 400)); // let the relay's live resolver start watching this app's own route registry/shared lists/View names.
