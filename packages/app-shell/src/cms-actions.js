@@ -66,6 +66,21 @@
  * wait. `wireContent()` below keeps the fix - every `await` that isn't
  * needed to attach a listener runs strictly AFTER every listener already is.
  *
+ * CROSS-SECTION NAVIGATION LINKS ("Zurück zur Übersicht" on each section
+ * page, each entry on the `/cms` index page) are NEVER a literal `href`
+ * baked into the stored content - see `wireCmsNav()`'s own doc comment
+ * below for the real, previously-shipped "leads nowhere" bug this fixes
+ * (the user's own report): the same `/cms*` pages are reachable under many
+ * different URL bases depending on context (a self-owned space, a
+ * `mode:'multiuser'` app's bare prefix, an additive `/u/<ref>/`, a global
+ * app's `/admin/<prefix>/` delegation or its own bare prefix) - a link
+ * fixed at install time can only ever be right for ONE of those.
+ * `data-qu-cms-nav="index"`/`"<sectionId>"` (this file's own convention,
+ * same "content stays inert markup" posture as everything else here) is
+ * how the markup declares INTENT without committing to a base path -
+ * `wireCmsNav()` fills in the real `href` from the CURRENT URL every time
+ * `wireCms()` runs.
+ *
  * KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE BETWEEN "load into form" AND
  * "save" - a real, observed bug this fixes: `Space.useNode()` is
  * ref-counted, and `ContentResolver`'s own `resolveTemplate()`/
@@ -159,6 +174,43 @@ async function holdRegistry(space, registryKind, ownerPub = space.identity.signi
   return space.useNode(id, registryKind);
 }
 
+/**
+ * Rewrites every `[data-qu-cms-nav]` link's own `href` to point at THIS
+ * render's actual `/cms` base path, derived from the CURRENT URL
+ * (`doc.defaultView.location.hash`) rather than a path baked into the
+ * stored content at install time - a REAL, previously-shipped bug this
+ * fixes ("führt ins Leere," the user's own report): the exact same `/cms`
+ * section pages are reachable under many different bases depending on
+ * WHERE this render came from (`boot.js`'s own doc comments have the full
+ * list) - a self-owned space's own bare `/cms`, a `mode: 'multiuser'` app's
+ * bare `/<prefix>/cms`, an ADDITIVE `/u/<ref>/cms`, or a global app's own
+ * `/admin/<prefix>/cms` (reached via admin delegation) OR bare `/<prefix>/cms`
+ * (reached directly, `mode: 'global'`) - a link hardcoded at install time
+ * (formerly a literal `href="#/admin/cms"` on "Zurück zur Übersicht" and
+ * `href="#/cms/<id>"` on the index page's own section links, this file's
+ * own git history) can only ever be correct for ONE of those, and 404s
+ * ("leads nowhere") for every other app/context - it only ever LOOKED
+ * correct during manual testing because the reference "cms" demo app
+ * happens to be reachable at exactly that literal path.
+ *
+ * Same "content stays inert markup, framework code wires by attribute"
+ * posture as everywhere else in this file: `data-qu-cms-nav="index"` means
+ * THIS render's own `/cms` page; any other value `"<id>"` (one of
+ * `listAdminSections()`'s own ids) means `/cms/<id>` - same computed base
+ * either way. A no-op (correct, cheap) on any page with no such link.
+ */
+function wireCmsNav(mountEl, doc) {
+  const links = mountEl.querySelectorAll('[data-qu-cms-nav]');
+  if (links.length === 0) return;
+  const hash = (doc.defaultView.location.hash || '#/').slice(1) || '/';
+  const match = /^(.*\/cms)(?:\/.*)?$/.exec(hash);
+  const base = match ? match[1] : '/cms';
+  for (const link of links) {
+    const target = link.getAttribute('data-qu-cms-nav');
+    link.setAttribute('href', `#${target === 'index' ? base : `${base}/${target}`}`);
+  }
+}
+
 function setStatus(form, text) {
   const status = form.querySelector('[data-qu-status]') ?? form.appendChild(form.ownerDocument.createElement('p'));
   status.setAttribute('data-qu-status', '');
@@ -189,7 +241,7 @@ function resetForm(form, keyFieldName) {
 }
 
 const TEMPLATES_PAGE_CONTENT = `<h1>Templates</h1>
-<p><a href="#/admin/cms">&larr; Zurück zur Übersicht</a></p>
+<p><a data-qu-cms-nav="index">&larr; Zurück zur Übersicht</a></p>
 <ul data-qu-bind="cms-template-list"></ul>
 <form data-qu-action="cms-template-form">
   <input type="hidden" name="mode" value="create">
@@ -200,43 +252,73 @@ const TEMPLATES_PAGE_CONTENT = `<h1>Templates</h1>
   <p data-qu-status></p>
 </form>`;
 
-/** See `wireContent()`'s own doc comment on `ownerPub` - identical reasoning here. */
-async function wireTemplates({ mountEl, doc, space, resolver, global, ownerPub }) {
-  // Global apps have no template REGISTRY yet (kinds.js's own "GLOBAL APP CONTENT" doc comment) - a
-  // new template's NAME still needs declaring upfront via `registerApp()`'s own `globalTemplateNames`/
-  // `addGlobalTemplateNames()` (kinds.js's own `platformAppsKind` doc comment) - this SECTION,
-  // though, stays self-owned-only for now, same scope cut as before this redesign.
+/**
+ * Shared shape behind `wireTemplates()`/`wireStyles()` right below - the one
+ * genuinely redundant piece of code the user's own "können wir noch
+ * redundanten Code entfernen" ask actually found, once Page+View had
+ * already been unified into `wireContent()` above: both sections turned out
+ * to be the EXACT same list/form/reset dance (list every name, click one to
+ * load its single value into the form, save, reset) over a different
+ * single-value Kind (`templateKind`'s `html` vs `styleKind`'s `css`) -
+ * genuinely identical control flow, not just superficially similar markup.
+ * `wireContent()` is deliberately NOT built on this: it keys by a different
+ * field depending on `sourceType`, dispatches to TWO different Dev API
+ * pairs (`createPage`/`createView`), and toggles multiple form
+ * sub-sections - a real, different shape, not more of this same one.
+ *
+ * Global apps have no template/style REGISTRY yet (kinds.js's own "GLOBAL
+ * APP CONTENT" doc comment) - a new one's NAME still needs declaring
+ * upfront via `registerApp()`'s own `globalTemplateNames`/`globalStyleNames`
+ * (kinds.js's own `platformAppsKind` doc comment) - both sections stay
+ * self-owned-only for now, same scope cut as before this redesign.
+ */
+async function wireSimpleContentSection({
+  mountEl,
+  doc,
+  space,
+  global,
+  ownerPub,
+  sectionId,
+  emptyLabel,
+  kind,
+  registryKind,
+  valueField,
+  resolveNames,
+  resolveValue,
+  createFn,
+  editFn,
+}) {
   if (global) return;
-  const list = mountEl.querySelector('[data-qu-bind="cms-template-list"]');
-  const form = mountEl.querySelector('form[data-qu-action="cms-template-form"]');
-  const resetBtn = mountEl.querySelector('[data-qu-cms-reset="template"]');
+  const list = mountEl.querySelector(`[data-qu-bind="cms-${sectionId}-list"]`);
+  const form = mountEl.querySelector(`form[data-qu-action="cms-${sectionId}-form"]`);
+  const resetBtn = mountEl.querySelector(`[data-qu-cms-reset="${sectionId}"]`);
   if (!list && !form) return;
 
   // Fire-and-forget, started BEFORE the submit listener below attaches (same synchronous-first-tick
   // reasoning as _sendSubscribeRequest()'s own posture elsewhere) - see this file's own top doc
   // comment, "KEEPING EACH SECTION'S OWN REGISTRY SUBSCRIPTION ALIVE...".
-  holdRegistry(space, templateRegistryKind, ownerPub).catch(() => {});
+  holdRegistry(space, registryKind, ownerPub).catch(() => {});
   let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".
 
   async function refreshList() {
     if (!list) return;
-    const templates = await resolver.resolveTemplateNames({ timeout: 500 });
+    const items = await resolveNames({ timeout: 500 });
     list.replaceChildren();
-    if (templates.length === 0) {
+    if (items.length === 0) {
       const li = doc.createElement('li');
-      li.textContent = '(noch kein Template)';
+      li.textContent = emptyLabel;
       list.appendChild(li);
       return;
     }
-    for (const { name } of templates) {
+    for (const { name } of items) {
       const li = doc.createElement('li');
       const btn = doc.createElement('button');
       btn.type = 'button';
       btn.textContent = name;
       btn.addEventListener('click', async () => {
-        activeEdit = await holdEdit(space, templateKind, name, activeEdit, ownerPub);
-        const html = (await resolver.resolveTemplate(name, { timeout: 2000 })) ?? '';
-        enterEditMode(form, { keyFieldName: 'name', keyValue: name, fields: { html } });
+        activeEdit = await holdEdit(space, kind, name, activeEdit, ownerPub);
+        const value = (await resolveValue(name, { timeout: 2000 })) ?? '';
+        enterEditMode(form, { keyFieldName: 'name', keyValue: name, fields: { [valueField]: value } });
       });
       li.appendChild(btn);
       list.appendChild(li);
@@ -250,13 +332,13 @@ async function wireTemplates({ mountEl, doc, space, resolver, global, ownerPub }
       try {
         const mode = form.querySelector('input[name="mode"]').value;
         const name = form.querySelector('[name="name"]').value.trim();
-        const html = form.querySelector('[name="html"]').value;
+        const value = form.querySelector(`[name="${valueField}"]`).value;
         if (mode === 'edit') {
-          const id = await deriveContentNodeId(ownerPub ?? space.identity.signingPub, templateKind.kind, name);
-          await verifyWritesAcked(space, id, () => editTemplate(space, { name, html, ownerPub, timeout: 2000 }));
+          const id = await deriveContentNodeId(ownerPub ?? space.identity.signingPub, kind.kind, name);
+          await verifyWritesAcked(space, id, () => editFn(space, { name, [valueField]: value, ownerPub, timeout: 2000 }));
         } else {
-          const id = await deriveContentNodeId(space.identity.signingPub, templateKind.kind, name);
-          await verifyWritesAcked(space, id, () => createTemplate(space, { name, html }));
+          const id = await deriveContentNodeId(space.identity.signingPub, kind.kind, name);
+          await verifyWritesAcked(space, id, () => createFn(space, { name, [valueField]: value }));
         }
         setStatus(form, 'Gespeichert und vom Relay bestätigt.');
         await refreshList();
@@ -276,8 +358,27 @@ async function wireTemplates({ mountEl, doc, space, resolver, global, ownerPub }
   await refreshList();
 }
 
+async function wireTemplates({ mountEl, doc, space, resolver, global, ownerPub }) {
+  await wireSimpleContentSection({
+    mountEl,
+    doc,
+    space,
+    global,
+    ownerPub,
+    sectionId: 'template',
+    emptyLabel: '(noch kein Template)',
+    kind: templateKind,
+    registryKind: templateRegistryKind,
+    valueField: 'html',
+    resolveNames: (opts) => resolver.resolveTemplateNames(opts),
+    resolveValue: (name, opts) => resolver.resolveTemplate(name, opts),
+    createFn: createTemplate,
+    editFn: editTemplate,
+  });
+}
+
 const STYLES_PAGE_CONTENT = `<h1>Styles</h1>
-<p><a href="#/admin/cms">&larr; Zurück zur Übersicht</a></p>
+<p><a data-qu-cms-nav="index">&larr; Zurück zur Übersicht</a></p>
 <ul data-qu-bind="cms-style-list"></ul>
 <form data-qu-action="cms-style-form">
   <input type="hidden" name="mode" value="create">
@@ -288,77 +389,28 @@ const STYLES_PAGE_CONTENT = `<h1>Styles</h1>
   <p data-qu-status></p>
 </form>`;
 
-/** See `wireTemplates()`'s own doc comment on `ownerPub`/the global scope cut - identical reasoning here. */
+/** See `wireSimpleContentSection()`'s own doc comment, right above `wireTemplates()` - identical reasoning here, just `styleKind`'s `css` instead of `templateKind`'s `html`. */
 async function wireStyles({ mountEl, doc, space, resolver, global, ownerPub }) {
-  if (global) return;
-  const list = mountEl.querySelector('[data-qu-bind="cms-style-list"]');
-  const form = mountEl.querySelector('form[data-qu-action="cms-style-form"]');
-  const resetBtn = mountEl.querySelector('[data-qu-cms-reset="style"]');
-  if (!list && !form) return;
-
-  holdRegistry(space, styleRegistryKind, ownerPub).catch(() => {}); // see wireTemplates()'s own identical comment.
-  let activeEdit = null; // see this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...".
-
-  async function refreshList() {
-    if (!list) return;
-    const styles = await resolver.resolveStyleNames({ timeout: 500 });
-    list.replaceChildren();
-    if (styles.length === 0) {
-      const li = doc.createElement('li');
-      li.textContent = '(noch kein Style)';
-      list.appendChild(li);
-      return;
-    }
-    for (const { name } of styles) {
-      const li = doc.createElement('li');
-      const btn = doc.createElement('button');
-      btn.type = 'button';
-      btn.textContent = name;
-      btn.addEventListener('click', async () => {
-        activeEdit = await holdEdit(space, styleKind, name, activeEdit, ownerPub);
-        const css = (await resolver.resolveStyle(name, { timeout: 2000 })) ?? '';
-        enterEditMode(form, { keyFieldName: 'name', keyValue: name, fields: { css } });
-      });
-      li.appendChild(btn);
-      list.appendChild(li);
-    }
-  }
-
-  if (form) {
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      setStatus(form, '');
-      try {
-        const mode = form.querySelector('input[name="mode"]').value;
-        const name = form.querySelector('[name="name"]').value.trim();
-        const css = form.querySelector('[name="css"]').value;
-        if (mode === 'edit') {
-          const id = await deriveContentNodeId(ownerPub ?? space.identity.signingPub, styleKind.kind, name);
-          await verifyWritesAcked(space, id, () => editStyle(space, { name, css, ownerPub, timeout: 2000 }));
-        } else {
-          const id = await deriveContentNodeId(space.identity.signingPub, styleKind.kind, name);
-          await verifyWritesAcked(space, id, () => createStyle(space, { name, css }));
-        }
-        setStatus(form, 'Gespeichert und vom Relay bestätigt.');
-        await refreshList();
-      } catch (err) {
-        setStatus(form, `Fehler: ${err.message}`);
-      }
-    });
-  }
-  if (resetBtn && form) {
-    resetBtn.addEventListener('click', () => {
-      activeEdit?.release();
-      activeEdit = null;
-      resetForm(form, 'name');
-    });
-  }
-
-  await refreshList();
+  await wireSimpleContentSection({
+    mountEl,
+    doc,
+    space,
+    global,
+    ownerPub,
+    sectionId: 'style',
+    emptyLabel: '(noch kein Style)',
+    kind: styleKind,
+    registryKind: styleRegistryKind,
+    valueField: 'css',
+    resolveNames: (opts) => resolver.resolveStyleNames(opts),
+    resolveValue: (name, opts) => resolver.resolveStyle(name, opts),
+    createFn: createStyle,
+    editFn: editStyle,
+  });
 }
 
 const CONTENT_PAGE_CONTENT = `<h1>Inhalt</h1>
-<p><a href="#/admin/cms">&larr; Zurück zur Übersicht</a></p>
+<p><a data-qu-cms-nav="index">&larr; Zurück zur Übersicht</a></p>
 <p>Ein Eintrag ist entweder eine reine Text/HTML-Seite, oder eine live aktualisierte VIEW über eine
   geteilte Liste (z.B. Gästebuch) oder einen Seiten-Filter (z.B. Blog-Index) - "Ziel-App-Präfix" bei
   "Seiten-Filter" erlaubt es, Inhalte einer ANDEREN App einzubinden (App-übergreifende Views).</p>
@@ -781,6 +833,7 @@ registerAdminSection({ id: 'content', label: 'Inhalt (Seiten & Views)', order: 3
  *   may use, not just whoever created a given page.
  */
 export async function wireCms({ mountEl, doc, space, appAdminPub, global = false, prefix }) {
+  wireCmsNav(mountEl, doc);
   const resolver = new ContentResolver(space, { appAdminPub, kinds: global ? { pageKind: adminPageKind, routeRegistryKind: adminRouteRegistryKind, viewKind: adminViewKind } : undefined });
   // Non-global only - a global app's writes already target the right id through `prefix`/
   // `globalAppAnchor()` (createGlobalPage()/etc. take no ownerPub at all), so passing appAdminPub

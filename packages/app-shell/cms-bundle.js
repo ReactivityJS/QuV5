@@ -53,7 +53,7 @@ import './src/cms-actions.js';
 
 function indexPageContent() {
   const items = listAdminSections()
-    .map((section) => `  <li><a href="#/cms/${section.id}">${section.label}</a></li>`)
+    .map((section) => `  <li><a data-qu-cms-nav="${section.id}">${section.label}</a></li>`)
     .join('\n');
   return `<h1>CMS</h1>
 <p>Verwaltet Templates, Styles und Inhalte dieser App direkt im Space - Änderungen sind sofort für jeden Besucher sichtbar.</p>
