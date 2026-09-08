@@ -24,12 +24,14 @@
  *
  * Watches `nodeId`'s own `debug.space.write.local`/`space.node.<id>.
  * write-ack` pair on `space`'s own `bus` (`Space`'s own `bus` getter)
- * WHILE `fn()` runs, then waits up to `timeout` for every local write it
- * counted to be acked - throws a clear, actionable error instead of
- * resolving silently if even one wasn't. No-ops (skips verification, same
- * as before this existed) if `space` has no `bus` configured at all
- * (still true of some test setups) - can't verify what it can't observe,
- * and that must never make an otherwise-working save start throwing.
+ * WHILE `fn()` runs, then EVENT-DRIVEN (not polled - resolves the instant
+ * the matching `write-ack` arrives, never up to a poll tick later) waits
+ * up to `timeout` for every local write it counted to be acked - throws a
+ * clear, actionable error instead of resolving silently if even one
+ * wasn't. No-ops (skips verification, same as before this existed) if
+ * `space` has no `bus` configured at all (still true of some test setups) -
+ * can't verify what it can't observe, and that must never make an
+ * otherwise-working save start throwing.
  * @param {import('@qu/space-core').Space} space
  * @param {string} nodeId - the SAME id `fn()`'s own write(s) target.
  * @param {() => Promise<*>} fn
@@ -39,11 +41,13 @@ export async function verifyWritesAcked(space, nodeId, fn, { timeout = 3000 } = 
   if (!bus) return fn();
   let expected = 0;
   let acked = 0;
+  let onAcked = null; // set once the "settle, then start actually deciding" phase below begins - see there.
   const offLocal = bus.on('debug.space.write.local', (payload) => {
     if (payload?.nodeId === nodeId) expected++;
   });
   const offAck = bus.on(`space.node.${nodeId}.write-ack`, () => {
     acked++;
+    onAcked?.();
   });
   try {
     const result = await fn();
@@ -56,11 +60,14 @@ export async function verifyWritesAcked(space, nodeId, fn, { timeout = 3000 } = 
     // margin `bootstrap-platform.mjs`'s own `waitUntilAllWritesAcked()` already bakes in for the
     // identical reason, just applied before the FIRST check here instead of only before it.
     await new Promise((resolve) => setTimeout(resolve, 150));
-    const deadline = Date.now() + timeout;
-    while (acked < expected && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    if (acked < expected) {
+    const acked_ = await new Promise((resolve) => {
+      if (acked >= expected) return resolve(true); // already caught up during the settle wait above.
+      onAcked = () => {
+        if (acked >= expected) resolve(true);
+      };
+      setTimeout(() => resolve(false), timeout);
+    });
+    if (!acked_) {
       throw new Error(
         'Speichern wurde vom Relay nicht bestätigt - die Änderung bleibt nur lokal sichtbar und geht bei einem Reload verloren. ' +
           'Meist bedeutet das: die aktuell angemeldete Identität ist weder Owner/Mitglied dieses Inhalts noch wurde ihr Schreibzugriff gewährt.'

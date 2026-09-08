@@ -235,6 +235,24 @@ Space-API-Bezug — dafür gibt es im Framework nichts wiederzuverwenden außer
 dem generellen "Registry-Objekt mit `register/get/list`"-Stil von
 `KindRegistry`.
 
+**UPDATE — zwei GRUNDVERSCHIEDENE "Slot"-Konzepte, beide jetzt real:** Das
+`<qu-slot name="...">`-Platzhalter-Füllen oben (`@qu/app-renderer`'s
+`resolveSlots()`) bleibt reine Template-Komposition (EIN Template, seine
+eigenen benannten Löcher, einmalig pro Render gefüllt) — dafür gibt es nach
+wie vor kein eigenes Package. Das andere, ursprünglich als Lücke benannte
+"kein Wiederverwendbares außer `KindRegistry`"-Problem ist inzwischen mit
+`packages/extensions/` (`@qu/extensions`, `ExtensionPointHost`) geschlossen:
+ein geordnetes, id-adressierbares Registry-Primitiv, in das eine App
+(Plugin) zur Modul-Ladezeit HINEIN-registriert (`contribute()`) und aus dem
+Framework-/UI-Code GELESEN wird (`renderSlot()`/`collect()`/`renderFrom()`),
+ohne dass eine Seite die andere importiert — genau das Slots/Actions/
+ExtensionPoints-Prinzip aus QuV3s `@qu/foundation`, für V5 neu gebaut (siehe
+`architecture.md` §4/§7). `src/admin-sections.js`s eigene, schon vorher
+produktive Registry (Templates/Styles/Content als CMS-Bereiche) sitzt jetzt
+darauf; `cms-actions.js`s `"cms.pageActions"`-Punkt ist der erste ECHTE
+Plugin-Slot (zusätzliche Buttons pro Content-Zeile, von einem Plugin
+beigesteuert, ohne dass `cms-actions.js` dieses Plugin kennt).
+
 ## 12. Namespace-Modell (grundlegend angepasst)
 
 **Das ist der Punkt, an dem sich das Original am stärksten von der Realität
@@ -539,6 +557,7 @@ Pakete (§30 des Originals, hier ernst genommen — `app-components` und
 packages/
 ├── core/            (bestehend, unverändert)
 ├── events/           (bestehend, unverändert)
+├── extensions/         @qu/extensions — ExtensionPointHost (Slots/Actions/ExtensionPoints, s. Abschnitt 7-11's UPDATE oben)
 ├── space-core/        (bestehend, unverändert)
 ├── space-storage/      (bestehend — ggf. + IndexedDB-Adapter, Abschnitt 24)
 ├── space-transport/     (bestehend, unverändert — relay-app-server.js zeigt künftig auf app-shell/dist)

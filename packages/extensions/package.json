@@ -1,0 +1,11 @@
+{
+  "name": "@qu/extensions",
+  "version": "0.1.0",
+  "description": "Qu V5: ExtensionPointHost - one ordered, id-addressable registry apps CONTRIBUTE into (a menu entry, a context-menu action, a piece of rendered chrome, an admin section) and framework/UI code RENDERS FROM, without either side importing the other. Three read shapes over the same registry: renderSlot() (every contributor mounts its own DOM into its own child container), collect() (gather every contributor's return value, e.g. a context menu's entries), renderFrom() (call exactly one named contributor). A contribution with no handler is a plain data entry (label/icon/href/order, resolveActionHref()'s own use case) - the SAME registry serves both the 'live code' and 'pure data' slot shapes V3 kept as two separate mechanisms, unified here into one.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "license": "MIT"
+}

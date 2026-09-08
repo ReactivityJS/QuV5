@@ -47,7 +47,8 @@ signed and (usually) end-to-end encrypted. It is deliberately:
 QuV5/
 ├── packages/
 │   ├── core/            @qu/core            - crypto primitives (Ed25519/X25519/AES-GCM), no framework logic
-│   ├── events/          @qu/events          - EventBus: the one hooks/listeners/slots mechanism
+│   ├── events/          @qu/events          - EventBus: the one dot-namespaced pub/sub mechanism for domain/change/UI events
+│   ├── extensions/      @qu/extensions      - ExtensionPointHost: the plugin/composability registry (slots, actions, admin sections) apps contribute into and framework/UI code renders from
 │   ├── space-core/      @qu/space-core      - Space/Node/Field, envelopes, Kind-Schema, ACL, alias identities
 │   ├── space-storage/   @qu/space-storage   - storage adapters (memory/durable/file) a Space or relay mounts
 │   ├── space-transport/ @qu/space-transport - Transports (in-process/WebSocket), the Relay, federation
@@ -261,6 +262,19 @@ reference example: it decides purely from the `online` flag on
 applied to identity resolution: a bus watcher, not a `Space`-internal
 mechanism — `Space` itself has zero awareness that "alias" is a concept.
 
+**"Slots" in this section's own title means EventBus's wildcard fan-out**
+(any number of anonymous listeners reacting to one topic) — a DIFFERENT,
+complementary concept from `@qu/extensions`' `ExtensionPointHost` (§4, §7),
+which is an ORDERED, id-addressable REGISTRY one specific piece of UI/
+framework code reads a known, bounded set of named contributions FROM
+(a menu entry, a context-menu action, an admin section). `EventBus` answers
+"who wants to know when X happens"; `ExtensionPointHost` answers "what has
+app Y registered at point Z, and in what order" — `@qu/app-shell`'s own
+CMS/admin-console composability (§7) is built on the latter, not the
+former, precisely because it needs ordering and per-contribution identity
+(so a specific contribution can be replaced/removed), which a fire-and-
+forget pub/sub topic does not give you.
+
 ## 4. File-by-file map
 
 ### `packages/core/` — `@qu/core`
@@ -277,6 +291,23 @@ mechanism — `Space` itself has zero awareness that "alias" is a concept.
 | `src/event-bus.js` | `EventBus` class — `on`/`once`/`off`, and three emit modes: `emit`/`notify` (fire-and-forget), `collect` (gather return values), `run` (sequential transform). Trie-based wildcard dispatch. |
 | `src/debug-logger.js` | `createDebugLogger(bus, {pattern, log, label})` — logs every event matching `pattern` (default `'**'`). |
 | `src/index.js` | Re-exports both. |
+
+### `packages/extensions/` — `@qu/extensions`
+
+| File | Purpose |
+|---|---|
+| `src/extension-points.js` | `ExtensionPointHost` — an ordered, id-addressable contribution registry (`contribute()`/`uncontribute()`/`listContributions()`), read via three shapes: `renderSlot()` (each contributor mounts DOM into its own child container), `collect()` (gather return values, e.g. context-menu entries), `renderFrom()` (call exactly one named contributor). A contribution with no `handler` is a pure data entry; `resolveActionHref()` fills a `{param}`-style href template for that shape. Ported from Qu V3's `@qu/foundation` (`actions[]` + `contributes[]`/`ExtensionPointHost`), unified into one registry and stripped of V3's dynamic-`import()` loader (unneeded — V5's apps/bundles already run in-process together, see this file's own top doc comment). |
+| `src/index.js` | Re-exports both. |
+
+`@qu/app-shell`'s `src/extension-points.js` is the ONE shared, process-wide
+`ExtensionPointHost` instance every framework wiring and bundle contributes
+into/reads from (§7). `src/admin-sections.js`'s registry — `Templates`/
+`Styles`/`Content` as separately-routed CMS sections, a `/apps/*` app
+registering its own panel — now sits on top of a PRIVATE instance of this
+same class (its exact original public API unchanged; see §7's own
+"registered admin sections" paragraph), proof that a registry this package
+generalizes was already load-bearing, in production, before this package
+existed.
 
 ### `packages/space-core/` — `@qu/space-core`
 
@@ -863,34 +894,74 @@ View needed migrating. See `docs/example-apps.md`'s own §5 and "Deploying
 Guestbook, Blog, and Forum via the Views UI" section for the user-facing
 walkthrough.
 
+**UPDATE - `admin-sections.js` now sits on `@qu/extensions`' `ExtensionPointHost`,
+and a first real plugin slot exists in the CMS itself.** `registerAdminSection()`/
+`listAdminSections()` kept their exact original signature and behavior -
+this was a pure internal refactor, proof that the registry `admin-sections.js`
+already was (ordered, id-keyed, "re-registering an id replaces it in place")
+generalizes cleanly onto `@qu/extensions`' new, reusable primitive (§4). On
+top of that, `cms-actions.js`'s `wireContent()` now calls
+`extensionPoints.collect('cms.pageActions', {route, space, resolver, anchor,
+global})` for every listed Page/View row, appending each returned
+`{id, label, onClick}` as an extra button next to the built-in "open in
+editor" one - a plugin (a future `blog-actions.js` "Duplizieren", say) adds
+a per-page action without `cms-actions.js` importing it or knowing it
+exists. `@qu/app-shell`'s `src/extension-points.js` is the ONE shared,
+process-wide `ExtensionPointHost` instance this and every future slot use;
+`_clearExtensionPointForTest(point)` is its test-only escape hatch (same
+reasoning as `admin-sections.js`'s own `_clearAdminSectionsForTest()`).
+This is the first, deliberately small step of porting Qu V3's Slots/
+Actions/ExtensionPoints principle (its own `@qu/foundation`, used there for
+the main-menu/header, per-message and per-topic context menus, composer
+actions, and cross-app search) into V5 - further points (a page/view
+"context menu," template-registration-as-a-contribution, admin-console
+chrome) are real, deliberately incremental follow-up work, not built
+speculatively ahead of a concrete second consumer.
+
 **A real, deployment-observed bug: `editPage()`/`editTemplate()`/
 `editStyle()` throwing "does not exist (or has not synced)" for content
 that plainly DOES exist.** `Space.useNode()` is ref-counted, and
 `ContentResolver`'s own `resolveTemplate()`/`resolveStyle()`/`resolvePage()`
 (what each CMS section's click-to-load handler calls, purely to populate
-the form) each `useNode()` THEN `release()` internally - dropping the
-refcount straight back to zero, which `Space.unsubscribeNode()` treats as
-"nobody needs this Node locally any more" and DISCARDS the local Y.Doc
-entirely (`space.js`'s own `_nodes.delete(id)`), not merely stops
-live-pushing to it. Submitting the form moments later called `edit*()`
-(`dev.js`), which does its OWN fresh `useNode()` - since the previous one
-had been fully torn down, this had to re-subscribe and wait for the relay
-to replay the Node's entire history again, a real network round-trip a
-fixed ~2-3s timeout can genuinely lose to over an actual (non-localhost)
-connection - the false "does not exist" error was really "did not
-RE-sync in time," for content the user had just viewed successfully.
-Never reproduced by this project's own tests (an in-process/localhost hub
-has no meaningful round-trip time to lose the race against), only by an
-operator actually using a real deployment. Fixed in `cms-actions.js`: each
-section's click-to-load handler now calls `space.useNode()` itself, ONE
-EXTRA TIME (`holdEdit()`), and keeps that reference alive until a
-DIFFERENT item is loaded or the form is reset - long enough to keep the
-refcount above zero for the entire "loaded into the form, being edited"
-window, so the eventual `edit*()` call's own `useNode()` finds the Node
-already fully synced and skips the network round-trip (and its timeout
-race) entirely. `ContentResolver`'s own release-immediately posture is
-otherwise unchanged (correct for ordinary rendering, where holding every
-resolved Node open for a whole visit would leak subscriptions).
+the form), called bare (no `hold`, see UPDATE below), each `useNode()` THEN
+`release()` internally - dropping the refcount straight back to zero, which
+`Space.unsubscribeNode()` treats as "nobody needs this Node locally any
+more" and DISCARDS the local Y.Doc entirely (`space.js`'s own
+`_nodes.delete(id)`), not merely stops live-pushing to it. Submitting the
+form moments later called `edit*()` (`dev.js`), which does its OWN fresh
+`useNode()` - if the previous one had been fully torn down, this had to
+re-subscribe and wait for the relay to replay the Node's entire history
+again, a real network round-trip a fixed ~2-3s timeout can genuinely lose
+to over an actual (non-localhost) connection - the false "does not exist"
+error was really "did not RE-sync in time," for content the user had just
+viewed successfully. Never reproduced by this project's own tests (an
+in-process/localhost hub has no meaningful round-trip time to lose the race
+against), only by an operator actually using a real deployment.
+
+**UPDATE - fixed at the framework level now, eliminating the teardown
+itself, not just working around it:** `resolvePage()`/`resolveTemplate()`/
+`resolveStyle()`/`resolveView()` (`@qu/app-core`'s `resolver.js`) gained an
+opt-in `{hold: true}` option - skips the internal `release()` and returns
+`{page/value/view, release}` instead of the bare value, so the SAME
+already-synced `useNode()` subscription stays open past the resolve call
+itself, for as long as the CALLER decides. `cms-actions.js`'s own former
+`holdEdit()` - a hand-rolled, app-level SECOND `useNode()` call working
+around the resolver's release-immediately posture from the outside - is
+gone; each section's click-to-load handler now resolves with `{hold:
+true}` directly and keeps the returned `release` on `activeEdit` until a
+different item loads or the form resets, the exact same lifecycle
+`holdEdit()` used to manage, just without a redundant extra subscription
+and available to ANY caller of `ContentResolver`, not only this one file.
+The eventual `edit*()` call's own `useNode()` finds the Node already
+attached (never torn down in the first place) and reuses it instantly - no
+network round-trip, no timeout race, and no reliance on `isNodeSynced()`'s
+own fast-path at all for this specific scenario (that fast-path, from the
+"Subscribe statt Polling" work further down this section, remains what
+protects every OTHER re-subscribe - a fresh visitor, a reload, a second
+browser tab - that never went through a held resolve to begin with).
+`ContentResolver`'s bare (no `hold`) calls keep releasing immediately,
+unchanged - correct for ordinary rendering, where holding every resolved
+Node open for a whole visit would leak subscriptions.
 
 **A second, deeper real bug in the SAME family, also deployment-observed:
 a route/template/style that had just been created or edited would appear
@@ -931,8 +1002,9 @@ example.** Two compounding causes, both fixed together:
    Also fixed in `cms-actions.js`, on top of the `dev.js` fix: each
    section now holds its OWN registry Node open (`holdRegistry()`, opened
    once per section at wiring time, same "never release during normal
-   operation" posture as `holdEdit()` above) for the CMS session's whole
-   lifetime, so `refreshList()`/`registerContentName()`/`publishRoute()`
+   operation" posture the resolve-with-`hold` calls above use for the
+   edited content Node itself) for the CMS session's whole lifetime, so
+   `refreshList()`/`registerContentName()`/`publishRoute()`
    all find it already attached after the first call - not just
    eventually-correct (the `dev.js` fix alone already guarantees that) but
    actually FAST, with zero further network round-trips for the rest of
@@ -1636,6 +1708,152 @@ neither depends on the other's RESULT), and `shell.js`'s own
 `joinSpace()`/`fetchRelayAdmins()` boot-sequence calls (a completely
 independent, unauthenticated read, needlessly held until AFTER `joinSpace()`'s
 own two-step POST-then-GET finished).
+
+**"Subscribe statt Polling" (a later revision): the `sync-ack` fast-path
+above was still a POLL LOOP that merely gave up early - `waitFor()`/
+`waitForSync()` re-checked `checkFn` on a fixed `interval` (20ms) timer
+regardless of whether anything had actually changed. Both are now
+EVENT-DRIVEN when `space.bus` exists (real in production - `shell.js`
+always constructs one): they subscribe to `space.node.<id>.changed`/
+`.sync-ack` (already emitted by `Space` for every write/ack, whether or not
+anything was listening) and only re-run `checkFn` when one of those
+actually fires - resolving the instant the real signal arrives instead of
+up to `interval` later, and burning zero cycles in between. Falls back to
+the identical old poll loop only for a `space` with no `bus` (some
+lower-level test setups) - `isNodeSynced()`'s own STATE is correct either
+way, only the EVENT announcing a change to it is unavailable without one.
+`verifyWritesAcked()` (`@qu/app-shell`) got the same treatment: its own
+trailing "poll until acked>=expected" loop is now a single event listener
+racing a deadline timer.
+
+While adding tests for this, a SEPARATE, previously-undetected bug
+surfaced: `resolvePage()`/`resolveTemplate()`/`resolveStyle()`/
+`resolveView()` (`resolver.js`) resolved as soon as their checked field(s)
+were non-empty, WITHOUT first gating on `isNodeSynced()` the way
+`resolveGroup()`/`resolvePrivatePage()`/`resolveSharedList()` already did.
+On a fresh re-subscribe (e.g. right after `Space.useNode()`'s own
+ref-counted teardown - see the "does not exist (or has not synced)" bug
+just above, worked around for the CMS's own edit flow by resolve-with-
+`hold`, see the follow-up entry below, but `useNode()`'s teardown-on-
+release mechanism itself is unchanged for every OTHER caller), a relay
+replays a Node's envelopes OLDEST FIRST - a STALE,
+pre-edit value can already be non-empty and get returned before the
+Node's own LATEST edit envelope has even been applied. Caught by a new
+regression test (`wait-for-sync-events.test.js`: edit a page on a fresh
+connection, immediately resolve it back) that failed with the OLD content
+even though the edit had already been relay-acked. Fixed the same way the
+three methods above already were: gate every `checkFn` on
+`isNodeSynced(id)` first. Also wired `space`/`nodeId` through to
+`waitForSync()` at every `edit*()`/`editGlobal*()` call site in `dev.js`
+that had been omitting them (all but `getOrSyncRegistryNode()` and
+`editGroup()`/`editPrivatePage()`) - the exact functions behind the
+"does not exist (or has not synced)" production bug never actually had the
+`isNodeSynced()` fast-path wired in at all before this.
+
+**"Bootstrap-Vereinfachung" (a further later revision): `holdEdit()`
+removed, replaced by a resolver-level `{hold: true}` option, not just
+another app-level workaround for the same gap.** The "does not exist (or
+has not synced)" bug's ROOT CAUSE (`Space.useNode()`'s ref-counted
+teardown-on-release discarding a Node the instant nothing holds it, even
+for a heartbeat) was never itself eliminated by either fix above - only
+worked around, first by `cms-actions.js`'s own hand-rolled extra
+`useNode()` call (`holdEdit()`), one file reinventing the same fix any
+OTHER app wanting it would have had to reinvent too. Genuinely removing
+`useNode()`'s teardown-on-release semantics outright was deliberately
+rejected (`packages/space-core/test/use-node.test.js`'s own "after a full
+release, calling `useNode()` again for the same id starts completely
+fresh" is asserted, real behavior other callers depend on, and a
+time-based "grace period before tearing down" would still not cover a
+user who takes minutes to fill out a form, only a fast click-through).
+Instead, `resolvePage()`/`resolveTemplate()`/`resolveStyle()`/
+`resolveView()` (`@qu/app-core`'s `resolver.js`) gained an opt-in `hold`
+option: skips the method's own internal `release()`, returns
+`{page/value/view, release}` instead of the bare value, so the CALLER
+decides how long to keep the exact same subscription open - unbounded, the
+same "for as long as the form stays open" duration `holdEdit()` already
+correctly provided, just as a first-class, reusable resolver capability
+instead of a private per-file trick. `cms-actions.js`'s three former
+`holdEdit()` call sites (Templates/Styles' shared `wireSimpleContentSection()`,
+Content's page-row click handler, Content's "View laden" button) now
+resolve with `{hold: true}` directly and keep the returned `release` on
+`activeEdit`, the exact same lifecycle as before, one fewer redundant
+`useNode()` call each. `holdRegistry()` (a different, already-correct
+pattern - a whole CMS session's own registry, never released during normal
+operation, not tied to any one resolve call) is unaffected. See
+`packages/app-core/test/resolver-hold.test.js` for the end-to-end proof: a
+held `resolvePage()` on one `Space` instance, followed by `editPage()` on
+that SAME instance, needs neither the `isNodeSynced()` fast-path nor any
+wait at all to succeed, because the Node was never torn down to begin
+with.
+
+**"Views/Pages/Templates-UX" (Phase 4): delete finally exists, and a
+complex View can be imported as one JSON blob.** Two real, previously
+missing CMS capabilities, both closing a gap the framework's own data
+model (not just the UI) had never actually supported:
+
+1. **`@qu/space-core`'s `field.js` `ListField` gained `remove(index,
+   length)`** - before this, `ListField` only ever had `push()` (this
+   document's own `platformAppsKind` doc comment already flagged the
+   symptom: "`ListField` has no removal primitive... no `unregisterApp()`")
+   - the STRUCTURAL reason Pages/Templates/Styles/Views had no delete
+     story at all: their registries (`routeRegistryKind`/
+   `templateRegistryKind`/`styleRegistryKind`) are `shape: 'list'` fields,
+   and nothing could ever un-register an entry once pushed. `remove()`
+   wraps Yjs' own `Y.Array.delete()` - CRDT-merged against a concurrent
+   insert/remove exactly like `TextField.delete()` already is for
+   `Y.Text`, proven in `packages/space-core/test/field.test.js` with a
+   genuine two-peer concurrent remove-vs-push scenario (both survive,
+   never one clobbering the other).
+2. **`dev.js` gained `deleteTemplate()`/`deleteStyle()`/`deletePage()`/
+   `deleteView()`** (plus `unregisterContentName()`/`unpublishRoute()`,
+   the registry-side removal helpers, symmetric with the existing
+   `registerContentName()`/`publishRoute()`) - each removes the item from
+   its own registry (so `resolveTemplateNames()`/`resolveStyleNames()`/
+   `resolveRoutes()` stop enumerating it) and best-effort clears its own
+   content (`editTemplate()`/`editStyle()`/`editPage()`/`editView()` under
+   the hood, writing empty values) - still NOT a genuine Node deletion (no
+   such primitive exists anywhere in this architecture, the same "cleared
+   and unreachable via the registry, not erased" caveat
+   `nullGlobalAppContent()` already established for whole-app uninstalls,
+   generalized here to one item at a time). Self-owned only, deliberately
+   no `ownerPub` override (matching `createTemplate()`/`createStyle()`/
+   `createPage()`'s own scope) - a granted co-editor can fully edit
+   someone else's content through the exact same form already, but cannot
+   delete it: `unregisterContentName()`/`unpublishRoute()` only ever look
+   at the CALLING identity's own registry, so a co-editor's attempt fails
+   with a clear "is not registered" error rather than silently doing
+   nothing or touching the wrong registry. `deleteGlobalPage()` and
+   friends (the `realm: 'global'` counterparts) don't exist yet - real,
+   deliberate follow-up work, not attempted here.
+   `cms-actions.js` wires a "Löschen" button next to every Templates/
+   Styles/Content row (non-global only, same "no native `confirm()`"
+   posture `admin-actions.js`'s own "Deinstallieren" already established -
+   fires immediately, framework-provided interactivity stays a plain DOM
+   element) - `data-qu-cms-delete="template"\|"style"\|"content"` for a
+   test/CSS hook. Every listed Content route gets ONE delete button
+   regardless of whether it was authored via the "Text/HTML" picker or the
+   "Geteilte Liste"/"Seiten-Filter" (View) picker - `createView({route})`'s
+   own "auto-creates a wrapper page" behavior (§7 above) means every routed
+   item has a REAL wrapper page underneath it either way, so `deletePage()`
+   alone is correct and sufficient for the row - a View's own SEPARATE Node
+   (`sources`/`sortBy`/...) is untouched by it; deleting THAT specifically
+   has a Dev API (`deleteView()`) but no dedicated UI button yet.
+3. **A complete View definition can now be imported as one JSON blob** -
+   the user's own explicit ask, closing the gap the existing `sourcesOverride`
+   textarea (a raw-JSON escape hatch for the `sources` array alone,
+   `wireContent()`'s own doc comment) only partially addressed: a new
+   "View aus JSON übernehmen" `<details>` block above the Content list
+   accepts `{name, route, sources, sortBy, sortOrder, limit, itemTemplate,
+   template, style}` (every field optional except `name` or `route`) and
+   populates the form's own fields on click - `sourcesOverride` specifically
+   (never the simple single-source picker fields), so ANY `sources` shape
+   round-trips correctly, simple or multi-source alike, with no
+   special-casing. Deliberately does NOT auto-submit - "Speichern" still has
+   to be clicked, same review-before-save posture loading an existing item
+   into the form already has.
+See `packages/app-core/test/dev-delete.test.js`, `packages/space-core/test/field.test.js`'s
+new `ListField.remove()` cases, and `packages/app-shell/test/cms-delete.test.js`/
+`cms-view-import.test.js` for the end-to-end proofs.
 
 **A self-provisioned multiuser participant's OWN registries were silently
 dropped by the relay (a real, shipped bug, found and fixed in the same

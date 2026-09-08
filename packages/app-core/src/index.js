@@ -35,8 +35,12 @@ export {
   editTemplate,
   editStyle,
   editPage,
+  deleteTemplate,
+  deleteStyle,
+  deletePage,
   grantContentWriter,
   publishRoute,
+  unpublishRoute,
   installAppBundle,
   registerApp,
   setAppMode,
@@ -68,6 +72,7 @@ export {
   pushToSharedList,
   createView,
   editView,
+  deleteView,
 } from './dev.js';
 export { createAppResolveKindSchema } from './relay-resolver.js';
 export { openLiveView, VIEW_SOURCE_ADAPTERS } from './view-sources.js';

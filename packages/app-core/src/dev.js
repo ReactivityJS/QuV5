@@ -50,28 +50,58 @@ function cachedGlobalAppAnchor(prefix) {
 }
 
 /**
- * Polls `checkFn` (may itself be async - `'atomic'`-shape fields' own
- * `.get()` is a Promise, `'text'`-shape's is not, see field.js) until it
- * returns truthy, `timeout` elapses, or (when `space`/`nodeId` are given)
- * `space.isNodeSynced(nodeId)` has been true for a full `settle` window
- * while `checkFn` is still falsy - the SAME "a relay's `sync-ack` means
- * don't bother waiting out the rest of the timeout for a Node that's
- * confirmed to not exist, but give a settle margin first" fast-path
- * `resolver.js`'s own identically-shaped `waitFor()` uses (see that
- * function's own doc comment on both `isNodeSynced()` and `settle` - in
- * particular why the settle margin is NOT optional: a concurrent write
- * from a genuinely different peer has no ordering guarantee relative to an
- * empty sync-ack), local here (not imported from resolver.js) so this file
- * stays independent of that one. `space`/`nodeId` are OPTIONAL (default
- * `null`) - every `edit*()` call site below omits them (an edit's own
- * "does this exist" check has no single `nodeId` fast-path win worth
- * threading through every call site for now), only
- * `getOrSyncRegistryNode()` passes them, since it sits directly in
- * `createTemplate()`/`createStyle()`'s own hot path (a brand-new
- * identity's first-ever registry write, exactly the sequence `boot.js`'s
- * `ensureSelfProvisioned()` runs on a first-time visit).
+ * Resolves `true` the instant `checkFn` (may itself be async -
+ * `'atomic'`-shape fields' own `.get()` is a Promise, `'text'`-shape's is
+ * not, see field.js) returns truthy, `false` once `timeout` elapses, or
+ * (when `space`/`nodeId` are given) once `space.isNodeSynced(nodeId)` has
+ * been true for a full `settle` window while `checkFn` is still falsy -
+ * the SAME "a relay's `sync-ack` means don't bother waiting out the rest of
+ * the timeout for a Node that's confirmed to not exist, but give a settle
+ * margin first" fast-path `resolver.js`'s own identically-shaped
+ * `waitFor()` uses (see that function's own doc comment on both
+ * `isNodeSynced()`, `settle`, and the EVENT-DRIVEN vs. polling-fallback
+ * split this function mirrors exactly - `space.bus` real events when
+ * available, a bounded poll loop only when `space` has none), local here
+ * (not imported from resolver.js) so this file stays independent of that
+ * one. `space`/`nodeId` are OPTIONAL (default `null`) - a caller with
+ * neither just gets the plain "poll `checkFn` until `timeout`" behavior,
+ * no event subscription, no `isNodeSynced()` fast-path (every `edit*()`
+ * call site below DOES pass both, its own already-computed content-
+ * addressed `id`; only a handful of genuinely `id`-less checks, if any
+ * ever exist, would fall back to this).
  */
 async function waitForSync(checkFn, { timeout = 3000, interval = 20, settle = 150, space = null, nodeId = null } = {}) {
+  if (await checkFn()) return true;
+
+  const bus = space?.bus;
+  if (!bus || !nodeId) return waitForSyncByPolling(checkFn, { timeout, interval, settle, space, nodeId });
+
+  return new Promise((resolve) => {
+    let done = false;
+    let settleTimer = null;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(settleTimer);
+      clearTimeout(deadlineTimer);
+      offChanged();
+      offSyncAck();
+      resolve(value);
+    };
+    const recheck = async () => {
+      if (done) return;
+      if (await checkFn()) return finish(true);
+      if (space.isNodeSynced(nodeId) && settleTimer === null) settleTimer = setTimeout(() => finish(false), settle);
+    };
+    const offChanged = bus.on(`space.node.${nodeId}.changed`, recheck);
+    const offSyncAck = bus.on(`space.node.${nodeId}.sync-ack`, recheck);
+    const deadlineTimer = setTimeout(() => finish(false), timeout);
+    recheck(); // covers "already synced by the time we started listening" - isNodeSynced() is current STATE, not a replayed event.
+  });
+}
+
+/** The pre-event-driven implementation, kept as `waitForSync()`'s own fallback for a `space` with no `bus` (or no `nodeId`) - see that function's own doc comment. Identical semantics, just re-checking on a fixed `interval` instead of on the real underlying events. */
+async function waitForSyncByPolling(checkFn, { timeout, interval, settle, space, nodeId }) {
   const deadline = Date.now() + timeout;
   let syncedAt = null;
   for (;;) {
@@ -181,6 +211,26 @@ async function registerContentName(space, registryKind, fieldName, name) {
   return node;
 }
 
+/**
+ * The inverse of `registerContentName()` - `@qu/space-core`'s `field.js`
+ * `ListField.remove()` (Phase 4's own "Bootstrap-Vereinfachung" follow-up:
+ * `ListField` only ever had `push()` before, so no registry entry could
+ * ever be un-registered at all - this is the primitive `delete*()` below
+ * needed and didn't have). Returns `true` if an entry was actually found
+ * and removed, `false` if `name` was never registered (a correct no-op,
+ * same "nothing to do" posture as every other framework wiring in this
+ * codebase) - `delete*()` uses this to decide whether to bother touching
+ * the content Node at all.
+ */
+async function unregisterContentName(space, registryKind, fieldName, name) {
+  const node = await getOrSyncRegistryNode(space, registryKind);
+  const existing = await node.field(fieldName).toArray();
+  const index = existing.findIndex((entry) => entry?.name === name);
+  if (index === -1) return false;
+  node.field(fieldName).remove(index, 1);
+  return true;
+}
+
 /** Creates a template at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-template', name)` - `Space.createNode()` derives it (and self-grants) itself, see this file's own top doc comment. Also registers `name` into `templateRegistryKind` (kinds.js) so `ContentResolver.resolveTemplateNames()` can enumerate it - see `editTemplate()` for updating an EXISTING template instead of creating a new one. */
 export async function createTemplate(space, { name, html }) {
   const node = await space.createNode(templateKind, { html }, { path: name });
@@ -235,7 +285,7 @@ export async function createPage(space, { route, title, template = null, content
 export async function editTemplate(space, { name, html, ownerPub = space.identity.signingPub, timeout } = {}) {
   const id = await deriveContentNodeId(ownerPub, templateKind.kind, name);
   const { node, release } = await space.useNode(id, templateKind);
-  const synced = await waitForSync(() => node.field('html').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('html').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editTemplate: template "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createTemplate() for a genuinely new one`);
@@ -245,11 +295,38 @@ export async function editTemplate(space, { name, html, ownerPub = space.identit
   return node;
 }
 
+/**
+ * Removes `name` from `templateRegistryKind` (so `resolveTemplateNames()`
+ * stops enumerating it - what actually makes it disappear from a CMS list)
+ * and best-effort clears its own `html` to `''` (`editTemplate()` under
+ * the hood - see this file's own top doc comment, and architecture.md's
+ * own "not a genuine deletion" note repeated once more here: the
+ * underlying Y.Doc has no removal primitive at all, only "cleared,
+ * unreachable via the registry" - a stale direct link to this exact name
+ * would resolve to an EMPTY template, never the old content). Throws if
+ * `name` was never registered - a UI's own "Löschen" button only ever
+ * appears next to an already-`resolveTemplateNames()`-listed entry, so
+ * this should never actually happen from real usage, same posture
+ * `editTemplate()` itself already has for "does not exist."
+ * @param {import('@qu/space-core').Space} space
+ * @param {{name: string, timeout?: number}} params
+ */
+export async function deleteTemplate(space, { name, timeout } = {}) {
+  const removed = await unregisterContentName(space, templateRegistryKind, 'templates', name);
+  if (!removed) throw new Error(`deleteTemplate: template "${name}" is not registered (already deleted?)`);
+  try {
+    await editTemplate(space, { name, html: '', timeout });
+  } catch {
+    // Best-effort - see this function's own doc comment; the registry removal above already did the
+    // part that actually matters (nothing enumerates/resolves-by-name this template any more).
+  }
+}
+
 /** Style counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). */
 export async function editStyle(space, { name, css, ownerPub = space.identity.signingPub, timeout } = {}) {
   const id = await deriveContentNodeId(ownerPub, styleKind.kind, name);
   const { node, release } = await space.useNode(id, styleKind);
-  const synced = await waitForSync(() => node.field('css').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('css').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editStyle: style "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createStyle() for a genuinely new one`);
@@ -257,6 +334,17 @@ export async function editStyle(space, { name, css, ownerPub = space.identity.si
   replaceText(node.field('css'), css);
   release();
   return node;
+}
+
+/** Style counterpart to `deleteTemplate()` - see its own doc comment. */
+export async function deleteStyle(space, { name, timeout } = {}) {
+  const removed = await unregisterContentName(space, styleRegistryKind, 'styles', name);
+  if (!removed) throw new Error(`deleteStyle: style "${name}" is not registered (already deleted?)`);
+  try {
+    await editStyle(space, { name, css: '', timeout });
+  } catch {
+    // Best-effort - see deleteTemplate()'s own doc comment, identical reasoning.
+  }
 }
 
 /** Page counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). Only fields actually passed are updated; omit `title`/`template`/`content`/`data`/`style` to leave them unchanged. `title`/`template`/`data`/`style` are `'atomic'`-shape (`field.set()`); `content` is `'text'`-shape, see `replaceText()`'s own doc comment. `data` is kinds.js's `pageKind` own structured-data field (see its doc comment) - passing it REPLACES the whole object (an `'atomic'` field is one opaque last-write-wins value, not merged key-by-key). `style` - see `createPage()`'s own doc comment; pass `null` explicitly to revert to the app Manifest's own `theme`. */
@@ -270,7 +358,7 @@ export async function editPage(space, { route, title, template, content, data, s
   const synced = await waitForSync(async () => {
     const t = await node.field('title').get();
     return t !== '' && node.field('content').get() !== '';
-  }, { timeout });
+  }, { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editPage: page "${route}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createPage() for a genuinely new one`);
@@ -282,6 +370,27 @@ export async function editPage(space, { route, title, template, content, data, s
   if (style !== undefined) await node.field('style').set(style);
   release();
   return node;
+}
+
+/**
+ * Removes `route` from `routeRegistryKind` (`unpublishRoute()`, defined
+ * further down next to `publishRoute()`) and best-effort clears the
+ * page's own `title`/`content` to `''` (`editPage()` under the hood - same
+ * "not a genuine deletion, just cleared and unreachable via the registry"
+ * reasoning `deleteTemplate()`'s own doc comment explains in full). Throws
+ * if `route` was never published - a UI's own "Löschen" button only ever
+ * appears next to an already-listed entry.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{route: string, timeout?: number}} params
+ */
+export async function deletePage(space, { route, timeout } = {}) {
+  const removed = await unpublishRoute(space, { route });
+  if (!removed) throw new Error(`deletePage: route "${route}" is not published (already deleted?)`);
+  try {
+    await editPage(space, { route, title: '', content: '', timeout });
+  } catch {
+    // Best-effort - see deleteTemplate()'s own doc comment, identical reasoning.
+  }
 }
 
 /** `{pub, xPub}` (raw bytes, `Space`'s own `members` shape) -> the SAME shape base64-encoded, `groupKind`'s own storage format (kinds.js's own doc comment on why: readable/comparable as plain JSON, same convention `platformAppsKind`'s entries already use for pubkeys). */
@@ -533,7 +642,7 @@ export async function createView(space, { name, route = null, template = null, s
 export async function editView(space, { name, ownerPub = space.identity.signingPub, timeout, ...fields } = {}) {
   const id = await deriveContentNodeId(ownerPub, viewKind.kind, name);
   const { node, release } = await space.useNode(id, viewKind);
-  const synced = await waitForSync(() => node.field('itemTemplate').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('itemTemplate').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editView: view "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createView() for a genuinely new one`);
@@ -544,6 +653,29 @@ export async function editView(space, { name, ownerPub = space.identity.signingP
   }
   release();
   return node;
+}
+
+/**
+ * View counterpart to `deletePage()` - see its own doc comment for the
+ * overall "not a genuine deletion, just cleared and unreachable" reasoning
+ * - with one real difference: a View has no separate registry the way
+ * templates/styles/pages do (`resolveView()` is always a direct, by-name
+ * lookup, never an enumeration - this file's own top doc comment on
+ * `viewKind`), so there is no cheap "was this ever registered" pre-check
+ * to gate on the way `deleteTemplate()`/`deleteStyle()`/`deletePage()`
+ * have - `editView()`'s own "does not exist" error is left to propagate
+ * as-is, never swallowed, since it is the ONLY signal here that anything
+ * was actually deleted at all. `route` is optional (an embed-only View,
+ * created with no route, has nothing to unpublish) - pass it when known
+ * (the CMS Content editor's own form already has it alongside `name`) so
+ * a routed View's wrapper page stops resolving too, not just the View's
+ * own name.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{name: string, route?: string, timeout?: number}} params
+ */
+export async function deleteView(space, { name, route, timeout } = {}) {
+  if (route) await unpublishRoute(space, { route }).catch(() => {});
+  await editView(space, { name, itemTemplate: '', sources: [], timeout });
 }
 
 /**
@@ -588,7 +720,7 @@ export async function editCollectionItem(space, { itemKind, path, fields, ownerP
       if (value !== null && value !== undefined && value !== '') return true;
     }
     return false;
-  }, { timeout });
+  }, { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editCollectionItem: "${path}" (${itemKind.kind}) does not exist (or has not synced within ${timeout ?? 3000}ms) - use createCollectionItem() for a genuinely new one`);
@@ -640,6 +772,16 @@ export async function publishRoute(space, { route, title }) {
   const node = await getOrSyncRegistryNode(space, routeRegistryKind);
   await node.field('routes').push({ route, title });
   return node;
+}
+
+/** The inverse of `publishRoute()` - see `unregisterContentName()`'s own doc comment, identical reasoning, just matched by `route` instead of `name` (`routeRegistryKind`'s own entry shape, `{route, title}`). @returns {Promise<boolean>} `true` if `route` was actually published and is now removed, `false` if it never was. */
+export async function unpublishRoute(space, { route }) {
+  const node = await getOrSyncRegistryNode(space, routeRegistryKind);
+  const existing = await node.field('routes').toArray();
+  const index = existing.findIndex((entry) => entry?.route === route);
+  if (index === -1) return false;
+  node.field('routes').remove(index, 1);
+  return true;
 }
 
 /**
@@ -1043,7 +1185,7 @@ export async function editGlobalTemplate(space, prefix, { name, html, timeout } 
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminTemplateKind.kind, name);
   const { node, release } = await space.useNode(id, adminTemplateKind);
-  const synced = await waitForSync(() => node.field('html').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('html').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editGlobalTemplate: template "${name}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalTemplate() for a genuinely new one`);
@@ -1058,7 +1200,7 @@ export async function editGlobalStyle(space, prefix, { name, css, timeout } = {}
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminStyleKind.kind, name);
   const { node, release } = await space.useNode(id, adminStyleKind);
-  const synced = await waitForSync(() => node.field('css').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('css').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editGlobalStyle: style "${name}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalStyle() for a genuinely new one`);
@@ -1076,7 +1218,7 @@ export async function editGlobalPage(space, prefix, { route, title, template, co
   const synced = await waitForSync(async () => {
     const t = await node.field('title').get();
     return t !== '' && node.field('content').get() !== '';
-  }, { timeout });
+  }, { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editGlobalPage: page "${route}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalPage() for a genuinely new one`);
@@ -1190,7 +1332,7 @@ export async function editGlobalView(space, prefix, { name, timeout, ...fields }
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminViewKind.kind, name);
   const { node, release } = await space.useNode(id, adminViewKind);
-  const synced = await waitForSync(() => node.field('itemTemplate').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('itemTemplate').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editGlobalView: view "${name}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalView() for a genuinely new one`);

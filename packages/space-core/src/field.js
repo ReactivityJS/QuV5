@@ -234,6 +234,24 @@ class ListField {
     return Promise.all(this._yarray.toArray().map((envelope) => decryptEnvelopeFor(envelope, this._ctx.identity)));
   }
 
+  /**
+   * Removes `length` entries starting at `index` - Yjs' own
+   * `Y.Array.delete()`, CRDT-merged against a concurrent insert/remove
+   * exactly like `TextField.delete()` already is for `Y.Text` (this file's
+   * own top doc comment on `'list'`) - two peers removing DIFFERENT indices
+   * at the same time never corrupt each other's edit the way a naive
+   * "replace the whole array" last-write-wins field would. `index` is
+   * this array's OWN index order, the same order `toArray()` returns -
+   * find the entry to remove by reading `toArray()` first (this class has
+   * no built-in "find by predicate," callers already need to decrypt
+   * `'encrypted'`-visibility entries to compare them anyway, so a bespoke
+   * search primitive here would just duplicate that same read).
+   * @param {number} index @param {number} [length] @param {{recipients?: Array<Uint8Array>}} [options] - see this file's own top doc comment on `recipients`.
+   */
+  remove(index, length = 1, { recipients } = {}) {
+    withWriteContext(this._doc, () => this._yarray.delete(index, length), { visibility: this._visibility, recipients }, this._ctx.kindSchema);
+  }
+
   get length() {
     return this._yarray.length;
   }

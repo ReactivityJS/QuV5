@@ -112,6 +112,49 @@ test('list field: concurrent pushes from two peers converge on the same, determi
   assert.deepEqual(listA, listB); // both peers converge on the identical order, with zero custom sort/cursor code.
 });
 
+test('list field: remove() deletes exactly the entry at the given index, shifting the rest', async () => {
+  const kind = defineKind('registry', { fields: { names: { shape: 'list' } } });
+  const author = await actor();
+  const doc = createDoc(kind, author.signingPub);
+  const node = new SpaceNode({ id: 'reg1', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
+
+  await node.field('names').push('a');
+  await node.field('names').push('b');
+  await node.field('names').push('c');
+
+  node.field('names').remove(1, 1); // removes 'b'.
+
+  assert.deepEqual(await node.field('names').toArray(), ['a', 'c']);
+});
+
+test('list field: a concurrent remove() and push() from two peers both survive - CRDT-merged, not last-write-wins over the whole array', async () => {
+  const kind = defineKind('registry', { fields: { names: { shape: 'list' } } });
+  const author = await actor();
+
+  const docA = createDoc(kind, author.signingPub);
+  const docB = new Y.Doc();
+  Y.applyUpdate(docB, Y.encodeStateAsUpdate(docA));
+  const nodeA = new SpaceNode({ id: 'reg2', kindSchema: kind, doc: docA, identity: author, recipientXPubKeys: () => [] });
+  const nodeB = new SpaceNode({ id: 'reg2', kindSchema: kind, doc: docB, identity: author, recipientXPubKeys: () => [] });
+
+  await nodeA.field('names').push('a');
+  await nodeA.field('names').push('b');
+  Y.applyUpdate(docB, Y.encodeStateAsUpdate(docA, Y.encodeStateVector(docB)));
+
+  // Peer A removes 'a' (index 0) while peer B, at the SAME time and unaware of A's removal, pushes 'c' -
+  // a naive "whole array is one last-write-wins value" field would let one of these clobber the other.
+  nodeA.field('names').remove(0, 1);
+  await nodeB.field('names').push('c');
+
+  Y.applyUpdate(docB, Y.encodeStateAsUpdate(docA, Y.encodeStateVector(docB)));
+  Y.applyUpdate(docA, Y.encodeStateAsUpdate(docB, Y.encodeStateVector(docA)));
+
+  const listA = await nodeA.field('names').toArray();
+  const listB = await nodeB.field('names').toArray();
+  assert.deepEqual(listA, listB); // converge.
+  assert.deepEqual(listA, ['b', 'c']); // BOTH the removal and the concurrent push took effect.
+});
+
 test('a notify hint declared in the Kind-Schema is accepted and rides as the Yjs transaction origin', async () => {
   const kind = defineKind('channel', { fields: { messages: { shape: 'list' } }, notifyTopics: ['message', 'mention'] });
   const author = await actor();
