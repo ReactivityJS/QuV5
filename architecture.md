@@ -381,8 +381,8 @@ awareness this package exists either.
 
 | File | Purpose |
 |---|---|
-| `src/context.js` | `findQuSpace()`/`findQuKind()` — ancestor-DOM resolution (a Component reaches its `Space`/Kind-Schema by walking up for a `.quSpace`/`.quKinds` property on some ancestor, never a global — the same pattern QuV3's own `packages/ui/src/components.js` established, `findQu()`). `resolveTarget()` — binds to a sole child element (e.g. a wrapped `<input>`) instead of the Component itself, when there is one. `assertSafeAttrMode()`/`getPath()` — shared guards/helpers. |
-| `src/resolve.js` | `resolveNodeRef()`/`resolveField()` — turns a Component's `kind`/`node-id`/`field` attributes (or `.kindSchema`/`.nodeId` JS properties, for a computed id/an app-owned Kind-Schema object) into a subscribed `{field, release}`, retrying once on the next microtask for the "ancestor context set after append" ordering hazard. |
+| `src/context.js` | `findQuSpace()`/`findQuKind()` — ancestor-DOM resolution (a Component reaches its `Space`/Kind-Schema by walking up for a `.quSpace`/`.quKinds` property on some ancestor, never a global — the same pattern QuV3's own `packages/ui/src/components.js` established, `findQu()`). `findQuSelf()` (Phase 5) — same pattern for `.quSelfNodeId`/`.quSelfKind`, the "which page is currently being rendered here" pair `@qu/app-shell`'s `boot.js` sets on every render. `resolveTarget()` — binds to a sole child element (e.g. a wrapped `<input>`) instead of the Component itself, when there is one. `assertSafeAttrMode()`/`getPath()` — shared guards/helpers. |
+| `src/resolve.js` | `resolveNodeRef()`/`resolveField()` — turns a Component's `kind`/`node-id`/`field` attributes (or `.kindSchema`/`.nodeId` JS properties, for a computed id/an app-owned Kind-Schema object, or the `self` attribute — Phase 5, resolves both together via `findQuSelf()`, the only way to address "this page's own hash-derived node id" without a content author having to type it) into a subscribed `{field, release}`, retrying once on the next microtask for the "ancestor context set after append" ordering hazard. |
 | `src/qu-view.js` | `<qu-view>` — read-only, live-updating binding of one field into a DOM element, built on `@qu/space-ui`'s `bindField()`. |
 | `src/qu-bind.js` | `<qu-bind>` (extends `<qu-view>`) — two-way: live per-keystroke by default, or `editable="inline"` for explicit save/cancel editing (`@qu/space-ui`'s `makeInlineEditable()`) with a pencil/save/cancel icon UI this Component owns. |
 | `src/qu-list.js` | `<qu-list>` — stamps a `<template>` child once per item of a list Field, built on `@qu/space-ui`'s `bindList()` — atomic per-item updates (only a changed item re-renders), CURATED lists only (the list Field's own array IS the data; QuV3's DERIVED case — many sibling Nodes — is a documented future extension, not built speculatively). |
@@ -1854,6 +1854,63 @@ model (not just the UI) had never actually supported:
 See `packages/app-core/test/dev-delete.test.js`, `packages/space-core/test/field.test.js`'s
 new `ListField.remove()` cases, and `packages/app-shell/test/cms-delete.test.js`/
 `cms-view-import.test.js` for the end-to-end proofs.
+
+**Phase 5: `self` - a symbolic node-id reference, closing the actual reason
+Qu-Components in hand-authored Template HTML were impractical.** Views and
+Qu-Components (`<qu-view>`/`<qu-bind>`/`<qu-list>`) are NOT overlapping
+mechanisms - Views aggregate many Nodes into one filtered/sorted feed (§7
+above), Qu-Components live-bind exactly ONE known Node's field - but the
+Qu-Component side had a real, structural blocker no amount of UI could have
+papered over: `resolveNodeRef()` (`@qu/space-components`'s `resolve.js`)
+needed a literal `node-id` attribute, and a self-owned Page/Template/
+Style's own id is `deriveContentNodeId(ownerPub, kind, path)`'s OUTPUT - a
+hash, not something a content author can type. So `<qu-bind kind="qu-page"
+node-id="???" field="title">` - "bind to THIS SAME page's own title," the
+single most common case - had no practical way to be written by hand at
+all before this.
+
+Fixed with a THIRD, symbolic way to supply both `kindSchema` and `nodeId`
+together - the `self` attribute (`<qu-bind self field="title">`) - resolved
+against a new ancestor-context pair, `.quSelfNodeId`/`.quSelfKind`
+(`context.js`'s new `findQuSelf()`, the same ancestor-walk pattern
+`findQuSpace()`/`findQuKind()` already use), which `@qu/app-shell`'s
+`boot.js` now sets on `mountEl` after EVERY `renderPage()` call (six call
+sites - `startApp()`'s own `onChange`, `renderMultiUserRoute()`,
+`renderGlobalShell()`, `renderAggregateShell()` [explicitly cleared to
+`null` - its own `page` is a synthetic shell object, never a real
+`resolvePage()` result], and `startPlatform()`'s two route-matched
+branches) - UNLIKE `.quSpace` (set once, the Space itself never changes
+mid-session), `.quSelfNodeId`/`.quSelfKind` are reassigned on every single
+render, because WHICH page is "self" changes every time. The one and only
+data-side change this needed: `ContentResolver.resolvePage()` now also
+returns `nodeId`/`kindSchema` alongside the plain fields (additive, already
+computed internally, no new resolver call) - `AppRuntime.resolveRoute()`
+passes it through unchanged since `plan.page` already IS whatever
+`resolvePage()` returned.
+
+`self` takes priority over `kind`/`node-id` if a tag somehow has both (a
+self-contradictory case with no reason to prefer the less specific pair),
+and resolves to a correct "not yet resolvable" `null` - never a throw -
+when nothing at the current render came from `resolvePage()` (the
+aggregate-shell/"not found" cases above). Deliberately did NOT build:
+symbolic references to OTHER well-known anchors (the App's own Manifest,
+the current visitor's own identity) - same idea, real, separate follow-up
+work once `self` itself has seen real use; nor a visual "insert binding"
+UI in the Template editor - trivial to add on top now that the underlying
+addressing problem is solved, but not attempted here (a content author
+still hand-types `<qu-view self field="...">`, exactly like they already
+hand-type `<qu-slot>`/`data-qu-view`).
+
+See `packages/space-components/test/resolve.test.js` (unit-level:
+`findQuSelf()`/`resolveNodeRef()`'s `self` path, priority over `kind`/
+`node-id`, the `null`-not-throw cases) and `packages/app-shell/test/
+self-node-context.test.js` for the full end-to-end proof: a Page's own
+content declares `<qu-view self field="title">`, renders correctly with NO
+node id anywhere in the authored HTML, and updates LIVE across an
+`editPage()` call with no navigation/re-render involved - the actual
+"reactive Template, no app-specific JS" promise, now genuinely reachable
+by a content author instead of only by framework/app code holding a real
+`kindSchema` object in scope.
 
 **A self-provisioned multiuser participant's OWN registries were silently
 dropped by the relay (a real, shipped bug, found and fixed in the same

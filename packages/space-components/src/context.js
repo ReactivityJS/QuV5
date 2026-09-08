@@ -39,6 +39,29 @@ export function findQuKind(el, name) {
 }
 
 /**
+ * The `self`-node context - "the page currently being rendered here," set
+ * by `@qu/app-shell`'s `boot.js` (`.quSelfNodeId`/`.quSelfKind`, one pair
+ * per render, always reassigned together) on the SAME `mountEl` `.quSpace`
+ * already lives on. Backs `resolve.js`'s `self` attribute: a Template
+ * author can write `<qu-bind self field="title">` to bind this exact
+ * page's own `title` field WITHOUT ever knowing (or being able to type)
+ * this page's own content-addressed node id - `deriveContentNodeId()`'s
+ * output is a hash, never a human-typeable value, which is the actual
+ * reason Qu-Components in hand-authored Template HTML had no practical way
+ * to reference "this page itself" before `self` existed. `null` when
+ * nothing at this render came from `ContentResolver.resolvePage()` (an
+ * aggregate feed shell, a "not found" fallback, ...) - a Component with
+ * `self` set then simply never resolves, the same "not yet resolvable, not
+ * an error" posture `resolveNodeRef()` already has for a missing `kind`/
+ * `node-id`.
+ * @param {Element} el @returns {{nodeId: string, kindSchema: object}|null}
+ */
+export function findQuSelf(el) {
+  const found = walkUp(el, (n) => n.quSelfNodeId != null);
+  return found ? { nodeId: found.quSelfNodeId, kindSchema: found.quSelfKind } : null;
+}
+
+/**
  * A `<qu-view>`/`<qu-bind>` acts on itself unless it has exactly one child
  * ELEMENT, in which case that child (e.g. a wrapped `<input>`) becomes the
  * bind target instead - same rule QuV3's own `resolveTarget()` uses,
