@@ -160,6 +160,7 @@ import {
 import { verifyWritesAcked } from './verify-writes.js';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { registerAdminSection, listAdminSections } from './admin-sections.js';
+import { extensionPoints } from './extension-points.js';
 
 /** See this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...". Releases `previous` (if any) THEN opens+holds a fresh subscription for `(kind, name)`, owned by `ownerPub` (defaults to `space.identity` - the same default `editTemplate()`/`editStyle()`/`editPage()` themselves use; a GLOBAL page passes `globalAppAnchor(prefix)` instead, see `wireContent()`'s own global-mode branch). @returns {Promise<{node: object, release: () => void}>} */
 async function holdEdit(space, kind, name, previous, ownerPub = space.identity.signingPub) {
@@ -610,6 +611,22 @@ async function wireContent({ mountEl, doc, space, resolver, global = false, pref
         updateVisibility();
       });
       li.appendChild(btn);
+
+      // EXTENSION POINT - a plugin (Blog "Duplizieren", a future Forum "Verschieben", ...) offers
+      // extra per-row actions here, via `extensionPoints.collect('cms.pageActions', ...)`, WITHOUT
+      // this file importing that plugin or knowing it exists (`extension-points.js`'s own top doc
+      // comment). Each collected `{id, label, onClick}` becomes one more button in the SAME `<li>` -
+      // a correct no-op (no extra buttons) when nothing has contributed to this point.
+      const extraActions = await extensionPoints.collect('cms.pageActions', { route, page: pageKindHere, space, resolver, anchor, global });
+      for (const action of extraActions) {
+        const actionBtn = doc.createElement('button');
+        actionBtn.type = 'button';
+        actionBtn.dataset.quPageAction = action.id;
+        actionBtn.textContent = action.label;
+        actionBtn.addEventListener('click', () => action.onClick());
+        li.appendChild(actionBtn);
+      }
+
       list.appendChild(li);
     }
   }

@@ -13,6 +13,16 @@
  * from its own `index.js` - the exact same mechanism, no central file to
  * edit.
  *
+ * SITS ON `@qu/extensions`' `ExtensionPointHost` (a private instance,
+ * separate from `extension-points.js`'s app-shell-wide one - a registered
+ * SECTION and a registered CMS `cms.pageActions` contribution are different
+ * shapes with different lifecycles, no reason to share a namespace) -
+ * this file is now the FIRST thing that generalized onto it: it was
+ * already exactly this registry (ordered, id-keyed, "last registration for
+ * a given id wins") before `@qu/extensions` existed, so this is a pure
+ * internal refactor - every export below keeps its exact original
+ * signature and behavior.
+ *
  * A section is `{id, label, order, buildPageContent(ctx), wire(ctx)}`:
  *   - `id` - the URL segment (`/cms/<id>`) and this section's own stable
  *     key - must be unique across every registered section.
@@ -37,20 +47,24 @@
  * page linking to each - genuinely data-driven: registering a fourth
  * section changes what gets installed with zero edits to either function.
  */
-const sections = new Map();
+import { ExtensionPointHost } from '@qu/extensions';
+
+const ADMIN_SECTION_POINT = 'app-shell.adminSection';
+const host = new ExtensionPointHost();
 
 /** @param {{id: string, label: string, order?: number, buildPageContent: (ctx: {prefix: string, global: boolean}) => string, wire: (ctx: object) => Promise<void>|void}} section */
 export function registerAdminSection(section) {
   if (!section?.id) throw new Error('registerAdminSection: "id" is required');
-  sections.set(section.id, { order: 0, ...section });
+  const { id, order = 0, ...rest } = section;
+  host.contribute(ADMIN_SECTION_POINT, { id, order, ...rest });
 }
 
-/** Every registered section, sorted by `order` (registration order breaks ties). */
+/** Every registered section, sorted by `order` (registration order breaks ties) - `ExtensionPointHost`'s own bookkeeping fields (`key`/`point`/`seq`/`appId`/`handler`, none of them ever set by `registerAdminSection()` above) are stripped back off so callers keep seeing the exact original `{id, label, order, buildPageContent, wire}` shape. */
 export function listAdminSections() {
-  return [...sections.values()].sort((a, b) => a.order - b.order);
+  return host.listContributions(ADMIN_SECTION_POINT).map(({ key, point, seq, appId, handler, ...section }) => section);
 }
 
 /** Test-only escape hatch - a fresh `node --test` process loads every section module exactly once anyway (registration is a module-load side effect, not per-test state), but a test that deliberately registers its OWN throwaway section needs a way to undo that without leaking into later tests in the SAME process. */
 export function _clearAdminSectionsForTest() {
-  sections.clear();
+  host._clearPointForTest(ADMIN_SECTION_POINT);
 }

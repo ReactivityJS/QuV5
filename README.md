@@ -53,6 +53,15 @@ standalone or via Docker).
   (optional): delivery-status helpers (write-ack correlation, durable
   read receipts) and `UploadOutbox` (local-save-then-sync file upload
   queue with retry) - built entirely on `@qu/space-core`'s public API.
+- [`packages/extensions`](./packages/extensions) - `@qu/extensions`:
+  `ExtensionPointHost` - one ordered, id-addressable registry apps
+  CONTRIBUTE into (a menu entry, a context-menu action, a piece of rendered
+  chrome, an admin section) and framework/UI code RENDERS FROM
+  (`renderSlot`/`collect`/`renderFrom`), without either side importing the
+  other - the plugin/composability primitive, plus `resolveActionHref()`
+  for pure-data (no-handler) contributions. `@qu/app-shell`'s own
+  `src/extension-points.js` is the one shared, process-wide instance every
+  framework wiring and bundle uses.
 - [`packages/space-ui`](./packages/space-ui) - `@qu/space-ui` (optional):
   vanilla JS/DOM reactive bindings - one/two-way field binding,
   contenteditable inline-edit with save/cancel, keyed list diffing,
