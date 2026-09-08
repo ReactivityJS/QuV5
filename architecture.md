@@ -47,7 +47,8 @@ signed and (usually) end-to-end encrypted. It is deliberately:
 QuV5/
 ├── packages/
 │   ├── core/            @qu/core            - crypto primitives (Ed25519/X25519/AES-GCM), no framework logic
-│   ├── events/          @qu/events          - EventBus: the one hooks/listeners/slots mechanism
+│   ├── events/          @qu/events          - EventBus: the one dot-namespaced pub/sub mechanism for domain/change/UI events
+│   ├── extensions/      @qu/extensions      - ExtensionPointHost: the plugin/composability registry (slots, actions, admin sections) apps contribute into and framework/UI code renders from
 │   ├── space-core/      @qu/space-core      - Space/Node/Field, envelopes, Kind-Schema, ACL, alias identities
 │   ├── space-storage/   @qu/space-storage   - storage adapters (memory/durable/file) a Space or relay mounts
 │   ├── space-transport/ @qu/space-transport - Transports (in-process/WebSocket), the Relay, federation
@@ -261,6 +262,19 @@ reference example: it decides purely from the `online` flag on
 applied to identity resolution: a bus watcher, not a `Space`-internal
 mechanism — `Space` itself has zero awareness that "alias" is a concept.
 
+**"Slots" in this section's own title means EventBus's wildcard fan-out**
+(any number of anonymous listeners reacting to one topic) — a DIFFERENT,
+complementary concept from `@qu/extensions`' `ExtensionPointHost` (§4, §7),
+which is an ORDERED, id-addressable REGISTRY one specific piece of UI/
+framework code reads a known, bounded set of named contributions FROM
+(a menu entry, a context-menu action, an admin section). `EventBus` answers
+"who wants to know when X happens"; `ExtensionPointHost` answers "what has
+app Y registered at point Z, and in what order" — `@qu/app-shell`'s own
+CMS/admin-console composability (§7) is built on the latter, not the
+former, precisely because it needs ordering and per-contribution identity
+(so a specific contribution can be replaced/removed), which a fire-and-
+forget pub/sub topic does not give you.
+
 ## 4. File-by-file map
 
 ### `packages/core/` — `@qu/core`
@@ -277,6 +291,23 @@ mechanism — `Space` itself has zero awareness that "alias" is a concept.
 | `src/event-bus.js` | `EventBus` class — `on`/`once`/`off`, and three emit modes: `emit`/`notify` (fire-and-forget), `collect` (gather return values), `run` (sequential transform). Trie-based wildcard dispatch. |
 | `src/debug-logger.js` | `createDebugLogger(bus, {pattern, log, label})` — logs every event matching `pattern` (default `'**'`). |
 | `src/index.js` | Re-exports both. |
+
+### `packages/extensions/` — `@qu/extensions`
+
+| File | Purpose |
+|---|---|
+| `src/extension-points.js` | `ExtensionPointHost` — an ordered, id-addressable contribution registry (`contribute()`/`uncontribute()`/`listContributions()`), read via three shapes: `renderSlot()` (each contributor mounts DOM into its own child container), `collect()` (gather return values, e.g. context-menu entries), `renderFrom()` (call exactly one named contributor). A contribution with no `handler` is a pure data entry; `resolveActionHref()` fills a `{param}`-style href template for that shape. Ported from Qu V3's `@qu/foundation` (`actions[]` + `contributes[]`/`ExtensionPointHost`), unified into one registry and stripped of V3's dynamic-`import()` loader (unneeded — V5's apps/bundles already run in-process together, see this file's own top doc comment). |
+| `src/index.js` | Re-exports both. |
+
+`@qu/app-shell`'s `src/extension-points.js` is the ONE shared, process-wide
+`ExtensionPointHost` instance every framework wiring and bundle contributes
+into/reads from (§7). `src/admin-sections.js`'s registry — `Templates`/
+`Styles`/`Content` as separately-routed CMS sections, a `/apps/*` app
+registering its own panel — now sits on top of a PRIVATE instance of this
+same class (its exact original public API unchanged; see §7's own
+"registered admin sections" paragraph), proof that a registry this package
+generalizes was already load-bearing, in production, before this package
+existed.
 
 ### `packages/space-core/` — `@qu/space-core`
 
@@ -862,6 +893,30 @@ changed - only the AUTHORING UI unified, so no already-published Page or
 View needed migrating. See `docs/example-apps.md`'s own §5 and "Deploying
 Guestbook, Blog, and Forum via the Views UI" section for the user-facing
 walkthrough.
+
+**UPDATE - `admin-sections.js` now sits on `@qu/extensions`' `ExtensionPointHost`,
+and a first real plugin slot exists in the CMS itself.** `registerAdminSection()`/
+`listAdminSections()` kept their exact original signature and behavior -
+this was a pure internal refactor, proof that the registry `admin-sections.js`
+already was (ordered, id-keyed, "re-registering an id replaces it in place")
+generalizes cleanly onto `@qu/extensions`' new, reusable primitive (§4). On
+top of that, `cms-actions.js`'s `wireContent()` now calls
+`extensionPoints.collect('cms.pageActions', {route, space, resolver, anchor,
+global})` for every listed Page/View row, appending each returned
+`{id, label, onClick}` as an extra button next to the built-in "open in
+editor" one - a plugin (a future `blog-actions.js` "Duplizieren", say) adds
+a per-page action without `cms-actions.js` importing it or knowing it
+exists. `@qu/app-shell`'s `src/extension-points.js` is the ONE shared,
+process-wide `ExtensionPointHost` instance this and every future slot use;
+`_clearExtensionPointForTest(point)` is its test-only escape hatch (same
+reasoning as `admin-sections.js`'s own `_clearAdminSectionsForTest()`).
+This is the first, deliberately small step of porting Qu V3's Slots/
+Actions/ExtensionPoints principle (its own `@qu/foundation`, used there for
+the main-menu/header, per-message and per-topic context menus, composer
+actions, and cross-app search) into V5 - further points (a page/view
+"context menu," template-registration-as-a-contribution, admin-console
+chrome) are real, deliberately incremental follow-up work, not built
+speculatively ahead of a concrete second consumer.
 
 **A real, deployment-observed bug: `editPage()`/`editTemplate()`/
 `editStyle()` throwing "does not exist (or has not synced)" for content
