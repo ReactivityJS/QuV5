@@ -84,27 +84,33 @@
  * KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE BETWEEN "load into form" AND
  * "save" - a real, observed bug this fixes: `Space.useNode()` is
  * ref-counted, and `ContentResolver`'s own `resolveTemplate()`/
- * `resolveStyle()`/`resolvePage()`/`resolveView()` (used by each section's
- * click handler, just below, purely to populate the form) each call
- * `useNode()` THEN `release()` internally, dropping the refcount straight
- * back to zero - which `Space.unsubscribeNode()` treats as "nobody needs
- * this Node locally any more" and DISCARDS the local Y.Doc entirely
+ * `resolveStyle()`/`resolvePage()`/`resolveView()`, called BARE (no `hold`),
+ * each call `useNode()` THEN `release()` internally, dropping the refcount
+ * straight back to zero - which `Space.unsubscribeNode()` treats as "nobody
+ * needs this Node locally any more" and DISCARDS the local Y.Doc entirely
  * (`space.js`'s own `_nodes.delete(id)`), not merely stops live-pushing to
  * it. Submitting the form moments later calls `editTemplate()`/`editStyle()`/
  * `editPage()`/`editView()` (dev.js), which does its OWN fresh `useNode()` -
- * since the previous one was fully torn down, this has to re-subscribe and
+ * if the previous one was fully torn down, this has to re-subscribe and
  * wait for the relay to replay the Node's entire history again, a real
  * network round-trip a fixed ~2s timeout can genuinely lose to over a real
  * (non-localhost) connection, throwing "does not exist (or has not synced)"
- * for content that plainly DOES exist - the user just viewed it. Each
- * section below calls `space.useNode()` itself, ONE EXTRA TIME, the moment
- * an item is loaded into the form (`holdEdit()`), and keeps that reference
- * alive (`activeEdit`) until a DIFFERENT item is loaded or the form is
- * reset - long enough to keep the refcount above zero (so nothing gets
- * discarded) for the entire "loaded into the form, being edited" window,
- * without changing `ContentResolver`'s own release-immediately posture
- * (correct for ordinary rendering, where holding every resolved Node open
- * would leak subscriptions across a visitor's whole session).
+ * for content that plainly DOES exist - the user just viewed it.
+ *
+ * UPDATE - fixed at the framework level now, not per-app: each section's
+ * click handler below resolves with `{hold: true}` the moment an item is
+ * loaded into the form (`resolver.resolveTemplate(name, {..., hold: true})`
+ * etc., `resolver.js`'s own doc comment on the option) instead of this file
+ * calling `useNode()` a second, separate time itself (the former
+ * `holdEdit()`, removed - this WAS its exact replacement, moved into
+ * `@qu/app-core` so no other app has to reinvent it). The returned
+ * `release` is kept on `activeEdit` until a DIFFERENT item is loaded or the
+ * form is reset - long enough to keep the refcount above zero (so nothing
+ * gets discarded) for the entire "loaded into the form, being edited"
+ * window - a plain BARE resolve (no `hold`) elsewhere in this codebase
+ * keeps releasing immediately, exactly as before (ordinary rendering,
+ * where holding every resolved Node open would leak subscriptions across a
+ * visitor's whole session).
  *
  * KEEPING EACH SECTION'S OWN REGISTRY SUBSCRIPTION ALIVE FOR THE WHOLE CMS
  * SESSION - the SAME class of bug as above, just for `routeRegistryKind`/
@@ -161,13 +167,6 @@ import { verifyWritesAcked } from './verify-writes.js';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { registerAdminSection, listAdminSections } from './admin-sections.js';
 import { extensionPoints } from './extension-points.js';
-
-/** See this file's own top doc comment, "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE...". Releases `previous` (if any) THEN opens+holds a fresh subscription for `(kind, name)`, owned by `ownerPub` (defaults to `space.identity` - the same default `editTemplate()`/`editStyle()`/`editPage()` themselves use; a GLOBAL page passes `globalAppAnchor(prefix)` instead, see `wireContent()`'s own global-mode branch). @returns {Promise<{node: object, release: () => void}>} */
-async function holdEdit(space, kind, name, previous, ownerPub = space.identity.signingPub) {
-  previous?.release();
-  const id = await deriveContentNodeId(ownerPub, kind.kind, name);
-  return space.useNode(id, kind);
-}
 
 /** See this file's own top doc comment, "KEEPING EACH SECTION'S OWN REGISTRY SUBSCRIPTION ALIVE...". Opens (and never releases - see that comment on why) a subscription to `ownerPub`'s `registryKind` Node (defaults to `space.identity` - a GLOBAL app's registry passes `globalAppAnchor(prefix)` instead), so every later `refreshList()`/`registerContentName()`/`publishRoute()`/`publishGlobalRoute()` call in the same CMS session finds it already attached. */
 async function holdRegistry(space, registryKind, ownerPub = space.identity.signingPub) {
@@ -317,9 +316,10 @@ async function wireSimpleContentSection({
       btn.type = 'button';
       btn.textContent = name;
       btn.addEventListener('click', async () => {
-        activeEdit = await holdEdit(space, kind, name, activeEdit, ownerPub);
-        const value = (await resolveValue(name, { timeout: 2000 })) ?? '';
-        enterEditMode(form, { keyFieldName: 'name', keyValue: name, fields: { [valueField]: value } });
+        activeEdit?.release();
+        const { value, release } = await resolveValue(name, { timeout: 2000, hold: true });
+        activeEdit = { release };
+        enterEditMode(form, { keyFieldName: 'name', keyValue: name, fields: { [valueField]: value ?? '' } });
       });
       li.appendChild(btn);
       list.appendChild(li);
@@ -550,7 +550,7 @@ const CONTENT_PAGE_CONTENT = `<h1>Inhalt</h1>
  *   `ownerPub` - the app's REAL owner pubkey (`wireCms()`'s own `appAdminPub`,
  *   see its doc comment) - REQUIRED for editing to ever work for anyone
  *   other than whichever identity happens to be `space.identity` right now
- *   (a real, previously-fixed bug: every `holdEdit()`/`holdRegistry()`/
+ *   (a real, previously-fixed bug: every `resolve-with-hold`/`holdRegistry()`/
  *   `edit*()` call used to silently default to `space.identity.signingPub`,
  *   the browsing VISITOR's own identity, not the app's actual owner or a
  *   granted co-editor - see `grantContentWriter()`'s own doc comment).
@@ -598,8 +598,9 @@ async function wireContent({ mountEl, doc, space, resolver, global = false, pref
       btn.type = 'button';
       btn.textContent = route;
       btn.addEventListener('click', async () => {
-        activeEdit = await holdEdit(space, pageKindHere, route, activeEdit, anchor);
-        const page = await resolver.resolvePage(route, { timeout: 2000 });
+        activeEdit?.release();
+        const { page, release } = await resolver.resolvePage(route, { timeout: 2000, hold: true });
+        activeEdit = { release };
         if (!page) return;
         resetForm(form, ['route', 'name']);
         form.querySelector('[name="sourceType"]').value = 'html';
@@ -639,12 +640,14 @@ async function wireContent({ mountEl, doc, space, resolver, global = false, pref
         setStatus(form, 'Bitte zuerst einen Namen eingeben.');
         return;
       }
-      const view = await resolver.resolveView(name, { ownerPub: global ? undefined : anchor, timeout: 1500 });
+      const { view, release } = await resolver.resolveView(name, { ownerPub: global ? undefined : anchor, timeout: 1500, hold: true });
       if (!view) {
+        release();
         setStatus(form, `Keine View namens "${name}" gefunden.`);
         return;
       }
-      activeEdit = await holdEdit(space, viewKindHere, name, activeEdit, anchor);
+      activeEdit?.release();
+      activeEdit = { release };
       // MORE than one source (or a source type the simple picker doesn't cover) round-trips through
       // the "Erweitert" JSON override instead of trying to force it back into the single-source
       // picker fields - see this file's own doc comment on `sourcesOverride` above.

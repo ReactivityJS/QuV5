@@ -194,8 +194,41 @@ export class ContentResolver {
     return routes.filter(Boolean);
   }
 
-  /** @param {string} route @returns {Promise<{route, title, template, content, data, style}|null>} `null` if this route has no published page (or it hasn't synced within `timeout`). `data` is kinds.js's `pageKind` own structured-data field (an arbitrary JSON object, or `null` if never set) - see its own doc comment; `style` is that same Kind's own per-page style-name override (`null` = fall back to the Manifest's `theme`, `runtime.js`'s `AppRuntime.resolveRoute()` own doc comment) - neither is part of the sync-readiness check below, a page missing either is a perfectly normal, backward-compatible page, not an unsynced one. */
-  async resolvePage(route, { timeout } = {}) {
+  /**
+   * @param {string} route
+   * @param {{timeout?: number, hold?: boolean}} [options] - `hold: true`
+   *   (default `false`) skips this method's own usual internal `release()`
+   *   and returns `{page, release}` instead of the bare `page` - for a
+   *   caller (a CMS "click to load into the edit form" handler is the
+   *   reference case) about to possibly WRITE to this exact Node moments
+   *   later and wanting to keep it subscribed across that window, instead
+   *   of `Space.useNode()`'s own ref-counted teardown tearing the local
+   *   Y.Doc down the instant this read's own reference count would
+   *   otherwise drop to zero - a fresh re-subscribe for the edit would then
+   *   need a full relay replay before writing, exactly the "does not exist
+   *   (or has not synced)" production bug architecture.md §7 documents.
+   *   Was previously worked around per-app (`@qu/app-shell`'s own
+   *   `cms-actions.js`, `holdEdit()`) by calling `useNode()` a SEPARATE,
+   *   redundant extra time; `hold` moves the same correct pattern into this
+   *   shared resolver instead, so no app needs to reinvent it. The caller
+   *   owns calling `release()` eventually either way (when a different item
+   *   is loaded, the form is reset, or the edit completes) - `hold: true`
+   *   with the returned `release()` never called leaks exactly like any
+   *   other un-released `useNode()` handle would.
+   * @returns {Promise<{route, title, template, content, data, style}|null>|Promise<{page: object|null, release: () => void}>}
+   *   Bare `page` (`null` if this route has no published page, or it hasn't
+   *   synced within `timeout`) when `hold` is falsy (default); `{page,
+   *   release}` when `hold` is true, `page` itself following the exact same
+   *   null-or-object shape either way. `data` is kinds.js's `pageKind` own
+   *   structured-data field (an arbitrary JSON object, or `null` if never
+   *   set) - see its own doc comment; `style` is that same Kind's own
+   *   per-page style-name override (`null` = fall back to the Manifest's
+   *   `theme`, `runtime.js`'s `AppRuntime.resolveRoute()` own doc comment) -
+   *   neither is part of the sync-readiness check below, a page missing
+   *   either is a perfectly normal, backward-compatible page, not an
+   *   unsynced one.
+   */
+  async resolvePage(route, { timeout, hold = false } = {}) {
     const pageKind = this._kinds.pageKind;
     const id = await deriveContentNodeId(this._appAdminPub, pageKind.kind, route);
     const { node, release } = await this._space.useNode(id, pageKind);
@@ -223,6 +256,7 @@ export class ContentResolver {
       const style = await node.field('style').get();
       return { route, title, template, content, data, style };
     }, { timeout });
+    if (hold) return { page, release };
     release();
     return page;
   }
@@ -249,8 +283,8 @@ export class ContentResolver {
     return styles.filter(Boolean);
   }
 
-  /** @param {string} name @returns {Promise<string|null>} A template's HTML, or `null` if unpublished/unsynced within `timeout`. */
-  async resolveTemplate(name, { timeout } = {}) {
+  /** @param {string} name @param {{timeout?: number, hold?: boolean}} [options] - see `resolvePage()`'s own doc comment on `hold`. @returns {Promise<string|null>|Promise<{value: string|null, release: () => void}>} A template's HTML (`null` if unpublished/unsynced within `timeout`) when `hold` is falsy (default); `{value, release}` when `hold` is true. */
+  async resolveTemplate(name, { timeout, hold = false } = {}) {
     const templateKind = this._kinds.templateKind;
     const id = await deriveContentNodeId(this._appAdminPub, templateKind.kind, name);
     const { node, release } = await this._space.useNode(id, templateKind);
@@ -262,13 +296,14 @@ export class ContentResolver {
       const value = node.field('html').get();
       return value ? value : null;
     }, { timeout });
+    if (hold) return { value: html, release };
     release();
     return html;
   }
 
-  /** @param {string} name @returns {Promise<string|null>} A stylesheet's CSS, or `null` if unpublished/unsynced within `timeout`. */
-  async resolveStyle(name, { timeout } = {}) {
-    if (!name) return null;
+  /** @param {string} name @param {{timeout?: number, hold?: boolean}} [options] - see `resolvePage()`'s own doc comment on `hold`. @returns {Promise<string>|Promise<{value: string, release: () => void}>} A stylesheet's CSS (`''` if unpublished/unsynced within `timeout`) when `hold` is falsy (default); `{value, release}` when `hold` is true. */
+  async resolveStyle(name, { timeout, hold = false } = {}) {
+    if (!name) return hold ? { value: null, release: () => {} } : null;
     const styleKind = this._kinds.styleKind;
     const id = await deriveContentNodeId(this._appAdminPub, styleKind.kind, name);
     const { node, release } = await this._space.useNode(id, styleKind);
@@ -286,6 +321,7 @@ export class ContentResolver {
       const value = node.field('css').get();
       return value !== '' ? value : null;
     }, { timeout: timeout ?? 2000 });
+    if (hold) return { value: css ?? '', release };
     release();
     return css ?? '';
   }
@@ -452,9 +488,11 @@ export class ContentResolver {
    * lifecycle (`openLiveView()`'s own `close()`) this class's "every read
    * releases when done" contract was never designed for.
    * @param {string} name
-   * @returns {Promise<{sources: Array<object>, sortBy: string|null, sortOrder: string, limit: number|null, itemTemplate: string}|null>}
+   * @param {{ownerPub?: Uint8Array|string, timeout?: number, hold?: boolean}} [options] - see `resolvePage()`'s own doc comment on `hold`.
+   * @returns {Promise<{sources: Array<object>, sortBy: string|null, sortOrder: string, limit: number|null, itemTemplate: string}|null>|Promise<{view: object|null, release: () => void}>}
+   *   Bare `view` when `hold` is falsy (default); `{view, release}` when `hold` is true.
    */
-  async resolveView(name, { ownerPub, timeout } = {}) {
+  async resolveView(name, { ownerPub, timeout, hold = false } = {}) {
     const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
     const viewKindHere = this._kinds.viewKind ?? viewKind;
     const id = await deriveContentNodeId(owner, viewKindHere.kind, name);
@@ -472,6 +510,7 @@ export class ContentResolver {
       const template = await node.field('template').get();
       return { sources: sources ?? [], sortBy: sortBy ?? null, sortOrder: sortOrder ?? 'desc', limit: limit ?? null, itemTemplate, route: route ?? null, template: template ?? null };
     }, { timeout });
+    if (hold) return { view, release };
     release();
     return view;
   }

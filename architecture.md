@@ -923,40 +923,45 @@ speculatively ahead of a concrete second consumer.
 that plainly DOES exist.** `Space.useNode()` is ref-counted, and
 `ContentResolver`'s own `resolveTemplate()`/`resolveStyle()`/`resolvePage()`
 (what each CMS section's click-to-load handler calls, purely to populate
-the form) each `useNode()` THEN `release()` internally - dropping the
-refcount straight back to zero, which `Space.unsubscribeNode()` treats as
-"nobody needs this Node locally any more" and DISCARDS the local Y.Doc
-entirely (`space.js`'s own `_nodes.delete(id)`), not merely stops
-live-pushing to it. Submitting the form moments later called `edit*()`
-(`dev.js`), which does its OWN fresh `useNode()` - since the previous one
-had been fully torn down, this had to re-subscribe and wait for the relay
-to replay the Node's entire history again, a real network round-trip a
-fixed ~2-3s timeout can genuinely lose to over an actual (non-localhost)
-connection - the false "does not exist" error was really "did not
-RE-sync in time," for content the user had just viewed successfully.
-Never reproduced by this project's own tests (an in-process/localhost hub
-has no meaningful round-trip time to lose the race against), only by an
-operator actually using a real deployment. Fixed in `cms-actions.js`: each
-section's click-to-load handler now calls `space.useNode()` itself, ONE
-EXTRA TIME (`holdEdit()`), and keeps that reference alive until a
-DIFFERENT item is loaded or the form is reset - long enough to keep the
-refcount above zero for the entire "loaded into the form, being edited"
-window, so the eventual `edit*()` call's own `useNode()` finds the Node
-already fully synced and skips the network round-trip (and its timeout
-race) entirely. `ContentResolver`'s own release-immediately posture is
-otherwise unchanged (correct for ordinary rendering, where holding every
-resolved Node open for a whole visit would leak subscriptions).
+the form), called bare (no `hold`, see UPDATE below), each `useNode()` THEN
+`release()` internally - dropping the refcount straight back to zero, which
+`Space.unsubscribeNode()` treats as "nobody needs this Node locally any
+more" and DISCARDS the local Y.Doc entirely (`space.js`'s own
+`_nodes.delete(id)`), not merely stops live-pushing to it. Submitting the
+form moments later called `edit*()` (`dev.js`), which does its OWN fresh
+`useNode()` - if the previous one had been fully torn down, this had to
+re-subscribe and wait for the relay to replay the Node's entire history
+again, a real network round-trip a fixed ~2-3s timeout can genuinely lose
+to over an actual (non-localhost) connection - the false "does not exist"
+error was really "did not RE-sync in time," for content the user had just
+viewed successfully. Never reproduced by this project's own tests (an
+in-process/localhost hub has no meaningful round-trip time to lose the race
+against), only by an operator actually using a real deployment.
 
-**UPDATE:** the "Subscribe statt Polling" work further down this section
-(§7's own later "later revision" entry) closes the OTHER half of this bug
-class - a fresh re-subscribe now reliably waits for `isNodeSynced()` before
-trusting ANY field value, so a resolve after a teardown-and-resubscribe can
-no longer return a STALE pre-edit value merely because it happened to
-already be non-empty. `holdEdit()` above is still what avoids the teardown
-(and its network round-trip) in the first place - genuinely eliminating
-`useNode()`'s ref-counted teardown-on-release itself (so an app never needs
-its own `holdEdit()`-style workaround) is real, deliberately separate
-follow-up work, not attempted here.
+**UPDATE - fixed at the framework level now, eliminating the teardown
+itself, not just working around it:** `resolvePage()`/`resolveTemplate()`/
+`resolveStyle()`/`resolveView()` (`@qu/app-core`'s `resolver.js`) gained an
+opt-in `{hold: true}` option - skips the internal `release()` and returns
+`{page/value/view, release}` instead of the bare value, so the SAME
+already-synced `useNode()` subscription stays open past the resolve call
+itself, for as long as the CALLER decides. `cms-actions.js`'s own former
+`holdEdit()` - a hand-rolled, app-level SECOND `useNode()` call working
+around the resolver's release-immediately posture from the outside - is
+gone; each section's click-to-load handler now resolves with `{hold:
+true}` directly and keeps the returned `release` on `activeEdit` until a
+different item loads or the form resets, the exact same lifecycle
+`holdEdit()` used to manage, just without a redundant extra subscription
+and available to ANY caller of `ContentResolver`, not only this one file.
+The eventual `edit*()` call's own `useNode()` finds the Node already
+attached (never torn down in the first place) and reuses it instantly - no
+network round-trip, no timeout race, and no reliance on `isNodeSynced()`'s
+own fast-path at all for this specific scenario (that fast-path, from the
+"Subscribe statt Polling" work further down this section, remains what
+protects every OTHER re-subscribe - a fresh visitor, a reload, a second
+browser tab - that never went through a held resolve to begin with).
+`ContentResolver`'s bare (no `hold`) calls keep releasing immediately,
+unchanged - correct for ordinary rendering, where holding every resolved
+Node open for a whole visit would leak subscriptions.
 
 **A second, deeper real bug in the SAME family, also deployment-observed:
 a route/template/style that had just been created or edited would appear
@@ -997,8 +1002,9 @@ example.** Two compounding causes, both fixed together:
    Also fixed in `cms-actions.js`, on top of the `dev.js` fix: each
    section now holds its OWN registry Node open (`holdRegistry()`, opened
    once per section at wiring time, same "never release during normal
-   operation" posture as `holdEdit()` above) for the CMS session's whole
-   lifetime, so `refreshList()`/`registerContentName()`/`publishRoute()`
+   operation" posture the resolve-with-`hold` calls above use for the
+   edited content Node itself) for the CMS session's whole lifetime, so
+   `refreshList()`/`registerContentName()`/`publishRoute()`
    all find it already attached after the first call - not just
    eventually-correct (the `dev.js` fix alone already guarantees that) but
    actually FAST, with zero further network round-trips for the rest of
@@ -1727,8 +1733,10 @@ were non-empty, WITHOUT first gating on `isNodeSynced()` the way
 `resolveGroup()`/`resolvePrivatePage()`/`resolveSharedList()` already did.
 On a fresh re-subscribe (e.g. right after `Space.useNode()`'s own
 ref-counted teardown - see the "does not exist (or has not synced)" bug
-just above, still not itself eliminated, only worked around by
-`holdEdit()`), a relay replays a Node's envelopes OLDEST FIRST - a STALE,
+just above, worked around for the CMS's own edit flow by resolve-with-
+`hold`, see the follow-up entry below, but `useNode()`'s teardown-on-
+release mechanism itself is unchanged for every OTHER caller), a relay
+replays a Node's envelopes OLDEST FIRST - a STALE,
 pre-edit value can already be non-empty and get returned before the
 Node's own LATEST edit envelope has even been applied. Caught by a new
 regression test (`wait-for-sync-events.test.js`: edit a page on a fresh
@@ -1741,6 +1749,42 @@ that had been omitting them (all but `getOrSyncRegistryNode()` and
 `editGroup()`/`editPrivatePage()`) - the exact functions behind the
 "does not exist (or has not synced)" production bug never actually had the
 `isNodeSynced()` fast-path wired in at all before this.
+
+**"Bootstrap-Vereinfachung" (a further later revision): `holdEdit()`
+removed, replaced by a resolver-level `{hold: true}` option, not just
+another app-level workaround for the same gap.** The "does not exist (or
+has not synced)" bug's ROOT CAUSE (`Space.useNode()`'s ref-counted
+teardown-on-release discarding a Node the instant nothing holds it, even
+for a heartbeat) was never itself eliminated by either fix above - only
+worked around, first by `cms-actions.js`'s own hand-rolled extra
+`useNode()` call (`holdEdit()`), one file reinventing the same fix any
+OTHER app wanting it would have had to reinvent too. Genuinely removing
+`useNode()`'s teardown-on-release semantics outright was deliberately
+rejected (`packages/space-core/test/use-node.test.js`'s own "after a full
+release, calling `useNode()` again for the same id starts completely
+fresh" is asserted, real behavior other callers depend on, and a
+time-based "grace period before tearing down" would still not cover a
+user who takes minutes to fill out a form, only a fast click-through).
+Instead, `resolvePage()`/`resolveTemplate()`/`resolveStyle()`/
+`resolveView()` (`@qu/app-core`'s `resolver.js`) gained an opt-in `hold`
+option: skips the method's own internal `release()`, returns
+`{page/value/view, release}` instead of the bare value, so the CALLER
+decides how long to keep the exact same subscription open - unbounded, the
+same "for as long as the form stays open" duration `holdEdit()` already
+correctly provided, just as a first-class, reusable resolver capability
+instead of a private per-file trick. `cms-actions.js`'s three former
+`holdEdit()` call sites (Templates/Styles' shared `wireSimpleContentSection()`,
+Content's page-row click handler, Content's "View laden" button) now
+resolve with `{hold: true}` directly and keep the returned `release` on
+`activeEdit`, the exact same lifecycle as before, one fewer redundant
+`useNode()` call each. `holdRegistry()` (a different, already-correct
+pattern - a whole CMS session's own registry, never released during normal
+operation, not tied to any one resolve call) is unaffected. See
+`packages/app-core/test/resolver-hold.test.js` for the end-to-end proof: a
+held `resolvePage()` on one `Space` instance, followed by `editPage()` on
+that SAME instance, needs neither the `isNodeSynced()` fast-path nor any
+wait at all to succeed, because the Node was never torn down to begin
+with.
 
 **A self-provisioned multiuser participant's OWN registries were silently
 dropped by the relay (a real, shipped bug, found and fixed in the same
