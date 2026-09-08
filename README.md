@@ -66,6 +66,14 @@ standalone or via Docker).
   vanilla JS/DOM reactive bindings - one/two-way field binding,
   contenteditable inline-edit with save/cancel, keyed list diffing,
   file-selection + upload-status icons - no framework, no build step.
+- [`packages/space-components`](./packages/space-components) -
+  `@qu/space-components` (optional): declarative Custom Elements over
+  `@qu/space-ui` - `<qu-view>` (read-only), `<qu-bind>` (two-way),
+  `<qu-list>` (keyed lists) - a CMS-authored Template writes these as
+  plain markup, no JS glue, live-updating. The `self` attribute
+  (`<qu-view self field="title">`) binds to the exact page currently being
+  rendered without the author ever needing to know its content-addressed
+  node id - see "Declarative reactivity: Qu-Components" below.
 - [`packages/app-core`](./packages/app-core) - `@qu/app-core`: the App
   Runtime - Kind-Schemas for application content (manifest, route registry,
   pages, templates, styles), content-addressed Node ids, `ContentResolver`,
@@ -580,6 +588,27 @@ await createView(space, {
 Embed it on any page with `<div data-qu-view="user-feed"></div>` -
 `@qu/app-shell`'s `view-actions.js` wires it up automatically after every
 render, live: a new blog post or guestbook entry appears with no reload.
+
+**Pages/Templates/Styles/Views can all be DELETED through the CMS UI now**,
+not just created/edited - a "Löschen" button next to every row in the
+Content/Templates/Styles sections (`deletePage()`/`deleteTemplate()`/
+`deleteStyle()`/`deleteView()`, `@qu/app-core`'s `dev.js`). Not a genuine
+Node deletion (no such primitive exists anywhere in this architecture -
+`@qu/space-core`'s CRDT storage has no way to erase history) - it removes
+the item from its own registry (so it stops being listed/resolved) and
+best-effort clears its own content, the same "cleared and unreachable, not
+erased" posture `nullGlobalAppContent()` already established for whole-app
+uninstalls. Self-owned content only for now - a granted co-editor can
+still fully edit someone else's content, just not delete it.
+
+**A complete View can also be imported as one JSON blob** - the "View aus
+JSON übernehmen" field above the Content list accepts
+`{name, route, sources, sortBy, sortOrder, limit, itemTemplate, template,
+style}` and fills the form (never auto-submits - review, then "Speichern"
+as usual), the practical way to bring in a hand-authored or copy-pasted
+multi-source View instead of rebuilding it field by field in the simple
+picker.
+
 Both primitives are deliberately GENERIC, not CMS-specific - a future
 Forum, Live-Ticker, or other app built on `@qu/app-core` can use the exact
 same `createView()`/`pushToSharedList()` Dev API and `wireViews()`
@@ -621,6 +650,86 @@ per-topic route (`forum-bundle.js`'s own top doc comment has the full "why
 not a `qu-page`" reasoning). `packages/app-shell/test/installed-apps.test.js`
 proves all three end to end through the real admin-console installer over
 a real relay, plus the installer form itself.
+
+## Declarative reactivity: Qu-Components
+
+Beyond Views (many items, filtered/sorted/merged), `@qu/space-components`
+solves a different, complementary problem: binding ONE Space field
+directly into markup, live, with no app-specific JavaScript at all -
+declared straight in a Page's own content or a Template's HTML:
+
+```html
+<!-- Read-only, live-updating -->
+<qu-view self field="title"></qu-view>
+
+<!-- Two-way (per-keystroke by default, editable="inline" for explicit save/cancel) -->
+<qu-bind self field="title"></qu-bind>
+
+<!-- A keyed list field (e.g. an Array<{name, message}>) - one <template> stamped per item;
+     <qu-view field="..."> WITHOUT kind/node-id inside the template reads straight off the
+     current item, not a separate Space subscription: -->
+<qu-list self field="entries" key="name">
+  <template>
+    <strong><qu-view field="name"></qu-view></strong>: <qu-view field="message"></qu-view>
+  </template>
+</qu-list>
+```
+
+`self` (see architecture.md's Phase 5 section for the full design) resolves
+to "the page currently being rendered here" - `@qu/app-shell`'s `boot.js`
+sets it automatically on every render, so a content author never needs to
+know or type this page's own content-addressed node id (a hash, not
+something anyone could type by hand - the actual reason Qu-Components in
+hand-authored Templates had no practical story before `self` existed).
+Binding to a DIFFERENT, already-known Node instead uses the lower-level
+`kind`/`node-id` attributes (resolved against an app's own `.quKinds`
+registry - `@qu/space-components`'s `resolve.js`/`context.js`), the same
+mechanism `self` is a convenience layer on top of.
+
+Only loaded when a page actually needs it - `@qu/app-shell`'s `shell.js`
+imports `@qu/space-components/elements` once at boot (side-effect
+registration of the three Custom Elements); the CMS's own HTML sanitizer
+(`@qu/app-renderer`'s `sanitizer.js`) passes these tags through unchanged
+(only `<script>`/`on*`-attributes/`javascript:` URLs are stripped - Stufe
+1 of the security model), so pasting `<qu-view self field="...">` into the
+Content editor's "Inhalt (HTML)" textarea just works. See
+`packages/app-shell/test/self-node-context.test.js` for the proof: a page
+with `<qu-view self field="title">` in its own content renders correctly
+and updates live across an edit, with no node id anywhere in the authored
+HTML.
+
+## Extending the CMS: plugins via `@qu/extensions`
+
+A plugin can hook into the CMS's own UI without `cms-actions.js` (or any
+other framework file) ever importing it - `@qu/extensions`' `ExtensionPointHost`,
+one shared instance per process (`@qu/app-shell`'s `src/extension-points.js`
+- today a bundle contributes by living alongside the built-in
+`guestbook-bundle.js`/`blog-bundle.js`/`forum-bundle.js` inside
+`packages/app-shell/`, importing that same module relatively; a public
+`@qu/app-shell/extension-points` subpath export for a genuinely external
+plugin package is real, straightforward follow-up work, not built yet).
+The Content editor's own per-row action buttons are the reference example
+(`cms.pageActions`):
+
+```js
+import { extensionPoints } from './extension-points.js'; // relative, from inside packages/app-shell/
+
+extensionPoints.contribute('cms.pageActions', {
+  id: 'duplicate',
+  appId: 'my-plugin',
+  handler: ({ route }) => ({ id: 'duplicate', label: 'Duplizieren', onClick: () => { /* ... */ } }),
+});
+```
+
+Every registered contributor's `{id, label, onClick}` becomes one more
+button next to the built-in ones, automatically, on the next render - no
+router change, no edit to `cms-actions.js` needed for a fourth/fifth
+plugin. The same primitive backs `admin-sections.js`'s own registry
+(Templates/Styles/"Inhalt" as separately-routed CMS sections - "registered,
+not hardcoded"), so a `/apps/*` app wanting its own admin section uses the
+exact same call. See architecture.md §4/§7 for the full design (`renderSlot`/
+`collect`/`renderFrom`, the three read shapes) and `packages/extensions/test/`/
+`packages/app-shell/test/cms-page-actions.test.js` for proof.
 
 ## Deploying the legacy chat relay
 
