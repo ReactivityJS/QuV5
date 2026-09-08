@@ -321,6 +321,8 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   const plan = await runtime.resolveRoute(routeNamespace + userSubPath, timeoutOpt);
   mountEl.quSpace = space;
   renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+  mountEl.quSelfNodeId = plan.page?.nodeId ?? null; // `self`-node context - see `startApp()`'s own doc comment on this pair.
+  mountEl.quSelfKind = plan.page?.kindSchema ?? null;
   // `wireInstalledApps()` goes FIRST, before `wireViews()` - see its own call in `startApp()`'s
   // doc comment on why: `wireViews()` does real async work (resolving + opening each View's live
   // sources) that a form-attaching call must never be stalled behind.
@@ -362,6 +364,8 @@ async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeo
   const plan = await runtime.resolveRoute(subPath, timeoutOpt);
   mountEl.quSpace = space;
   renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+  mountEl.quSelfNodeId = plan.page?.nodeId ?? null; // `self`-node context - see `startApp()`'s own doc comment on this pair.
+  mountEl.quSelfKind = plan.page?.kindSchema ?? null;
   await wireInstalledApps({ mountEl, doc: window.document, space });
   await wireCms({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), global: true, prefix });
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
@@ -404,6 +408,11 @@ async function renderAggregateShell({ space, mountEl, window, styleId, prefix })
   mountEl.quSpace = space;
   const page = { title: prefix, content: `<div data-qu-view="${prefix}-aggregate-feed"></div>` };
   renderPage({ mountEl, doc: window.document, templateHtml: null, page, css: '', styleId });
+  // No real "self" here - `page` above is a synthetic shell object, never a `ContentResolver.resolvePage()`
+  // result, so it has no `nodeId`/`kindSchema` to bind to. Cleared explicitly (never left stale from a
+  // PREVIOUS route's real page) - see `startApp()`'s own doc comment on this pair.
+  mountEl.quSelfNodeId = null;
+  mountEl.quSelfKind = null;
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
 }
 
@@ -424,6 +433,16 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
     onChange: async (route) => {
       const plan = await runtime.resolveRoute(route, resolveTimeout ? { timeout: resolveTimeout } : undefined);
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+      // `self`-node context for @qu/space-components (`resolve.js`'s own doc comment on `self`) -
+      // UNLIKE `.quSpace` above (set once, the Space itself never changes mid-session), this is set
+      // on EVERY render, because WHICH page is "self" changes on every route. `plan.page` only ever
+      // carries `nodeId`/`kindSchema` when it came from `ContentResolver.resolvePage()` (resolver.js's
+      // own doc comment on why) - `null` for a "not found" fallback or any OTHER kind of render
+      // (an aggregate feed shell, a synthetic page object), a correct "no self to bind to" default a
+      // Component's own `self` resolution already treats as "not yet resolvable," same as any other
+      // not-yet-available context. Always (re)assigned, never left stale from a PREVIOUS route's page.
+      mountEl.quSelfNodeId = plan.page?.nodeId ?? null;
+      mountEl.quSelfKind = plan.page?.kindSchema ?? null;
       // `wireInstalledApps()` (guestbook/blog/forum action forms) goes BEFORE `wireViews()`
       // deliberately, here and at every other render call site in this file: `wireViews()` does
       // real async work per `[data-qu-view]` element (`resolveView()` + `openLiveView()`, each a
@@ -567,6 +586,8 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
         const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
         mountEl.quSpace = space;
         renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+        mountEl.quSelfNodeId = plan.page?.nodeId ?? null; // `self`-node context - see `startApp()`'s own doc comment on this pair.
+        mountEl.quSelfKind = plan.page?.kindSchema ?? null;
         await wireInstalledApps({ mountEl, doc: window.document, space });
         wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
         await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor('admin'), kinds: GLOBAL_KINDS });
@@ -634,6 +655,8 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
       const plan = await runtime.resolveRoute(match.subPath, timeoutOpt);
       mountEl.quSpace = space;
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
+      mountEl.quSelfNodeId = plan.page?.nodeId ?? null; // `self`-node context - see `startApp()`'s own doc comment on this pair.
+      mountEl.quSelfKind = plan.page?.kindSchema ?? null;
       await wireInstalledApps({ mountEl, doc: window.document, space });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
       await wireViews({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });

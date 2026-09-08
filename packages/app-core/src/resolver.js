@@ -254,7 +254,11 @@ export class ContentResolver {
       const template = await node.field('template').get();
       const data = await node.field('data').get();
       const style = await node.field('style').get();
-      return { route, title, template, content, data, style };
+      // `nodeId`/`kindSchema` - additive, for `boot.js`'s own `self`-reference context (§7's
+      // "self"-node doc comment, `@qu/space-components`'s `resolveNodeRef()`) - a Qu-Component
+      // declared `self` inside this exact page's own rendered content resolves against these,
+      // never needing the content author to know or type this page's own content-addressed id.
+      return { route, title, template, content, data, style, nodeId: id, kindSchema: pageKind };
     }, { timeout });
     if (hold) return { page, release };
     release();

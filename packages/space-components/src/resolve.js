@@ -5,43 +5,57 @@
  * handle - the one piece of logic `qu-view.js`/`qu-bind.js`/`qu-list.js`
  * all share.
  */
-import { findQuSpace, findQuKind } from './context.js';
+import { findQuSpace, findQuKind, findQuSelf } from './context.js';
 
 /**
- * TWO ways to supply the Kind-Schema, deliberately - Custom Element
- * attributes are always strings (confirmed true here the same way QuV3's
- * own `components.js` doc comment says it is), so a Kind-Schema OBJECT can
- * never be an attribute value:
- *   - `el.kindSchema` (a JS property) - set directly by whatever code
- *     already has the real Kind-Schema object in scope (framework code
- *     rendering a template, or an app's own bootstrapping script). Always
- *     works, needs no registry.
- *   - `kind="name"` (a plain string attribute) - for markup a CMS author
- *     typed with no JS access at all. Resolved via `findQuKind(el, name)`
- *     against the nearest ancestor's `.quKinds` registry - an app that
- *     wants ITS OWN Kinds bindable this way sets `.quKinds = {name:
- *     kindSchema}` on `<qu-app-shell>` (or any wrapping element) itself;
- *     `@qu/space-components` ships no built-in registry of its own (it has
- *     no idea what Kinds any given app defines - see `@qu/app-core`'s
- *     `kinds.js`, `defineCollectionKind()`).
- *
- * Same two-way split for the Node id (`el.nodeId` property vs. `node-id`
- * attribute): a COMPUTED id (e.g. the current visitor's own, via
- * `deriveOwnerNodeId(space.identity.signingPub, kindSchema.kind)` -
- * architecture.md's corrected "Phase 2" section) is exactly as ordinary a
- * case as any other id, it just happens to be computed in JS rather than
- * typed by a CMS author, so it is supplied as a property instead of an
- * attribute - nothing more special than that.
+ * THREE ways to supply the Kind-Schema + Node id together, deliberately -
+ * Custom Element attributes are always strings (confirmed true here the
+ * same way QuV3's own `components.js` doc comment says it is), so a
+ * Kind-Schema OBJECT can never be an attribute value:
+ *   - `el.kindSchema` + `el.nodeId` (JS properties) - set directly by
+ *     whatever code already has the real Kind-Schema object/id in scope
+ *     (framework code rendering a template, or an app's own bootstrapping
+ *     script). Always works, needs no registry.
+ *   - `kind="name"` + `node-id="..."` (plain string attributes) - for
+ *     markup a CMS author typed with no JS access at all. `kind` resolves
+ *     via `findQuKind(el, name)` against the nearest ancestor's `.quKinds`
+ *     registry - an app that wants ITS OWN Kinds bindable this way sets
+ *     `.quKinds = {name: kindSchema}` on `<qu-app-shell>` (or any wrapping
+ *     element) itself; `@qu/space-components` ships no built-in registry of
+ *     its own (it has no idea what Kinds any given app defines - see
+ *     `@qu/app-core`'s `kinds.js`, `defineCollectionKind()`). `node-id`
+ *     itself is expected to be a literal, human-typeable id - fine for a
+ *     shared/self-certifying Node whose id is a well-known constant, but
+ *     NOT for a content-addressed one (`deriveContentNodeId()`'s output is
+ *     a hash, nobody types that by hand) - see `self` right below for that
+ *     case specifically.
+ *   - `self` (a plain boolean attribute, empty or `"true"`) - resolves
+ *     BOTH `kindSchema` and `nodeId` together, via `findQuSelf(el)`
+ *     (`context.js`'s own doc comment) against whichever page is currently
+ *     rendered in `el`'s own ancestry (`@qu/app-shell`'s `boot.js` sets
+ *     this on every render). The one case `kind`/`node-id` genuinely can't
+ *     cover: "bind to a field on THIS SAME page," the overwhelmingly
+ *     common case for a hand-authored Template, and the reason
+ *     Qu-Components in Template HTML had no practical story before this
+ *     existed. Takes priority over `kind`/`node-id` if somehow both are
+ *     present (a self-contradictory case, no reason to prefer the other
+ *     two over the more specific `self`).
  *
  * @param {Element} el
  * @returns {{space: object, kindSchema: object, nodeId: string}|null} `null` if anything required isn't resolvable yet (not necessarily an error - see resolveField()'s own retry).
  */
 export function resolveNodeRef(el) {
   const space = findQuSpace(el);
+  if (!space) return null;
+  if (el.hasAttribute('self')) {
+    const self = findQuSelf(el);
+    if (!self || !self.kindSchema || !self.nodeId) return null;
+    return { space, kindSchema: self.kindSchema, nodeId: self.nodeId };
+  }
   const kindName = el.getAttribute('kind');
   const kindSchema = el.kindSchema ?? (kindName ? findQuKind(el, kindName) : null);
   const nodeId = el.nodeId ?? el.getAttribute('node-id');
-  if (!space || !kindSchema || !nodeId) return null;
+  if (!kindSchema || !nodeId) return null;
   return { space, kindSchema, nodeId };
 }
 
