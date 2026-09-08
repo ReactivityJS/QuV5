@@ -50,28 +50,58 @@ function cachedGlobalAppAnchor(prefix) {
 }
 
 /**
- * Polls `checkFn` (may itself be async - `'atomic'`-shape fields' own
- * `.get()` is a Promise, `'text'`-shape's is not, see field.js) until it
- * returns truthy, `timeout` elapses, or (when `space`/`nodeId` are given)
- * `space.isNodeSynced(nodeId)` has been true for a full `settle` window
- * while `checkFn` is still falsy - the SAME "a relay's `sync-ack` means
- * don't bother waiting out the rest of the timeout for a Node that's
- * confirmed to not exist, but give a settle margin first" fast-path
- * `resolver.js`'s own identically-shaped `waitFor()` uses (see that
- * function's own doc comment on both `isNodeSynced()` and `settle` - in
- * particular why the settle margin is NOT optional: a concurrent write
- * from a genuinely different peer has no ordering guarantee relative to an
- * empty sync-ack), local here (not imported from resolver.js) so this file
- * stays independent of that one. `space`/`nodeId` are OPTIONAL (default
- * `null`) - every `edit*()` call site below omits them (an edit's own
- * "does this exist" check has no single `nodeId` fast-path win worth
- * threading through every call site for now), only
- * `getOrSyncRegistryNode()` passes them, since it sits directly in
- * `createTemplate()`/`createStyle()`'s own hot path (a brand-new
- * identity's first-ever registry write, exactly the sequence `boot.js`'s
- * `ensureSelfProvisioned()` runs on a first-time visit).
+ * Resolves `true` the instant `checkFn` (may itself be async -
+ * `'atomic'`-shape fields' own `.get()` is a Promise, `'text'`-shape's is
+ * not, see field.js) returns truthy, `false` once `timeout` elapses, or
+ * (when `space`/`nodeId` are given) once `space.isNodeSynced(nodeId)` has
+ * been true for a full `settle` window while `checkFn` is still falsy -
+ * the SAME "a relay's `sync-ack` means don't bother waiting out the rest of
+ * the timeout for a Node that's confirmed to not exist, but give a settle
+ * margin first" fast-path `resolver.js`'s own identically-shaped
+ * `waitFor()` uses (see that function's own doc comment on both
+ * `isNodeSynced()`, `settle`, and the EVENT-DRIVEN vs. polling-fallback
+ * split this function mirrors exactly - `space.bus` real events when
+ * available, a bounded poll loop only when `space` has none), local here
+ * (not imported from resolver.js) so this file stays independent of that
+ * one. `space`/`nodeId` are OPTIONAL (default `null`) - a caller with
+ * neither just gets the plain "poll `checkFn` until `timeout`" behavior,
+ * no event subscription, no `isNodeSynced()` fast-path (every `edit*()`
+ * call site below DOES pass both, its own already-computed content-
+ * addressed `id`; only a handful of genuinely `id`-less checks, if any
+ * ever exist, would fall back to this).
  */
 async function waitForSync(checkFn, { timeout = 3000, interval = 20, settle = 150, space = null, nodeId = null } = {}) {
+  if (await checkFn()) return true;
+
+  const bus = space?.bus;
+  if (!bus || !nodeId) return waitForSyncByPolling(checkFn, { timeout, interval, settle, space, nodeId });
+
+  return new Promise((resolve) => {
+    let done = false;
+    let settleTimer = null;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(settleTimer);
+      clearTimeout(deadlineTimer);
+      offChanged();
+      offSyncAck();
+      resolve(value);
+    };
+    const recheck = async () => {
+      if (done) return;
+      if (await checkFn()) return finish(true);
+      if (space.isNodeSynced(nodeId) && settleTimer === null) settleTimer = setTimeout(() => finish(false), settle);
+    };
+    const offChanged = bus.on(`space.node.${nodeId}.changed`, recheck);
+    const offSyncAck = bus.on(`space.node.${nodeId}.sync-ack`, recheck);
+    const deadlineTimer = setTimeout(() => finish(false), timeout);
+    recheck(); // covers "already synced by the time we started listening" - isNodeSynced() is current STATE, not a replayed event.
+  });
+}
+
+/** The pre-event-driven implementation, kept as `waitForSync()`'s own fallback for a `space` with no `bus` (or no `nodeId`) - see that function's own doc comment. Identical semantics, just re-checking on a fixed `interval` instead of on the real underlying events. */
+async function waitForSyncByPolling(checkFn, { timeout, interval, settle, space, nodeId }) {
   const deadline = Date.now() + timeout;
   let syncedAt = null;
   for (;;) {
@@ -235,7 +265,7 @@ export async function createPage(space, { route, title, template = null, content
 export async function editTemplate(space, { name, html, ownerPub = space.identity.signingPub, timeout } = {}) {
   const id = await deriveContentNodeId(ownerPub, templateKind.kind, name);
   const { node, release } = await space.useNode(id, templateKind);
-  const synced = await waitForSync(() => node.field('html').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('html').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editTemplate: template "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createTemplate() for a genuinely new one`);
@@ -249,7 +279,7 @@ export async function editTemplate(space, { name, html, ownerPub = space.identit
 export async function editStyle(space, { name, css, ownerPub = space.identity.signingPub, timeout } = {}) {
   const id = await deriveContentNodeId(ownerPub, styleKind.kind, name);
   const { node, release } = await space.useNode(id, styleKind);
-  const synced = await waitForSync(() => node.field('css').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('css').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editStyle: style "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createStyle() for a genuinely new one`);
@@ -270,7 +300,7 @@ export async function editPage(space, { route, title, template, content, data, s
   const synced = await waitForSync(async () => {
     const t = await node.field('title').get();
     return t !== '' && node.field('content').get() !== '';
-  }, { timeout });
+  }, { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editPage: page "${route}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createPage() for a genuinely new one`);
@@ -533,7 +563,7 @@ export async function createView(space, { name, route = null, template = null, s
 export async function editView(space, { name, ownerPub = space.identity.signingPub, timeout, ...fields } = {}) {
   const id = await deriveContentNodeId(ownerPub, viewKind.kind, name);
   const { node, release } = await space.useNode(id, viewKind);
-  const synced = await waitForSync(() => node.field('itemTemplate').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('itemTemplate').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editView: view "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createView() for a genuinely new one`);
@@ -588,7 +618,7 @@ export async function editCollectionItem(space, { itemKind, path, fields, ownerP
       if (value !== null && value !== undefined && value !== '') return true;
     }
     return false;
-  }, { timeout });
+  }, { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editCollectionItem: "${path}" (${itemKind.kind}) does not exist (or has not synced within ${timeout ?? 3000}ms) - use createCollectionItem() for a genuinely new one`);
@@ -1043,7 +1073,7 @@ export async function editGlobalTemplate(space, prefix, { name, html, timeout } 
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminTemplateKind.kind, name);
   const { node, release } = await space.useNode(id, adminTemplateKind);
-  const synced = await waitForSync(() => node.field('html').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('html').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editGlobalTemplate: template "${name}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalTemplate() for a genuinely new one`);
@@ -1058,7 +1088,7 @@ export async function editGlobalStyle(space, prefix, { name, css, timeout } = {}
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminStyleKind.kind, name);
   const { node, release } = await space.useNode(id, adminStyleKind);
-  const synced = await waitForSync(() => node.field('css').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('css').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editGlobalStyle: style "${name}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalStyle() for a genuinely new one`);
@@ -1076,7 +1106,7 @@ export async function editGlobalPage(space, prefix, { route, title, template, co
   const synced = await waitForSync(async () => {
     const t = await node.field('title').get();
     return t !== '' && node.field('content').get() !== '';
-  }, { timeout });
+  }, { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editGlobalPage: page "${route}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalPage() for a genuinely new one`);
@@ -1190,7 +1220,7 @@ export async function editGlobalView(space, prefix, { name, timeout, ...fields }
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminViewKind.kind, name);
   const { node, release } = await space.useNode(id, adminViewKind);
-  const synced = await waitForSync(() => node.field('itemTemplate').get() !== '', { timeout });
+  const synced = await waitForSync(() => node.field('itemTemplate').get() !== '', { timeout, space, nodeId: id });
   if (!synced) {
     release();
     throw new Error(`editGlobalView: view "${name}" (global app "${prefix}") does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGlobalView() for a genuinely new one`);

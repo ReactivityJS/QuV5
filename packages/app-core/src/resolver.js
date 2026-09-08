@@ -26,10 +26,10 @@ import { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistry
 const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, templateRegistryKind, styleRegistryKind, pageKind, templateKind, styleKind, viewKind };
 
 /**
- * Polls `checkFn` until it returns a non-null/non-undefined value, `timeout`
- * elapses, or `space.isNodeSynced(nodeId)` (`@qu/space-core`'s `Space`,
- * `_handleIncoming()`'s own doc comment on the relay's `sync-ack`) has been
- * `true` for a full `settle` window while `checkFn` is STILL empty -
+ * Resolves `checkFn`'s first non-null/non-undefined value, `timeout`
+ * elapsing, or `space.isNodeSynced(nodeId)` (`@qu/space-core`'s `Space`,
+ * `_handleIncoming()`'s own doc comment on the relay's `sync-ack`) having
+ * been `true` for a full `settle` window while `checkFn` is STILL empty -
  * whichever comes first. `isNodeSynced()` means a subscribed relay has
  * explicitly confirmed it has told this Space everything it CURRENTLY has
  * mirrored for `nodeId` as of subscribe-time - genuinely nothing published
@@ -43,6 +43,20 @@ const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, templateRegistryKind
  * indistinguishable client-side before the relay itself started sending
  * this ack at all.
  *
+ * EVENT-DRIVEN, not polled, when `space.bus` exists (`Space`'s own `bus`
+ * getter - real in production, `@qu/app-shell`'s `shell.js` always
+ * constructs one): subscribes to `space.node.<nodeId>.changed` and
+ * `space.node.<nodeId>.sync-ack` (both already emitted by `Space`
+ * regardless of whether anything here ever listened, see `space.js`'s own
+ * `_emitChangeEvents()`/`_handleIncoming()`) and re-runs `checkFn` only
+ * when one of those actually fires - resolves the INSTANT the real signal
+ * arrives, not up to a poll `interval` later, and spends zero cycles
+ * between events. Falls back to a bounded poll loop (`interval`, default
+ * 20ms) ONLY when `space` has no `bus` (some lower-level test setups,
+ * `isNodeSynced()`'s own state is still correct without one - only the
+ * EVENT announcing a change to it is unavailable) - never a silent
+ * behavior change, still resolves the exact same value either way.
+ *
  * `settle` (default 150ms, the SAME margin `@qu/app-shell`'s
  * `verifyWritesAcked()` already uses for the identical reason) is NOT
  * cosmetic: `isNodeSynced()` only describes what the relay's OWN mirror
@@ -54,7 +68,7 @@ const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, templateRegistryKind
  * forward, just not necessarily BEFORE the (already async, storage-backed)
  * `sync-ack` itself arrives - two independent peers' messages have no
  * relative ordering guarantee at all (relay.js's own per-peer `peerQueues`
- * run fully concurrently with each other). Returning the instant
+ * run fully concurrently with each other). Resolving the instant
  * `isNodeSynced()` flips true, with no settle margin, was a REAL, caught
  * regression: a genuinely-existing page, written by a different identity
  * moments earlier, would routinely resolve to `null` for a fresh visitor
@@ -66,15 +80,52 @@ const DEFAULT_KINDS = { appManifestKind, routeRegistryKind, templateRegistryKind
  * can concurrently write a not-yet-created identity's own Nodes, which is
  * exactly why this bug went unnoticed until a cross-peer test exercised
  * it). `settle` gives any such near-simultaneous write a real window to
- * actually arrive and update `checkFn` before this gives up - narrows the
- * remaining race to "an update that took upward of `settle` to physically
- * arrive after being sent," astronomically rarer than "arrived in some
- * arbitrary order relative to an unrelated ack" ever was. Still
- * local-first regardless of any of this: the very first `checkFn()` call
- * (before `isNodeSynced()` is ever consulted) is what makes an
- * ALREADY-locally-known value resolve instantly.
+ * actually arrive and update `checkFn` before this gives up (armed as a
+ * single timer the moment `isNodeSynced()` is first observed true, cleared
+ * the instant a LATER `changed` event makes `checkFn` truthy - not reset by
+ * every event, exactly like the old poll loop's own `syncedAt ??= ...`)
+ * - narrows the remaining race to "an update that took upward of `settle`
+ * to physically arrive after being sent," astronomically rarer than
+ * "arrived in some arbitrary order relative to an unrelated ack" ever was.
+ * Still local-first regardless of any of this: the very first `checkFn()`
+ * call (before either the event subscriptions or `isNodeSynced()` are ever
+ * consulted) is what makes an ALREADY-locally-known value resolve
+ * instantly, synchronously, with no event round-trip at all.
  */
 async function waitFor(space, nodeId, checkFn, { timeout = 4000, interval = 20, settle = 150 } = {}) {
+  const initial = await checkFn();
+  if (initial !== null && initial !== undefined) return initial;
+
+  const bus = space.bus;
+  if (!bus) return waitForByPolling(space, nodeId, checkFn, { timeout, interval, settle });
+
+  return new Promise((resolve) => {
+    let done = false;
+    let settleTimer = null;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(settleTimer);
+      clearTimeout(deadlineTimer);
+      offChanged();
+      offSyncAck();
+      resolve(value);
+    };
+    const recheck = async () => {
+      if (done) return;
+      const value = await checkFn();
+      if (value !== null && value !== undefined) finish(value);
+      else if (space.isNodeSynced(nodeId) && settleTimer === null) settleTimer = setTimeout(() => finish(null), settle);
+    };
+    const offChanged = bus.on(`space.node.${nodeId}.changed`, recheck);
+    const offSyncAck = bus.on(`space.node.${nodeId}.sync-ack`, recheck);
+    const deadlineTimer = setTimeout(() => finish(null), timeout);
+    recheck(); // covers "already synced by the time we started listening" - isNodeSynced() is current STATE, not a replayed event.
+  });
+}
+
+/** The pre-event-driven implementation, kept as `waitFor()`'s own fallback for a `space` with no `bus` configured - see that function's own doc comment. Identical semantics, just re-checking on a fixed `interval` instead of on the real underlying events. */
+async function waitForByPolling(space, nodeId, checkFn, { timeout, interval, settle }) {
   const deadline = Date.now() + timeout;
   let syncedAt = null;
   for (;;) {
@@ -149,6 +200,16 @@ export class ContentResolver {
     const id = await deriveContentNodeId(this._appAdminPub, pageKind.kind, route);
     const { node, release } = await this._space.useNode(id, pageKind);
     const page = await waitFor(this._space, id, async () => {
+      // GATE ON isNodeSynced() FIRST - a REAL, caught bug (architecture.md §7's own "does not exist
+      // (or has not synced)" production report, and this file's own resolveGroup()/resolveSharedList()
+      // doc comments describe the identical root cause): a fresh re-subscribe (e.g. right after an
+      // edit torn the previous local Y.Doc down, `Space.useNode()`'s own ref-counted teardown) replays
+      // EVERY envelope this Node ever had, oldest first - "title/content are both non-empty" can
+      // already be true on the OLD pre-edit value, several envelopes before the LATEST edit has even
+      // been applied. Waiting for the relay's own sync-ack first means every envelope it currently has
+      // - the edit included - is guaranteed already applied before ANY field below is read, so this
+      // never returns a stale intermediate value merely because it happened to already be non-empty.
+      if (!this._space.isNodeSynced(id)) return null;
       const title = await node.field('title').get();
       const content = node.field('content').get();
       // Wait for BOTH: `title`/`content` are written as SEPARATE envelopes (see kinds.js/node.js's
@@ -194,6 +255,10 @@ export class ContentResolver {
     const id = await deriveContentNodeId(this._appAdminPub, templateKind.kind, name);
     const { node, release } = await this._space.useNode(id, templateKind);
     const html = await waitFor(this._space, id, () => {
+      // See resolvePage()'s own doc comment on gating on isNodeSynced() first - same reasoning,
+      // applied here for an EDITED template's html (single field, but still re-write-able, still
+      // subject to the same "stale intermediate value happens to already be non-empty" race).
+      if (!this._space.isNodeSynced(id)) return null;
       const value = node.field('html').get();
       return value ? value : null;
     }, { timeout });
@@ -216,6 +281,8 @@ export class ContentResolver {
     // occasionally time out real, existing content under real network/CPU load - not just "no
     // theme set."
     const css = await waitFor(this._space, id, () => {
+      // See resolvePage()'s own doc comment on gating on isNodeSynced() first - identical reasoning.
+      if (!this._space.isNodeSynced(id)) return null;
       const value = node.field('css').get();
       return value !== '' ? value : null;
     }, { timeout: timeout ?? 2000 });
@@ -393,6 +460,8 @@ export class ContentResolver {
     const id = await deriveContentNodeId(owner, viewKindHere.kind, name);
     const { node, release } = await this._space.useNode(id, viewKindHere);
     const view = await waitFor(this._space, id, async () => {
+      // See resolvePage()'s own doc comment on gating on isNodeSynced() first - identical reasoning.
+      if (!this._space.isNodeSynced(id)) return null;
       const itemTemplate = node.field('itemTemplate').get();
       if (!itemTemplate) return null;
       const sources = await node.field('sources').get();
