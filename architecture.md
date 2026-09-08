@@ -947,6 +947,17 @@ race) entirely. `ContentResolver`'s own release-immediately posture is
 otherwise unchanged (correct for ordinary rendering, where holding every
 resolved Node open for a whole visit would leak subscriptions).
 
+**UPDATE:** the "Subscribe statt Polling" work further down this section
+(§7's own later "later revision" entry) closes the OTHER half of this bug
+class - a fresh re-subscribe now reliably waits for `isNodeSynced()` before
+trusting ANY field value, so a resolve after a teardown-and-resubscribe can
+no longer return a STALE pre-edit value merely because it happened to
+already be non-empty. `holdEdit()` above is still what avoids the teardown
+(and its network round-trip) in the first place - genuinely eliminating
+`useNode()`'s ref-counted teardown-on-release itself (so an app never needs
+its own `holdEdit()`-style workaround) is real, deliberately separate
+follow-up work, not attempted here.
+
 **A second, deeper real bug in the SAME family, also deployment-observed:
 a route/template/style that had just been created or edited would appear
 to VANISH from the CMS list right after a LATER, unrelated save - "/"
@@ -1691,6 +1702,45 @@ neither depends on the other's RESULT), and `shell.js`'s own
 `joinSpace()`/`fetchRelayAdmins()` boot-sequence calls (a completely
 independent, unauthenticated read, needlessly held until AFTER `joinSpace()`'s
 own two-step POST-then-GET finished).
+
+**"Subscribe statt Polling" (a later revision): the `sync-ack` fast-path
+above was still a POLL LOOP that merely gave up early - `waitFor()`/
+`waitForSync()` re-checked `checkFn` on a fixed `interval` (20ms) timer
+regardless of whether anything had actually changed. Both are now
+EVENT-DRIVEN when `space.bus` exists (real in production - `shell.js`
+always constructs one): they subscribe to `space.node.<id>.changed`/
+`.sync-ack` (already emitted by `Space` for every write/ack, whether or not
+anything was listening) and only re-run `checkFn` when one of those
+actually fires - resolving the instant the real signal arrives instead of
+up to `interval` later, and burning zero cycles in between. Falls back to
+the identical old poll loop only for a `space` with no `bus` (some
+lower-level test setups) - `isNodeSynced()`'s own STATE is correct either
+way, only the EVENT announcing a change to it is unavailable without one.
+`verifyWritesAcked()` (`@qu/app-shell`) got the same treatment: its own
+trailing "poll until acked>=expected" loop is now a single event listener
+racing a deadline timer.
+
+While adding tests for this, a SEPARATE, previously-undetected bug
+surfaced: `resolvePage()`/`resolveTemplate()`/`resolveStyle()`/
+`resolveView()` (`resolver.js`) resolved as soon as their checked field(s)
+were non-empty, WITHOUT first gating on `isNodeSynced()` the way
+`resolveGroup()`/`resolvePrivatePage()`/`resolveSharedList()` already did.
+On a fresh re-subscribe (e.g. right after `Space.useNode()`'s own
+ref-counted teardown - see the "does not exist (or has not synced)" bug
+just above, still not itself eliminated, only worked around by
+`holdEdit()`), a relay replays a Node's envelopes OLDEST FIRST - a STALE,
+pre-edit value can already be non-empty and get returned before the
+Node's own LATEST edit envelope has even been applied. Caught by a new
+regression test (`wait-for-sync-events.test.js`: edit a page on a fresh
+connection, immediately resolve it back) that failed with the OLD content
+even though the edit had already been relay-acked. Fixed the same way the
+three methods above already were: gate every `checkFn` on
+`isNodeSynced(id)` first. Also wired `space`/`nodeId` through to
+`waitForSync()` at every `edit*()`/`editGlobal*()` call site in `dev.js`
+that had been omitting them (all but `getOrSyncRegistryNode()` and
+`editGroup()`/`editPrivatePage()`) - the exact functions behind the
+"does not exist (or has not synced)" production bug never actually had the
+`isNodeSynced()` fast-path wired in at all before this.
 
 **A self-provisioned multiuser participant's OWN registries were silently
 dropped by the relay (a real, shipped bug, found and fixed in the same
