@@ -1786,6 +1786,75 @@ that SAME instance, needs neither the `isNodeSynced()` fast-path nor any
 wait at all to succeed, because the Node was never torn down to begin
 with.
 
+**"Views/Pages/Templates-UX" (Phase 4): delete finally exists, and a
+complex View can be imported as one JSON blob.** Two real, previously
+missing CMS capabilities, both closing a gap the framework's own data
+model (not just the UI) had never actually supported:
+
+1. **`@qu/space-core`'s `field.js` `ListField` gained `remove(index,
+   length)`** - before this, `ListField` only ever had `push()` (this
+   document's own `platformAppsKind` doc comment already flagged the
+   symptom: "`ListField` has no removal primitive... no `unregisterApp()`")
+   - the STRUCTURAL reason Pages/Templates/Styles/Views had no delete
+     story at all: their registries (`routeRegistryKind`/
+   `templateRegistryKind`/`styleRegistryKind`) are `shape: 'list'` fields,
+   and nothing could ever un-register an entry once pushed. `remove()`
+   wraps Yjs' own `Y.Array.delete()` - CRDT-merged against a concurrent
+   insert/remove exactly like `TextField.delete()` already is for
+   `Y.Text`, proven in `packages/space-core/test/field.test.js` with a
+   genuine two-peer concurrent remove-vs-push scenario (both survive,
+   never one clobbering the other).
+2. **`dev.js` gained `deleteTemplate()`/`deleteStyle()`/`deletePage()`/
+   `deleteView()`** (plus `unregisterContentName()`/`unpublishRoute()`,
+   the registry-side removal helpers, symmetric with the existing
+   `registerContentName()`/`publishRoute()`) - each removes the item from
+   its own registry (so `resolveTemplateNames()`/`resolveStyleNames()`/
+   `resolveRoutes()` stop enumerating it) and best-effort clears its own
+   content (`editTemplate()`/`editStyle()`/`editPage()`/`editView()` under
+   the hood, writing empty values) - still NOT a genuine Node deletion (no
+   such primitive exists anywhere in this architecture, the same "cleared
+   and unreachable via the registry, not erased" caveat
+   `nullGlobalAppContent()` already established for whole-app uninstalls,
+   generalized here to one item at a time). Self-owned only, deliberately
+   no `ownerPub` override (matching `createTemplate()`/`createStyle()`/
+   `createPage()`'s own scope) - a granted co-editor can fully edit
+   someone else's content through the exact same form already, but cannot
+   delete it: `unregisterContentName()`/`unpublishRoute()` only ever look
+   at the CALLING identity's own registry, so a co-editor's attempt fails
+   with a clear "is not registered" error rather than silently doing
+   nothing or touching the wrong registry. `deleteGlobalPage()` and
+   friends (the `realm: 'global'` counterparts) don't exist yet - real,
+   deliberate follow-up work, not attempted here.
+   `cms-actions.js` wires a "Löschen" button next to every Templates/
+   Styles/Content row (non-global only, same "no native `confirm()`"
+   posture `admin-actions.js`'s own "Deinstallieren" already established -
+   fires immediately, framework-provided interactivity stays a plain DOM
+   element) - `data-qu-cms-delete="template"\|"style"\|"content"` for a
+   test/CSS hook. Every listed Content route gets ONE delete button
+   regardless of whether it was authored via the "Text/HTML" picker or the
+   "Geteilte Liste"/"Seiten-Filter" (View) picker - `createView({route})`'s
+   own "auto-creates a wrapper page" behavior (§7 above) means every routed
+   item has a REAL wrapper page underneath it either way, so `deletePage()`
+   alone is correct and sufficient for the row - a View's own SEPARATE Node
+   (`sources`/`sortBy`/...) is untouched by it; deleting THAT specifically
+   has a Dev API (`deleteView()`) but no dedicated UI button yet.
+3. **A complete View definition can now be imported as one JSON blob** -
+   the user's own explicit ask, closing the gap the existing `sourcesOverride`
+   textarea (a raw-JSON escape hatch for the `sources` array alone,
+   `wireContent()`'s own doc comment) only partially addressed: a new
+   "View aus JSON übernehmen" `<details>` block above the Content list
+   accepts `{name, route, sources, sortBy, sortOrder, limit, itemTemplate,
+   template, style}` (every field optional except `name` or `route`) and
+   populates the form's own fields on click - `sourcesOverride` specifically
+   (never the simple single-source picker fields), so ANY `sources` shape
+   round-trips correctly, simple or multi-source alike, with no
+   special-casing. Deliberately does NOT auto-submit - "Speichern" still has
+   to be clicked, same review-before-save posture loading an existing item
+   into the form already has.
+See `packages/app-core/test/dev-delete.test.js`, `packages/space-core/test/field.test.js`'s
+new `ListField.remove()` cases, and `packages/app-shell/test/cms-delete.test.js`/
+`cms-view-import.test.js` for the end-to-end proofs.
+
 **A self-provisioned multiuser participant's OWN registries were silently
 dropped by the relay (a real, shipped bug, found and fixed in the same
 pass):** `qu-app`/`qu-route-registry`/`qu-template-registry`/

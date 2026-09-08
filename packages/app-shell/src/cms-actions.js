@@ -141,6 +141,10 @@ import {
   editTemplate,
   editStyle,
   editPage,
+  deleteTemplate,
+  deleteStyle,
+  deletePage,
+  deleteView,
   publishRoute,
   createGlobalPage,
   editGlobalPage,
@@ -287,6 +291,7 @@ async function wireSimpleContentSection({
   resolveValue,
   createFn,
   editFn,
+  deleteFn,
 }) {
   if (global) return;
   const list = mountEl.querySelector(`[data-qu-bind="cms-${sectionId}-list"]`);
@@ -322,6 +327,34 @@ async function wireSimpleContentSection({
         enterEditMode(form, { keyFieldName: 'name', keyValue: name, fields: { [valueField]: value ?? '' } });
       });
       li.appendChild(btn);
+
+      // DELETE - self-owned content only (no `ownerPub` passed to `deleteFn`, unlike `createFn`/
+      // `editFn` above): a granted co-editor can fully edit someone else's content through this same
+      // form already, but cannot delete it here - `deleteTemplate()`/`deleteStyle()` (`dev.js`) only
+      // ever unregister from the CALLING identity's own registry, so a co-editor's attempt fails with
+      // a clear "is not registered" error rather than silently doing nothing or touching the wrong
+      // registry. Same "no native confirm()" posture as `admin-actions.js`'s own "Deinstallieren" -
+      // fires immediately, no dialog, framework-provided interactivity stays a plain DOM element.
+      const deleteBtn = doc.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.dataset.quCmsDelete = sectionId;
+      deleteBtn.textContent = 'Löschen';
+      deleteBtn.addEventListener('click', async () => {
+        setStatus(form, '');
+        try {
+          await deleteFn(space, { name, timeout: 2000 });
+          if (form.querySelector('[name="name"]')?.value.trim() === name) {
+            activeEdit?.release();
+            activeEdit = null;
+            resetForm(form, 'name');
+          }
+          await refreshList();
+        } catch (err) {
+          setStatus(form, `Fehler: ${err.message}`);
+        }
+      });
+      li.appendChild(deleteBtn);
+
       list.appendChild(li);
     }
   }
@@ -375,6 +408,7 @@ async function wireTemplates({ mountEl, doc, space, resolver, global, ownerPub }
     resolveValue: (name, opts) => resolver.resolveTemplate(name, opts),
     createFn: createTemplate,
     editFn: editTemplate,
+    deleteFn: deleteTemplate,
   });
 }
 
@@ -407,6 +441,7 @@ async function wireStyles({ mountEl, doc, space, resolver, global, ownerPub }) {
     resolveValue: (name, opts) => resolver.resolveStyle(name, opts),
     createFn: createStyle,
     editFn: editStyle,
+    deleteFn: deleteStyle,
   });
 }
 
@@ -416,6 +451,15 @@ const CONTENT_PAGE_CONTENT = `<h1>Inhalt</h1>
   geteilte Liste (z.B. Gästebuch) oder einen Seiten-Filter (z.B. Blog-Index) - "Ziel-App-Präfix" bei
   "Seiten-Filter" erlaubt es, Inhalte einer ANDEREN App einzubinden (App-übergreifende Views).</p>
 <ul data-qu-bind="cms-content-list"></ul>
+<details>
+  <summary>View aus JSON übernehmen</summary>
+  <p>Eine vollständige View-Definition einfügen (<code>{"name","route","sources","sortBy","sortOrder","limit","itemTemplate","template","style"}</code>,
+    alle Felder optional außer <code>name</code> oder <code>route</code>) - übernimmt sie in das Formular unten,
+    OHNE sofort zu speichern (erst "Speichern" klicken).</p>
+  <textarea data-qu-view-import rows="4" cols="60" placeholder='{"name":"feed","sources":[{"type":"pages","prefix":"/blog/"},{"type":"shared-list","name":"guestbook"}],"sortBy":"timestamp","itemTemplate":"..."}'></textarea><br>
+  <button type="button" data-qu-action="cms-content-import-view">Übernehmen</button>
+  <p data-qu-view-import-status></p>
+</details>
 <form data-qu-action="cms-content-form">
   <input type="hidden" name="mode" value="create">
   <label>Pfad (Route, z.B. "/" oder "/blog" - bei "Geteilte Liste"/"Seiten-Filter" optional, leer =
@@ -566,6 +610,7 @@ async function wireContent({ mountEl, doc, space, resolver, global = false, pref
   const form = mountEl.querySelector('form[data-qu-action="cms-content-form"]');
   const resetBtn = mountEl.querySelector('[data-qu-cms-reset="content"]');
   const loadViewBtn = mountEl.querySelector('[data-qu-action="cms-content-load-view"]');
+  const importViewBtn = mountEl.querySelector('[data-qu-action="cms-content-import-view"]');
   if (!list && !form) return;
 
   const pageKindHere = global ? adminPageKind : pageKind;
@@ -613,6 +658,37 @@ async function wireContent({ mountEl, doc, space, resolver, global = false, pref
       });
       li.appendChild(btn);
 
+      // DELETE - self-owned, non-global only (`deleteGlobalPage()` doesn't exist yet - real,
+      // deliberate follow-up work, see `dev.js`'s `deletePage()` doc comment for the scope this
+      // shares with `deleteTemplate()`/`deleteStyle()`). Every listed route has a REAL wrapper page
+      // underneath it regardless of whether it was authored via the "Text/HTML" or "Seiten-Filter/
+      // Geteilte Liste" (View) picker above (`createView({route})`'s own "auto-creates a wrapper
+      // page" behavior) - `deletePage()` is therefore the correct, sufficient delete for ANY row
+      // here, the same uniform treatment the click-to-edit handler above already gives every route.
+      // A View's own separate Node (its `sources`/`sortBy`/...) is untouched by this - deleting THAT
+      // specifically (`deleteView()`, `dev.js`) is real, separate follow-up UI, not built here yet.
+      if (!global) {
+        const deleteBtn = doc.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.dataset.quCmsDelete = 'content';
+        deleteBtn.textContent = 'Löschen';
+        deleteBtn.addEventListener('click', async () => {
+          setStatus(form, '');
+          try {
+            await deletePage(space, { route, timeout: 2000 });
+            if (form.querySelector('[name="route"]')?.value.trim() === route) {
+              activeEdit?.release();
+              activeEdit = null;
+              resetForm(form, ['route', 'name']);
+            }
+            await refreshList();
+          } catch (err) {
+            setStatus(form, `Fehler: ${err.message}`);
+          }
+        });
+        li.appendChild(deleteBtn);
+      }
+
       // EXTENSION POINT - a plugin (Blog "Duplizieren", a future Forum "Verschieben", ...) offers
       // extra per-row actions here, via `extensionPoints.collect('cms.pageActions', ...)`, WITHOUT
       // this file importing that plugin or knowing it exists (`extension-points.js`'s own top doc
@@ -630,6 +706,53 @@ async function wireContent({ mountEl, doc, space, resolver, global = false, pref
 
       list.appendChild(li);
     }
+  }
+
+  // JSON IMPORT (Phase 4's own "Import-Schema als String" ask) - a complete View definition,
+  // pasted as one JSON object, populates the form's own fields WITHOUT saving anything - "Speichern"
+  // still has to be clicked afterward, same as loading an existing item into the form does. `sources`
+  // (if given) always round-trips through `sourcesOverride` (the raw-JSON escape hatch just below in
+  // this same form, see its own doc comment on "takes full precedence when present") rather than
+  // trying to reverse-engineer which of the simple picker fields (`listName`/`sourcePrefix`/
+  // `pagesPrefix`) a multi-source or unusual single-source array should map onto - genuinely correct
+  // for ANY `sources` shape the picker can express AND every shape it can't, with no special-casing.
+  const importViewStatus = mountEl.querySelector('[data-qu-view-import-status]');
+  if (importViewBtn && form) {
+    importViewBtn.addEventListener('click', () => {
+      const raw = mountEl.querySelector('[data-qu-view-import]')?.value.trim();
+      if (importViewStatus) importViewStatus.textContent = '';
+      if (!raw) return;
+      let imported;
+      try {
+        imported = JSON.parse(raw);
+      } catch (err) {
+        if (importViewStatus) importViewStatus.textContent = `Kein gültiges JSON: ${err.message}`;
+        return;
+      }
+      if (!imported || typeof imported !== 'object' || Array.isArray(imported)) {
+        if (importViewStatus) importViewStatus.textContent = 'Erwartet ein JSON-OBJEKT (kein Array/Wert).';
+        return;
+      }
+      if (!imported.name && !imported.route) {
+        if (importViewStatus) importViewStatus.textContent = 'Mindestens "name" oder "route" wird benötigt.';
+        return;
+      }
+      activeEdit?.release();
+      activeEdit = null;
+      resetForm(form, ['route', 'name']);
+      form.querySelector('[name="sourceType"]').value = 'pages'; // reveals the shared shared-list/pages block - which picker value doesn't matter, sourcesOverride below takes precedence either way.
+      form.querySelector('[name="route"]').value = imported.route ?? '';
+      form.querySelector('[name="name"]').value = imported.name ?? '';
+      form.querySelector('[name="sourcesOverride"]').value = imported.sources ? JSON.stringify(imported.sources) : '';
+      form.querySelector('[name="viewTemplate"]').value = imported.template ?? '';
+      if (imported.sortBy) form.querySelector('[name="sortBy"]').value = imported.sortBy;
+      if (imported.sortOrder) form.querySelector('[name="sortOrder"]').value = imported.sortOrder;
+      form.querySelector('[name="limit"]').value = imported.limit ?? '';
+      form.querySelector('[name="itemTemplate"]').value = imported.itemTemplate ?? '';
+      form.querySelector('[name="style"]').value = imported.style ?? '';
+      updateVisibility();
+      if (importViewStatus) importViewStatus.textContent = 'Übernommen - bitte prüfen und "Speichern" klicken.';
+    });
   }
 
   if (loadViewBtn && form) {

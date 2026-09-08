@@ -79,7 +79,7 @@ test('a plugin contributing to "cms.pageActions" gets an extra button on every C
   assert.equal(clicked, '/hello', 'clicking the contributed button should run the plugin\'s own onClick with this row\'s route');
 });
 
-test('with no contributor registered, the Content list renders exactly as before (no extra buttons, correct no-op)', async () => {
+test('with no contributor registered, the Content list renders only its own built-in buttons (correct no-op for the extension point)', async () => {
   const admin = await actor();
   const hub = createInProcessHub();
   const resolveKindSchema = await createAppResolveKindSchema({ appAdminPub: admin.signingPub });
@@ -105,5 +105,8 @@ test('with no contributor registered, the Content list renders exactly as before
   await waitUntil(() => [...mountEl.querySelectorAll('[data-qu-bind="cms-content-list"] button')].some((b) => b.textContent === '/solo'));
 
   const row = [...mountEl.querySelectorAll('[data-qu-bind="cms-content-list"] li')].find((li) => li.textContent.includes('/solo'));
-  assert.equal(row.querySelectorAll('button').length, 1, 'no contributor registered -> only the built-in "open in editor" button');
+  // "open in editor" + "Löschen" (Phase 4's own delete button, `cms-actions.js`'s own doc comment on
+  // "DELETE") - no contributor registered on "cms.pageActions", so no THIRD, plugin-contributed one.
+  assert.equal(row.querySelectorAll('button').length, 2, 'no contributor registered -> only the two built-in buttons, no extension-point extras');
+  assert.equal(row.querySelector('button[data-qu-cms-delete="content"]')?.textContent, 'Löschen');
 });

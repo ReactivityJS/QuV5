@@ -151,11 +151,14 @@ test('a relay-admin who is ALSO a self-provisioned multiuser participant: their 
   const { window: pw2 } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://platform.test/#/cms/cms/content' });
   const pMount2 = pw2.document.querySelector('qu-app-shell');
   const { router: pRouter2 } = startPlatform({ space: personalSpace2, mountEl: pMount2, window: pw2, resolveTimeout: 500 });
+  // Matched on the row's own "open in editor" BUTTON text, not the whole `<li>`'s `textContent` - a
+  // non-global row (this one) also renders a "Löschen" button as a sibling inside the same `<li>`
+  // (`cms-actions.js`'s own "DELETE" doc comment), which `textContent` would otherwise fold in too.
   await waitUntil(() => {
     const items = [...pMount2.querySelectorAll('[data-qu-bind="cms-content-list"] li')];
-    return items.length > 0 && items.some((li) => li.textContent === '/');
+    return items.length > 0 && items.some((li) => li.querySelector('button')?.textContent === '/');
   }, { timeout: 5000 });
-  const pListItems = [...pMount2.querySelectorAll('[data-qu-bind="cms-content-list"] li')].map((li) => li.textContent);
+  const pListItems = [...pMount2.querySelectorAll('[data-qu-bind="cms-content-list"] li')].map((li) => li.querySelector('button')?.textContent);
   assert.deepEqual(pListItems, ['/'], 'the PERSONAL editor\'s own "Seiten" list, read from a genuinely FRESH connection, actually shows the page that was just created - not silently empty');
   pRouter2.stop();
 

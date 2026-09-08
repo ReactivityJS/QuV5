@@ -211,6 +211,26 @@ async function registerContentName(space, registryKind, fieldName, name) {
   return node;
 }
 
+/**
+ * The inverse of `registerContentName()` - `@qu/space-core`'s `field.js`
+ * `ListField.remove()` (Phase 4's own "Bootstrap-Vereinfachung" follow-up:
+ * `ListField` only ever had `push()` before, so no registry entry could
+ * ever be un-registered at all - this is the primitive `delete*()` below
+ * needed and didn't have). Returns `true` if an entry was actually found
+ * and removed, `false` if `name` was never registered (a correct no-op,
+ * same "nothing to do" posture as every other framework wiring in this
+ * codebase) - `delete*()` uses this to decide whether to bother touching
+ * the content Node at all.
+ */
+async function unregisterContentName(space, registryKind, fieldName, name) {
+  const node = await getOrSyncRegistryNode(space, registryKind);
+  const existing = await node.field(fieldName).toArray();
+  const index = existing.findIndex((entry) => entry?.name === name);
+  if (index === -1) return false;
+  node.field(fieldName).remove(index, 1);
+  return true;
+}
+
 /** Creates a template at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-template', name)` - `Space.createNode()` derives it (and self-grants) itself, see this file's own top doc comment. Also registers `name` into `templateRegistryKind` (kinds.js) so `ContentResolver.resolveTemplateNames()` can enumerate it - see `editTemplate()` for updating an EXISTING template instead of creating a new one. */
 export async function createTemplate(space, { name, html }) {
   const node = await space.createNode(templateKind, { html }, { path: name });
@@ -275,6 +295,33 @@ export async function editTemplate(space, { name, html, ownerPub = space.identit
   return node;
 }
 
+/**
+ * Removes `name` from `templateRegistryKind` (so `resolveTemplateNames()`
+ * stops enumerating it - what actually makes it disappear from a CMS list)
+ * and best-effort clears its own `html` to `''` (`editTemplate()` under
+ * the hood - see this file's own top doc comment, and architecture.md's
+ * own "not a genuine deletion" note repeated once more here: the
+ * underlying Y.Doc has no removal primitive at all, only "cleared,
+ * unreachable via the registry" - a stale direct link to this exact name
+ * would resolve to an EMPTY template, never the old content). Throws if
+ * `name` was never registered - a UI's own "Löschen" button only ever
+ * appears next to an already-`resolveTemplateNames()`-listed entry, so
+ * this should never actually happen from real usage, same posture
+ * `editTemplate()` itself already has for "does not exist."
+ * @param {import('@qu/space-core').Space} space
+ * @param {{name: string, timeout?: number}} params
+ */
+export async function deleteTemplate(space, { name, timeout } = {}) {
+  const removed = await unregisterContentName(space, templateRegistryKind, 'templates', name);
+  if (!removed) throw new Error(`deleteTemplate: template "${name}" is not registered (already deleted?)`);
+  try {
+    await editTemplate(space, { name, html: '', timeout });
+  } catch {
+    // Best-effort - see this function's own doc comment; the registry removal above already did the
+    // part that actually matters (nothing enumerates/resolves-by-name this template any more).
+  }
+}
+
 /** Style counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). */
 export async function editStyle(space, { name, css, ownerPub = space.identity.signingPub, timeout } = {}) {
   const id = await deriveContentNodeId(ownerPub, styleKind.kind, name);
@@ -287,6 +334,17 @@ export async function editStyle(space, { name, css, ownerPub = space.identity.si
   replaceText(node.field('css'), css);
   release();
   return node;
+}
+
+/** Style counterpart to `deleteTemplate()` - see its own doc comment. */
+export async function deleteStyle(space, { name, timeout } = {}) {
+  const removed = await unregisterContentName(space, styleRegistryKind, 'styles', name);
+  if (!removed) throw new Error(`deleteStyle: style "${name}" is not registered (already deleted?)`);
+  try {
+    await editStyle(space, { name, css: '', timeout });
+  } catch {
+    // Best-effort - see deleteTemplate()'s own doc comment, identical reasoning.
+  }
 }
 
 /** Page counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). Only fields actually passed are updated; omit `title`/`template`/`content`/`data`/`style` to leave them unchanged. `title`/`template`/`data`/`style` are `'atomic'`-shape (`field.set()`); `content` is `'text'`-shape, see `replaceText()`'s own doc comment. `data` is kinds.js's `pageKind` own structured-data field (see its doc comment) - passing it REPLACES the whole object (an `'atomic'` field is one opaque last-write-wins value, not merged key-by-key). `style` - see `createPage()`'s own doc comment; pass `null` explicitly to revert to the app Manifest's own `theme`. */
@@ -312,6 +370,27 @@ export async function editPage(space, { route, title, template, content, data, s
   if (style !== undefined) await node.field('style').set(style);
   release();
   return node;
+}
+
+/**
+ * Removes `route` from `routeRegistryKind` (`unpublishRoute()`, defined
+ * further down next to `publishRoute()`) and best-effort clears the
+ * page's own `title`/`content` to `''` (`editPage()` under the hood - same
+ * "not a genuine deletion, just cleared and unreachable via the registry"
+ * reasoning `deleteTemplate()`'s own doc comment explains in full). Throws
+ * if `route` was never published - a UI's own "Löschen" button only ever
+ * appears next to an already-listed entry.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{route: string, timeout?: number}} params
+ */
+export async function deletePage(space, { route, timeout } = {}) {
+  const removed = await unpublishRoute(space, { route });
+  if (!removed) throw new Error(`deletePage: route "${route}" is not published (already deleted?)`);
+  try {
+    await editPage(space, { route, title: '', content: '', timeout });
+  } catch {
+    // Best-effort - see deleteTemplate()'s own doc comment, identical reasoning.
+  }
 }
 
 /** `{pub, xPub}` (raw bytes, `Space`'s own `members` shape) -> the SAME shape base64-encoded, `groupKind`'s own storage format (kinds.js's own doc comment on why: readable/comparable as plain JSON, same convention `platformAppsKind`'s entries already use for pubkeys). */
@@ -577,6 +656,29 @@ export async function editView(space, { name, ownerPub = space.identity.signingP
 }
 
 /**
+ * View counterpart to `deletePage()` - see its own doc comment for the
+ * overall "not a genuine deletion, just cleared and unreachable" reasoning
+ * - with one real difference: a View has no separate registry the way
+ * templates/styles/pages do (`resolveView()` is always a direct, by-name
+ * lookup, never an enumeration - this file's own top doc comment on
+ * `viewKind`), so there is no cheap "was this ever registered" pre-check
+ * to gate on the way `deleteTemplate()`/`deleteStyle()`/`deletePage()`
+ * have - `editView()`'s own "does not exist" error is left to propagate
+ * as-is, never swallowed, since it is the ONLY signal here that anything
+ * was actually deleted at all. `route` is optional (an embed-only View,
+ * created with no route, has nothing to unpublish) - pass it when known
+ * (the CMS Content editor's own form already has it alongside `name`) so
+ * a routed View's wrapper page stops resolving too, not just the View's
+ * own name.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{name: string, route?: string, timeout?: number}} params
+ */
+export async function deleteView(space, { name, route, timeout } = {}) {
+  if (route) await unpublishRoute(space, { route }).catch(() => {});
+  await editView(space, { name, itemTemplate: '', sources: [], timeout });
+}
+
+/**
  * CREATES one item in a Collection (`kinds.js`'s `defineCollectionKind()`)
  * at content-addressed id `deriveContentNodeId(space.identity.signingPub,
  * itemKind.kind, path)` - the exact same self-grant + registry-
@@ -670,6 +772,16 @@ export async function publishRoute(space, { route, title }) {
   const node = await getOrSyncRegistryNode(space, routeRegistryKind);
   await node.field('routes').push({ route, title });
   return node;
+}
+
+/** The inverse of `publishRoute()` - see `unregisterContentName()`'s own doc comment, identical reasoning, just matched by `route` instead of `name` (`routeRegistryKind`'s own entry shape, `{route, title}`). @returns {Promise<boolean>} `true` if `route` was actually published and is now removed, `false` if it never was. */
+export async function unpublishRoute(space, { route }) {
+  const node = await getOrSyncRegistryNode(space, routeRegistryKind);
+  const existing = await node.field('routes').toArray();
+  const index = existing.findIndex((entry) => entry?.route === route);
+  if (index === -1) return false;
+  node.field('routes').remove(index, 1);
+  return true;
 }
 
 /**
