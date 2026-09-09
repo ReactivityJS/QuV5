@@ -107,7 +107,12 @@ export class PlatformRuntime {
   async resolveApps({ timeout } = {}) {
     const id = await platformRegistryId();
     const { node, release } = await this._space.useNode(id, platformAppsKind);
-    await waitFor(this._space, id, () => (node.field('apps').length > 0 ? true : null), { timeout: timeout ?? 500 });
+    // Gated on `isNodeSynced()`, not `apps.length > 0` - a non-empty-but-not-fully-replayed
+    // array (e.g. one peer's entry landed, another's is still in flight) would otherwise look
+    // "done" and stop this wait early, leaving a caller (this method's own consumers, and
+    // `setAppMode()` et al via `dev.js`'s `getOrSyncRegistryNode()` reading the very same Node)
+    // to observe an incomplete list. See resolver.js's own identically-reasoned `isNodeSynced()` gate.
+    await waitFor(this._space, id, () => (this._space.isNodeSynced(id) ? true : null), { timeout: timeout ?? 500 });
     const apps = await node.field('apps').toArray();
     release();
     const byPrefix = new Map();

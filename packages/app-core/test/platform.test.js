@@ -13,7 +13,7 @@ import { InProcessTransport, createInProcessHub, createRelayForwarder } from '@q
 import { createMemoryStore } from '@qu/space-storage';
 import { PlatformRuntime } from '../src/platform.js';
 import { AppRuntime } from '../src/runtime.js';
-import { createApp, createTemplate, createPage, registerApp } from '../src/dev.js';
+import { createApp, createTemplate, createPage, registerApp, setAppMode } from '../src/dev.js';
 import { createAppResolveKindSchema } from '../src/relay-resolver.js';
 
 async function actor() {
@@ -109,4 +109,43 @@ test('resolveForPath() splits a nested route into (prefix, subPath) correctly', 
   const match = await platform.resolveForPath('/forum/topic/123');
   assert.equal(match.prefix, 'forum');
   assert.equal(match.subPath, '/topic/123');
+});
+
+test('setAppMode() works right after registerApp(), over a FRESH Space connection for the same relay-admin identity - regression for the "not a registered app" bug', async () => {
+  // Reproduces a real, reported failure: an admin console's mode-toggle button called
+  // `setAppMode()` right after `registerApp()`, over a Space that had just freshly resubscribed
+  // to the shared `qu-platform-apps` registry Node (e.g. after a page reload, or after
+  // `PlatformRuntime.resolveApps()` released its own hold on it) - a weak sync gate in
+  // `dev.js`'s `getOrSyncRegistryNode()` (meta-stamp only) let `setAppMode()` read the `apps`
+  // list before the relay had fully replayed every entry, so the just-registered prefix looked
+  // unregistered. `getOrSyncRegistryNode()`/`PlatformRuntime.resolveApps()` now both gate on
+  // `space.isNodeSynced()` instead - this test registers several global apps, then immediately
+  // (no delay) calls `setAppMode()` for the LAST one, over a brand new connection/Space instance.
+  const relayAdmin = await actor();
+  const members = [{ pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey }];
+  const relayAdmins = [relayAdmin.signingPub];
+  const hub = createInProcessHub();
+  const resolveKindSchema = await createAppResolveKindSchema();
+  createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema, storage: createMemoryStore() });
+
+  async function connect(peerId) {
+    const transport = new InProcessTransport(hub, peerId);
+    await transport.connect();
+    return new Space({ identity: relayAdmin, members, relayAdmins, transport });
+  }
+
+  const setupSpace = await connect('relay-admin-setup');
+  await registerApp(setupSpace, { prefix: 'guestbook', name: 'Gästebuch', realm: 'global', mode: 'global' });
+  await registerApp(setupSpace, { prefix: 'forum', name: 'Forum', realm: 'global', mode: 'global' });
+  await registerApp(setupSpace, { prefix: 'blog', name: 'Blog', realm: 'global', mode: 'global' });
+
+  // A FRESH Space/connection - simulates a reloaded admin console, not the same in-memory
+  // instance `registerApp()` above already has a warm, fully-synced local subscription on.
+  const freshSpace = await connect('relay-admin-fresh');
+  await setAppMode(freshSpace, { prefix: 'blog', mode: 'multiuser' });
+
+  const platform = new PlatformRuntime(freshSpace);
+  const apps = await platform.resolveApps();
+  const blog = apps.find((a) => a.prefix === 'blog');
+  assert.equal(blog?.mode, 'multiuser');
 });
