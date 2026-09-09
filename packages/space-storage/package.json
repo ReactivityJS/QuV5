@@ -1,15 +1,19 @@
 {
   "name": "@qu/space-storage",
   "version": "0.1.0",
-  "description": "Qu V5: persistence adapters for @qu/space-core. Stores the exact same signed+encrypted envelope objects that go out over @qu/space-transport - at-rest and in-transit are the same opaque ciphertext, never a separate re-encryption step. memoryStore = ephemeral (session/memory tier, lost on process exit); durableStore = simulates a real disk/DB-backed store within one process, for tests; fileStore = REAL on-disk persistence (one file per Node), used by the relay-server/Docker deployment.",
+  "description": "Qu V5: persistence adapters for @qu/space-core. Stores the exact same signed+encrypted envelope objects that go out over @qu/space-transport - at-rest and in-transit are the same opaque ciphertext, never a separate re-encryption step. memoryStore = ephemeral (session/memory tier, lost on process exit); durableStore = simulates a real disk/DB-backed store within one process, for tests; fileStore = REAL on-disk persistence (one file per Node), used by the relay-server/Docker deployment; indexeddbStore = the browser CLIENT's own persistent tier (instant local hydrate before any network round trip).",
   "type": "module",
   "main": "src/index.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./indexeddb-store": "./src/indexeddb-store.js"
   },
   "dependencies": {
     "@qu/core": "^0.1.0",
     "@qu/space-core": "^0.1.0"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0"
   },
   "license": "MIT"
 }
