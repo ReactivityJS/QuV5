@@ -11,6 +11,12 @@
  * whatever) - this function does not remove the element or set `hidden`,
  * so an upload can never silently look "gone" while actually still
  * `'pending'`/`'failed'` under a class the caller forgot to style.
+ *
+ * UPDATE - `'synced'` STATE. When the `UploadOutbox` was constructed with
+ * a `bus` (see that file's own "UPDATE" doc comment), a fifth status,
+ * `'synced'`, appears after `'done'` once the relay has actually ack'd the
+ * metadata write - `classes.synced`/`qu-upload-synced` by default. Without
+ * a `bus`, records never advance past `'done'` and this class is unused.
  */
 
 /**
@@ -35,7 +41,7 @@ export function bindFileInput(inputEl, outbox, { onEnqueue } = {}) {
  * @param {Element} iconEl
  * @param {import('@qu/space-plugins').UploadOutbox} outbox
  * @param {string} fileId
- * @param {{classes?: {pending: string, uploading: string, done: string, failed: string}}} [options]
+ * @param {{classes?: {pending: string, uploading: string, done: string, synced: string, failed: string}}} [options]
  * @returns {Promise<() => void>} Stops the binding (resolves once the FIRST status render has happened - see `UploadOutbox.watch()`'s own doc comment on why this isn't synchronous).
  */
 export async function bindUploadStatusIcon(iconEl, outbox, fileId, { classes = DEFAULT_CLASSES } = {}) {
@@ -47,4 +53,4 @@ export async function bindUploadStatusIcon(iconEl, outbox, fileId, { classes = D
   });
 }
 
-const DEFAULT_CLASSES = Object.freeze({ pending: 'qu-upload-pending', uploading: 'qu-upload-uploading', done: 'qu-upload-done', failed: 'qu-upload-failed' });
+const DEFAULT_CLASSES = Object.freeze({ pending: 'qu-upload-pending', uploading: 'qu-upload-uploading', done: 'qu-upload-done', synced: 'qu-upload-synced', failed: 'qu-upload-failed' });

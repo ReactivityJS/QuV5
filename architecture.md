@@ -424,6 +424,44 @@ envelope).
 Built entirely on `@qu/space-core`'s public API — `Space` has zero
 awareness either of these exist, same as `alias.js`.
 
+**UPDATE - CONFIRMED FILE SYNC + PEER RECEIPTS.** `UploadOutbox` closes
+the three gaps a real file exchange needs, without inventing anything new:
+
+1. Local save + outbox entry were already both awaited before `enqueue()`
+   returns (see that method's own doc comment) - confirmed by construction,
+   nothing to add there.
+2. **Confirmed relay sync of the metadata** (not just "my own `upload()`
+   call resolved"): the constructor now takes an optional 4th `bus` param
+   (the SAME bus given to `space`'s own constructor). With it, a record
+   that reaches `'done'` advances to a new `'synced'` status once the
+   relay has actually ack'd the metadata write - `delivery-status.js`'s
+   existing `awaitRelayAck()`, no new mechanism. `uploadOutboxKind`'s Node
+   holds MANY files' records in one atomic field, so concurrent
+   `enqueue()`s race writes to the SAME Node - `awaitRelayAck()`'s "next
+   ack, not a per-write id" correlation still holds because a Space
+   flushes its own writes to one Node in order, so any ack landing after
+   our `set()` call proves ours already arrived. Omitting `bus` keeps the
+   old behavior (`'done'` stays terminal).
+3. **"Received, confirmed by the recipient peer"**: no bespoke file
+   mechanism - `delivery-status.js`'s `readReceiptKind` was already a
+   generic "reader confirms receipt of contentId" primitive (its
+   `contentNodeId` key is caller-defined, not required to be an actual
+   Node). `markFileReceived(space, fileId)`/`watchFileReceipts(space, pub)`
+   are one-line aliases of `markRead()`/`watchReadReceipts()` - a file id
+   works exactly like a chat message id. No new Kind, no duplicated state.
+
+Why the blob itself still can't just ride the same "default" CRDT sync
+that the metadata uses: a relay only forwards/mirrors signed envelopes,
+and Yjs's update history has no notion of discarding old bytes - fine for
+small structured state, unbounded growth for a large binary appended over
+and over. Files also don't need CRDT MERGE semantics (nobody wants two
+peers' concurrent writes to the SAME file's bytes to "merge") - so the
+split (`localStore`/`upload()` move the bytes out-of-band; `records`
+metadata rides the ordinary Node/Field sync) is deliberate, not a
+shortcut. `space-ui`'s `upload-status.js` gained a matching 5th
+`'synced'` status class (see below) - `@qu/app-shell` wiring this into an
+actual upload form (Blog image, profile picture, ...) remains open.
+
 ### `packages/space-ui/` — `@qu/space-ui` (OPTIONAL)
 
 | File | Purpose |
@@ -568,8 +606,9 @@ notice.
 | `markRead(space, contentNodeId, upTo)` | Writes this Space's own read marker. |
 | `watchReadReceipts(space, pub)` | One-shot snapshot of another identity's read receipts. |
 | `ReadReceiptWatcher` | Reactive multi-reader cache — `.watch(pub)` / `.upToFor(pubB64, contentNodeId)`. |
+| `markFileReceived(space, fileId)` / `watchFileReceipts(space, pub)` | File-scoped aliases of `markRead()`/`watchReadReceipts()` — a file id works exactly like a `contentNodeId`. |
 | `uploadOutboxKind` | Self-certifying `'owner'`-ACL Kind, `records: {shape:'atomic', visibility:'public'}` map. |
-| `UploadOutbox` | `.enqueue(meta, blob)` (fire-and-forget upload, resolves once locally saved+queued) / `.retry(id)` / `.statusOf(id)` / `.list()` / `.watch(id, cb)` (reactive). |
+| `UploadOutbox` | `.enqueue(meta, blob)` (fire-and-forget upload, resolves once locally saved+queued) / `.retry(id)` / `.statusOf(id)` / `.list()` / `.watch(id, cb)` (reactive). Constructor takes an optional 4th `bus` param — with it, `'done'` records advance to `'synced'` once the relay ack's the metadata write. |
 
 ### UI bindings (`@qu/space-ui`, OPTIONAL)
 
