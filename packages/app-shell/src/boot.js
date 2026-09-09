@@ -19,6 +19,7 @@ import { renderPage } from '@qu/app-renderer';
 import { wireAdminConsole } from './admin-actions.js';
 import { wireCms } from './cms-actions.js';
 import { wireViews } from './view-actions.js';
+import { wireRichText } from './rich-text-actions.js';
 import { wireInstalledApps, provisionPersonalInstance, wirePersonalUpdateBanner } from './installed-apps-actions.js';
 import { installCms } from '../cms-bundle.js';
 
@@ -337,6 +338,7 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   // additive `/u/<ref>/` case) - `view-actions.js`'s own `wireViews()` doc comment on why
   // mode:'multiuser''s own bare-prefix case (`routeNamespace: ''`) deliberately opts out unchanged.
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: ownerPub, routeNamespace, userRef: ref });
+  wireRichText({ mountEl });
   // Only ever for `ref === 'me'` (`updateAvailable` stays `false` otherwise) - `installed-apps-
   // actions.js`'s own `wirePersonalUpdateBanner()` doc comment on why an update button on someone
   // ELSE's own personal instance would be actively wrong, not just pointless.
@@ -369,6 +371,7 @@ async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeo
   await wireInstalledApps({ mountEl, doc: window.document, space });
   await wireCms({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), global: true, prefix });
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
+  wireRichText({ mountEl });
 }
 
 /**
@@ -414,6 +417,7 @@ async function renderAggregateShell({ space, mountEl, window, styleId, prefix })
   mountEl.quSelfNodeId = null;
   mountEl.quSelfKind = null;
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
+  wireRichText({ mountEl });
 }
 
 /**
@@ -459,6 +463,7 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
       await wireInstalledApps({ mountEl, doc: window.document, space });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub });
       await wireViews({ mountEl, doc: window.document, space, appAdminPub });
+      wireRichText({ mountEl });
     },
   });
   router.start();
@@ -591,6 +596,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
         await wireInstalledApps({ mountEl, doc: window.document, space });
         wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
         await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor('admin'), kinds: GLOBAL_KINDS });
+        wireRichText({ mountEl });
         return;
       }
 
@@ -660,6 +666,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
       await wireInstalledApps({ mountEl, doc: window.document, space });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
       await wireViews({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
+      wireRichText({ mountEl });
     },
   });
   router.start();

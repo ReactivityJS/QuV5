@@ -100,6 +100,18 @@
  * This is the ONLY thing that makes `mode: 'personal'` possible for Blog at
  * all (unlike Guestbook, a Blog post is a self-owned PAGE, not a
  * shared-list entry, with no cross-identity discovery mechanism otherwise).
+ *
+ * RICH TEXT: the content `<textarea>` is `data-qu-richtext` (`blog-bundle.js`'s
+ * own doc comment) - `rich-text-actions.js`'s `wireRichText()` (called
+ * unconditionally by `boot.js`, like every other framework wiring here)
+ * already turned it into a small formatting toolbar by the time this file
+ * ever touches it, so the submit handler's own `form.querySelector(
+ * '[name="content"]').value` read needs no changes at all. The two places
+ * THIS file sets that same `.value` PROGRAMMATICALLY - `loadForEdit()`
+ * and a completed publish's own `form.reset()` - each follow it with
+ * `refreshRichText()`, or the visible rich-text surface would silently
+ * go stale (`@qu/space-ui`'s `bindRichText()` own "ONE-WAY MIRRORING" doc
+ * comment on why that call can't be skipped).
  */
 import {
   createGlobalPage,
@@ -125,6 +137,7 @@ import { QuCrypto } from '@qu/core';
 import { verifyWritesAcked } from './verify-writes.js';
 import { resolvePlaceholders } from './qu-placeholders.js';
 import { setFormStatus } from './form-status.js';
+import { refreshRichText } from './rich-text-actions.js';
 
 const GLOBAL_KINDS = { pageKind: adminPageKind, routeRegistryKind: adminRouteRegistryKind, viewKind: adminViewKind };
 
@@ -234,7 +247,9 @@ export function wireBlog({ mountEl, doc, space }) {
     form.querySelector('[name="title"]').value = page.title ?? '';
     slugField.value = route.split('/').pop() ?? '';
     slugField.readOnly = true;
-    form.querySelector('[name="content"]').value = page.content ?? '';
+    const contentField = form.querySelector('[name="content"]');
+    contentField.value = page.content ?? '';
+    refreshRichText(contentField); // see this file's own top doc comment, "RICH TEXT" - a plain `.value =` assignment doesn't reach a bound rich-text surface on its own.
     form.dataset.editingRoute = route;
     form.dataset.loadedStatus = page.status === 'draft' ? 'draft' : 'published';
     submitBtn.textContent = 'Aktualisieren';
@@ -325,6 +340,7 @@ export function wireBlog({ mountEl, doc, space }) {
         setFormStatus(form, 'Als Entwurf gespeichert (noch nicht veröffentlicht).');
       } else {
         form.reset();
+        refreshRichText(form.querySelector('[name="content"]')); // form.reset() clears the textarea's own .value - see this file's own top doc comment, "RICH TEXT."
         enterCreateMode();
         setFormStatus(form, 'Veröffentlicht und vom Relay bestätigt.');
       }

@@ -82,6 +82,20 @@
  * at all). Not added to the User Feed/aggregate feed - one worked example
  * is the point, not exhaustive coverage of every Blog feed.
  *
+ * UPDATE - RICH TEXT: both post forms' own `content` `<textarea>` gained
+ * `data-qu-richtext` - `rich-text-actions.js`'s `wireRichText()` replaces
+ * it with a small Bold/Italic/Link/H2/Aufzählung toolbar over a
+ * `contenteditable` surface (`@qu/space-ui`'s `bindRichText()`), mirroring
+ * back into the SAME textarea's `.value` a real user typing/formatting
+ * produces - `blog-actions.js`'s own submit handler (`content = form
+ * .querySelector('[name="content"]').value`) and `loadForEdit()` needed
+ * NO changes for the submit path (still reads the same `.value`); loading
+ * an existing post back into the form (`loadForEdit()`) now ALSO calls
+ * `refreshRichText()` right after setting that value, so the visible
+ * rich-text surface shows the loaded post's content instead of going
+ * stale - `bindRichText()`'s own "ONE-WAY MIRRORING" doc comment on why
+ * that call is needed at all.
+ *
  * `routeScheme` (optional, default `'flat'` - `qu-placeholders.js`'s own
  * `ROUTE_SCHEMES` doc comment on the full list and reasoning) - a QuV3
  * requirement raised again for V5: a date-segmented post route
@@ -100,7 +114,7 @@ import { upsertGlobalPage, upsertGlobalView, upsertPage, upsertView } from './bu
 import { ROUTE_SCHEMES } from './src/qu-placeholders.js';
 
 /** Bumped whenever this bundle's own shipped content changes - see `guestbook-bundle.js`'s own `GUESTBOOK_VERSION` doc comment, identical reasoning. */
-export const BLOG_VERSION = 5;
+export const BLOG_VERSION = 6;
 
 /** `data-qu-blog-edit-link` - ALWAYS present on the personal template (it's always the visitor's own post, no ACL question), wrapped in `data-qu-admin-only` on the global one (`blog-actions.js`'s `wireBlog()` shows/hides every `[data-qu-admin-only]` element the same way it already gates the post-forms below - only a relay-admin can actually save an edit to a GLOBAL post, `adminPageKind`'s own `acl.write: 'relay-admins'`). `wireBlog()` reads the sibling `[data-qu-view-link]`'s own already-resolved `href` (`view-actions.js`'s `renderItem()` sets it) to know which post this edit link belongs to - no separate id/route attribute needed here. */
 const PERSONAL_ITEM_TEMPLATE = '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a> <a href="#" data-qu-blog-edit-link>✎ Bearbeiten</a></p>';
@@ -123,7 +137,7 @@ function globalPageFields(prefix, routeScheme) {
 <form data-qu-admin-only hidden data-qu-action="blog-post-form" data-qu-prefix="${prefix}" data-qu-route-template="${template}">
   <label>Titel: <input name="title" required></label><br>
   <label>Route (z.B. "erster-post", nur Kleinbuchstaben/Zahlen/Bindestriche): <input name="slug" required pattern="[a-z0-9\\-]+"></label><br>
-  <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required></textarea></label><br>
+  <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required data-qu-richtext></textarea></label><br>
   <button type="submit">Veröffentlichen</button>
   <button type="submit" data-qu-draft-btn>Als Entwurf speichern</button>
   <p data-qu-status></p>
@@ -214,7 +228,7 @@ function personalPageFields(prefix, routeScheme) {
 <form data-qu-action="blog-post-form" data-qu-prefix="${prefix}" data-qu-mode="personal" data-qu-route-template="${template}">
   <label>Titel: <input name="title" required></label><br>
   <label>Route (z.B. "erster-post", nur Kleinbuchstaben/Zahlen/Bindestriche): <input name="slug" required pattern="[a-z0-9\\-]+"></label><br>
-  <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required></textarea></label><br>
+  <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required data-qu-richtext></textarea></label><br>
   <label data-qu-admin-only hidden><input type="checkbox" name="alsoGlobal"> Auch im globalen Feed veröffentlichen</label><br>
   <button type="submit">Veröffentlichen</button>
   <button type="submit" data-qu-draft-btn>Als Entwurf speichern</button>

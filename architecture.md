@@ -1272,6 +1272,49 @@ again without touching the registry) - a lower-level, faster, and more
 robust test surface than driving the same transitions through a
 browser-simulated relay-admin click sequence.
 
+**UPDATE - RICH TEXT (`@qu/space-ui`'s new `src/rich-text.js` +
+`@qu/app-shell`'s new `src/rich-text-actions.js`).** A minimal,
+dependency-free WYSIWYG surface for a plain `<textarea>` a form already
+reads raw HTML from - `bindRichText(textareaEl)` hides the textarea,
+inserts a small Bold/Italic/Link/H2/bullet-list toolbar over a
+`contenteditable` `<div>` right after it, seeds the div from the
+textarea's current `.value`, and mirrors every edit back into
+`textareaEl.value` on the div's own `'input'` event - so whatever ALREADY
+reads `.value` at submit time keeps working completely unmodified, zero
+awareness this exists. Deliberately NOT built on `document.execCommand()`
+(deprecated, inconsistent, and unimplemented by jsdom - this project's
+own test runtime) - every command is a direct `Range`/`Selection`
+manipulation instead (wrap the selection in an inline tag for bold/
+italic/link; replace the closest block ancestor for the heading/list
+buttons), fully exercisable under jsdom. Two real, hand-caught bugs while
+building this: (1) calling `editor.focus()` before reading the selection
+collapses it in jsdom (a real browser doesn't need that call either, for
+the same reason - removed entirely); (2) a toolbar button's default
+`mousedown` behavior moves focus (and would collapse the editor's
+selection) BEFORE its own `'click'` handler ever runs in a real
+browser - fixed with `event.preventDefault()` on `mousedown`, a case
+jsdom itself doesn't reproduce (verified by hand instead, noted honestly
+in the code rather than claimed as test-covered). ONE-WAY MIRRORING is
+deliberate: setting `textareaEl.value` PROGRAMMATICALLY (an editor
+loading an existing post back into the form) does not reach the visible
+div on its own (no DOM event exists for that) - the returned `refresh()`
+pulls it back in, which is exactly what `@qu/app-shell`'s
+`rich-text-actions.js` exports as `refreshRichText()` for callers to use.
+`wireRichText({mountEl})` (called unconditionally by `boot.js` after
+EVERY `renderPage()`, the SAME "correct no-op" posture `wireViews()`
+already has) is the attribute-driven half: any `<textarea data-qu-richtext>`
+gets bound automatically, no JS per app. No explicit teardown needed
+(unlike `wireViews()`'s own tracked View subscriptions) - a rich-text
+binding holds no live Space subscription, only DOM listeners on elements
+this same render created, discarded with the rest of the old DOM subtree
+on the next render. Wired into ONE example: Blog's post-content
+`<textarea>` (both forms) - `blog-actions.js`'s `loadForEdit()` and a
+completed publish's own `form.reset()` each call `refreshRichText()`
+right after setting that field's `.value`, so the visible surface never
+goes stale; a dedicated test in `blog-feeds.test.js` types/formats
+through the ACTUAL rich-text surface (not a raw `.value =` assignment)
+and confirms the resulting HTML is what gets published and rendered.
+
 **UPDATE - SEARCH BOXES (`view-actions.js`'s `wireViews()`).** An
 `<input data-qu-search-for="<view-name>">` anywhere on a page is wired,
 on every `'input'` event, to that named View's own `setQuery()`
