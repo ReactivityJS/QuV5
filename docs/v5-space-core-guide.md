@@ -44,8 +44,12 @@ whenever this guide's own claims change**, and vice versa.
   local-first, lazy, reference-counted.
 - **Field**: `node.field(name)` — typed accessor
   (`.get()`/`.set()`/`.observe()` for atomic, `.ytext`/`.insert()`/
-  `.delete()`/`.observe()` for text, `.push()`/`.toArray()`/`.observe()`
-  for lists).
+  `.delete()`/`.observe()` for text, `.push()`/`.remove(index, length)`/
+  `.toArray()`/`.observe()` for lists — `.remove()` is Yjs' own
+  `Y.Array.delete()` under the hood, CRDT-merged against a concurrent
+  insert/remove exactly like text's own `.delete()` is for `Y.Text`; a
+  concurrent `remove()` and `push()` from two different peers both survive,
+  never one clobbering the other).
 - **Transport**: how bytes move between peers. `InProcessTransport` (same
   process, for tests) or `WsClientTransport` (a real WebSocket connection to
   a relay, browser or Node).

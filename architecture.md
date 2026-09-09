@@ -32,11 +32,15 @@ signed and (usually) end-to-end encrypted. It is deliberately:
   network, and only subscribes to (spends bandwidth on) data it's actually
   been asked for (`Space.useNode()`, see §5).
 - **Event-driven throughout** — `@qu/events`' `EventBus` is the ONE
-  hooks/listeners/slots mechanism used on both the client and the relay,
-  in the spirit of Drupal/ProcessWire/WordPress hook systems: granular,
-  dot-namespaced topics: with wildcard subscription, and delivery-channel
-  decisions (toast vs. browser notification vs. push) left entirely to
-  whatever subscribes to the bus — never baked into the emitting code.
+  pub/sub mechanism used on both the client and the relay, in the spirit
+  of Drupal/ProcessWire/WordPress hook systems: granular, dot-namespaced
+  topics with wildcard subscription, and delivery-channel decisions (toast
+  vs. browser notification vs. push) left entirely to whatever subscribes
+  to the bus — never baked into the emitting code. The COMPOSABILITY half
+  of that same spirit — a plugin registering a menu entry, a context-menu
+  action, an admin section, without the framework importing it — is a
+  DIFFERENT, complementary primitive, `@qu/extensions`' `ExtensionPointHost`
+  (§3.6, §4, §7) — an ordered, id-addressable registry, not a topic bus.
 - **Without backward-compatibility constraints during this build** — this
   is an active redesign; prefer the architecturally correct shape over
   preserving an old one.

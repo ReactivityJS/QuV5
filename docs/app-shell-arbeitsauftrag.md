@@ -253,6 +253,24 @@ darauf; `cms-actions.js`s `"cms.pageActions"`-Punkt ist der erste ECHTE
 Plugin-Slot (zusätzliche Buttons pro Content-Zeile, von einem Plugin
 beigesteuert, ohne dass `cms-actions.js` dieses Plugin kennt).
 
+**UPDATE — die eigentliche Blockade für Qu-Components in handgetippten
+Templates war Adressierung, nicht fehlende UI, und ist jetzt geschlossen:**
+`@qu/space-components`s `resolveNodeRef()` brauchte bisher zwingend ein
+`node-id`-Attribut — bei einer self-owned Page/einem Template ist diese ID
+aber `deriveContentNodeId(ownerPub, kind, path)`s Hash-Output, den kein
+Autor von Hand tippen kann. `<qu-bind kind="qu-page" node-id="???"
+field="title">` ("binde an DIESE SEITE selbst", der mit Abstand häufigste
+Fall) hatte deshalb praktisch keinen Weg, handgeschrieben zu werden. Fix:
+das `self`-Attribut (`<qu-bind self field="title">`) löst `kindSchema`
+UND `nodeId` gemeinsam über einen neuen Ancestor-Context
+(`.quSelfNodeId`/`.quSelfKind`, `context.js`s `findQuSelf()`, exakt das
+Muster von `findQuSpace()`/`findQuKind()`) auf, den `boot.js` nach JEDEM
+Render neu setzt (anders als `.quSpace`, das nur einmal gesetzt wird — WAS
+"self" ist, ändert sich ja pro Route). Ein sichtbarer Slot-Administrations-
+Assistent in der Template-UI wäre jetzt trivial machbar, ist aber bewusst
+NICHT gebaut — die eigentliche Blockade war die Adressierung, nicht die
+UI (siehe `architecture.md`s Phase-5-Abschnitt für die volle Herleitung).
+
 ## 12. Namespace-Modell (grundlegend angepasst)
 
 **Das ist der Punkt, an dem sich das Original am stärksten von der Realität
