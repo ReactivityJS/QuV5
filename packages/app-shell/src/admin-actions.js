@@ -170,6 +170,51 @@ function resolveInstaller(appType) {
   return discoveredApps.find((app) => app.key === appType) ?? null;
 }
 
+/**
+ * `mode`s a currently-registered `realm: 'global'` app CANNOT usefully
+ * switch to, so the mode-toggle button below can be disabled instead of
+ * leading to a silently broken state (a real, reported case: Blog switched
+ * to `'multiuser'` 404s its own previously-reachable content) - both checks
+ * are DATA-DRIVEN off information already known, never a hardcoded
+ * per-prefix list, so they apply to any app shaped the same way, not just
+ * the one that was reported:
+ *   - `'multiuser'` - disabled whenever `app.personalBundle` is set (stored
+ *     on the registry entry itself by `registerApp()`, `dev.js`'s own doc
+ *     comment). `mode: 'multiuser'` (`boot.js`'s own dispatch doc comment)
+ *     flips the bare prefix to mean "my own space" but NEVER provisions
+ *     this app's own `personalBundle` there - only the generic "Mein
+ *     Bereich" CMS starter, silently ignoring whatever app-specific
+ *     personal content this app's own installer actually builds
+ *     (`installPersonalBlog()`/`installPersonalGuestbook()`) - this used to
+ *     be reachable and simply wrong, not a framework bug (the CMS starter
+ *     IS what `'multiuser'` is documented to mean, kinds.js's own
+ *     `platformAppsKind` doc comment - just never the right choice for an
+ *     app that already has its own personal content shape).
+ *   - `'personal'` - disabled when this app's OWN installer (`app.appType`
+ *     -> `resolveInstaller()`) is KNOWN and its `viewNames()` do NOT
+ *     include an aggregate/personal-feed-named View (Guestbook's own
+ *     `${prefix}-aggregate-feed` vs. Blog's `${prefix}-index` only,
+ *     `APP_INSTALLERS`' own entries above) - `mode: 'personal'` renders a
+ *     read-only feed at exactly that well-known name (`boot.js`'s
+ *     `renderAggregateShell()`), so an app that never creates it gets a
+ *     permanently empty feed (`blog-bundle.js`'s own doc comment on this
+ *     exact, deliberately-deferred gap). An app with NO known installer (a
+ *     bare `registerApp()`, no `appType` match) is left unrestricted here -
+ *     nothing to check it against, same "anything goes" behavior as before
+ *     this function existed.
+ * @param {{personalBundle?: string, appType?: string, prefix: string}} app
+ * @returns {Set<'multiuser'|'personal'>}
+ */
+function unsupportedModes(app) {
+  const unsupported = new Set();
+  if (app.personalBundle) unsupported.add('multiuser');
+  const viewNames = resolveInstaller(app.appType)?.viewNames?.(app.prefix);
+  if (viewNames && !viewNames.some((name) => name.endsWith('-aggregate-feed') || name.endsWith('-personal-feed'))) {
+    unsupported.add('personal');
+  }
+  return unsupported;
+}
+
 /** @param {{mountEl: Element, doc: Document, mainSpace: import('@qu/space-core').Space, platform: import('@qu/app-core').PlatformRuntime}} params */
 export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
   const list = mountEl.querySelector('[data-qu-bind="platform-apps-list"]');
@@ -279,11 +324,21 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
         });
         li.appendChild(cmsBtn);
 
+        const unsupported = unsupportedModes(app);
         for (const mode of ['off', 'global', 'multiuser', 'personal']) {
           const btn = doc.createElement('button');
           btn.type = 'button';
           btn.textContent = MODE_LABELS[mode];
-          btn.disabled = (app.mode ?? 'global') === mode;
+          const isCurrent = (app.mode ?? 'global') === mode;
+          if (!isCurrent && unsupported.has(mode)) {
+            btn.disabled = true;
+            btn.title =
+              mode === 'multiuser'
+                ? 'Ignoriert das eigene Personal-Bundle dieser App - "Eigener Bereich" bliebe unerreichbar.'
+                : 'Diese App baut noch keinen Aggregat-Feed - der Feed bliebe dauerhaft leer.';
+          } else {
+            btn.disabled = isCurrent;
+          }
           btn.style.marginRight = '0.25rem';
           btn.addEventListener('click', async () => {
             status.textContent = '';

@@ -25,9 +25,28 @@
  * without one would need each personal post to ALSO register itself into a
  * shared index (the same pattern `forum-bundle.js`'s topics/replies already
  * use) - real, separate follow-up work, not attempted in this pass. `mode:
- * 'personal'` is still selectable for a Blog in the admin console; its bare
- * prefix will simply render an empty aggregate feed until that follow-up
- * lands.
+ * 'personal'` is DISABLED in the admin console for a Blog registered from
+ * THIS installer (`admin-actions.js`'s own mode-button doc comment) -
+ * exactly BECAUSE of the empty-aggregate-feed gap above, not a separate
+ * decision - once this gap closes, removing it from the disable-list there
+ * is the only change needed to re-enable the button.
+ *
+ * UPDATE - "klare Pfade": Global Feed (`#/<prefix>/`) and User Feed
+ * (`#/<prefix>/u/me/`) now cross-link each other and each label itself as
+ * such, the global form is only ever SHOWN to a relay-admin (previously
+ * visible to everyone but silently rejected for anyone else - `blog-
+ * actions.js`'s own doc comment on the ACL), the personal form gained an
+ * admin-only "auch im globalen Feed veröffentlichen" checkbox (so a relay-
+ * admin's own post can default to their personal feed and OPTIONALLY also
+ * land in the global one, in one submit), and each post in either feed's
+ * list now shows an inline "Bearbeiten" link (admin-only on the global
+ * list, always on the personal one) that loads it back into the SAME form
+ * for editing - see `blog-actions.js`'s own doc comment for the mechanism.
+ * `mode: 'multiuser'` is ALSO now disabled in the admin console for any app
+ * with a `personalBundle` (Blog included) - see `admin-actions.js`'s own
+ * mode-button doc comment for why (`boot.js`'s `mode:'multiuser'` dispatch
+ * never provisions an app's OWN `personalBundle`, only the generic "Mein
+ * Bereich" CMS starter - this used to be reachable, just silently wrong).
  *
  * `routeScheme` (optional, default `'flat'` - `qu-placeholders.js`'s own
  * `ROUTE_SCHEMES` doc comment on the full list and reasoning) - a QuV3
@@ -47,9 +66,11 @@ import { upsertGlobalPage, upsertGlobalView, upsertPage, upsertView } from './bu
 import { ROUTE_SCHEMES } from './src/qu-placeholders.js';
 
 /** Bumped whenever this bundle's own shipped content changes - see `guestbook-bundle.js`'s own `GUESTBOOK_VERSION` doc comment, identical reasoning. */
-export const BLOG_VERSION = 1;
+export const BLOG_VERSION = 2;
 
-const ITEM_TEMPLATE = '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a></p>';
+/** `data-qu-blog-edit-link` - ALWAYS present on the personal template (it's always the visitor's own post, no ACL question), wrapped in `data-qu-admin-only` on the global one (`blog-actions.js`'s `wireBlog()` shows/hides every `[data-qu-admin-only]` element the same way it already gates the post-forms below - only a relay-admin can actually save an edit to a GLOBAL post, `adminPageKind`'s own `acl.write: 'relay-admins'`). `wireBlog()` reads the sibling `[data-qu-view-link]`'s own already-resolved `href` (`view-actions.js`'s `renderItem()` sets it) to know which post this edit link belongs to - no separate id/route attribute needed here. */
+const PERSONAL_ITEM_TEMPLATE = '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a> <a href="#" data-qu-blog-edit-link>✎ Bearbeiten</a></p>';
+const GLOBAL_ITEM_TEMPLATE = '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a> <a href="#" data-qu-blog-edit-link data-qu-admin-only hidden>✎ Bearbeiten</a></p>';
 
 /** `routeScheme` -> this bundle's own `{slug}`-ending route TEMPLATE (this file's own top doc comment) - `'flat'`/unset falls back to the pre-existing, unprefixed `/post/{slug}` unchanged. */
 function routeTemplate(routeScheme) {
@@ -61,8 +82,9 @@ function globalPageFields(prefix, routeScheme) {
   return {
     route: '/',
     title: 'Blog',
-    content: `<h1>Blog</h1>
-<form data-qu-action="blog-post-form" data-qu-prefix="${prefix}" data-qu-route-template="${template}">
+    content: `<h1>Blog — Globaler Feed</h1>
+<p><a href="#/${prefix}/u/me/">Mein Feed →</a> <a href="#/admin/${prefix}/cms" data-qu-admin-only hidden>⚙ Views verwalten</a></p>
+<form data-qu-admin-only hidden data-qu-action="blog-post-form" data-qu-prefix="${prefix}" data-qu-route-template="${template}">
   <label>Titel: <input name="title" required></label><br>
   <label>Route (z.B. "erster-post", nur Kleinbuchstaben/Zahlen/Bindestriche): <input name="slug" required pattern="[a-z0-9\\-]+"></label><br>
   <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required></textarea></label><br>
@@ -75,7 +97,7 @@ function globalPageFields(prefix, routeScheme) {
 }
 
 function globalIndexViewFields(prefix) {
-  return { name: `${prefix}-index`, sources: [{ type: 'pages', prefix: '/post/' }], sortBy: 'title', sortOrder: 'asc', itemTemplate: ITEM_TEMPLATE };
+  return { name: `${prefix}-index`, sources: [{ type: 'pages', prefix: '/post/' }], sortBy: 'title', sortOrder: 'asc', itemTemplate: GLOBAL_ITEM_TEMPLATE };
 }
 
 /** @param {import('@qu/space-core').Space} space @param {{prefix: string, routeScheme?: 'flat'|'yyyy'|'yyyy/mm'|'yyyy/mm/dd'}} params */
@@ -133,11 +155,13 @@ function personalPageFields(prefix, routeScheme) {
     route: `/${prefix}/`,
     title: 'Mein Blog',
     data: { bundleVersion: BLOG_VERSION },
-    content: `<h1>Mein Blog</h1>
+    content: `<h1>Mein Blog — Mein Feed</h1>
+<p><a href="#/${prefix}/">← Globaler Feed</a> <a href="#/admin/${prefix}/cms" data-qu-admin-only hidden>⚙ Views verwalten</a></p>
 <form data-qu-action="blog-post-form" data-qu-prefix="${prefix}" data-qu-mode="personal" data-qu-route-template="${template}">
   <label>Titel: <input name="title" required></label><br>
   <label>Route (z.B. "erster-post", nur Kleinbuchstaben/Zahlen/Bindestriche): <input name="slug" required pattern="[a-z0-9\\-]+"></label><br>
   <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required></textarea></label><br>
+  <label data-qu-admin-only hidden><input type="checkbox" name="alsoGlobal"> Auch im globalen Feed veröffentlichen</label><br>
   <button type="submit">Veröffentlichen</button>
   <p data-qu-status></p>
 </form>
@@ -147,7 +171,7 @@ function personalPageFields(prefix, routeScheme) {
 }
 
 function personalIndexViewFields(prefix) {
-  return { name: `${prefix}-personal-index`, sources: [{ type: 'pages', prefix: `/${prefix}/post/` }], sortBy: 'title', sortOrder: 'asc', itemTemplate: ITEM_TEMPLATE };
+  return { name: `${prefix}-personal-index`, sources: [{ type: 'pages', prefix: `/${prefix}/post/` }], sortBy: 'title', sortOrder: 'asc', itemTemplate: PERSONAL_ITEM_TEMPLATE };
 }
 
 /**
