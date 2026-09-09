@@ -69,6 +69,19 @@
  * need its own View source, since `'pages'`/`'shared-list'` both only ever
  * read PUBLISHED/registered content), deliberately not built here.
  *
+ * UPDATE - SEARCH BOX: the Global Feed's own `blog-index` View gained a
+ * sibling `<input data-qu-search-for="${prefix}-index">` right above it -
+ * `view-actions.js`'s `wireViews()` own "UPDATE - SEARCH BOXES" doc
+ * comment wires it to that View's live `setQuery()` on every keystroke,
+ * matching by NAME (the `data-qu-search-for` value === the View's own
+ * `data-qu-view` name), not DOM position - no new markup convention
+ * invented here, this is the framework-level mechanism's one example.
+ * Searches title AND content (`view-sources.js`'s `openLiveView()` own
+ * "UPDATE - CLIENT-SIDE FULL-TEXT SEARCH" doc comment on why a `'pages'`
+ * source's `item.excerpt`, captured at publish time, makes this possible
+ * at all). Not added to the User Feed/aggregate feed - one worked example
+ * is the point, not exhaustive coverage of every Blog feed.
+ *
  * `routeScheme` (optional, default `'flat'` - `qu-placeholders.js`'s own
  * `ROUTE_SCHEMES` doc comment on the full list and reasoning) - a QuV3
  * requirement raised again for V5: a date-segmented post route
@@ -87,7 +100,7 @@ import { upsertGlobalPage, upsertGlobalView, upsertPage, upsertView } from './bu
 import { ROUTE_SCHEMES } from './src/qu-placeholders.js';
 
 /** Bumped whenever this bundle's own shipped content changes - see `guestbook-bundle.js`'s own `GUESTBOOK_VERSION` doc comment, identical reasoning. */
-export const BLOG_VERSION = 4;
+export const BLOG_VERSION = 5;
 
 /** `data-qu-blog-edit-link` - ALWAYS present on the personal template (it's always the visitor's own post, no ACL question), wrapped in `data-qu-admin-only` on the global one (`blog-actions.js`'s `wireBlog()` shows/hides every `[data-qu-admin-only]` element the same way it already gates the post-forms below - only a relay-admin can actually save an edit to a GLOBAL post, `adminPageKind`'s own `acl.write: 'relay-admins'`). `wireBlog()` reads the sibling `[data-qu-view-link]`'s own already-resolved `href` (`view-actions.js`'s `renderItem()` sets it) to know which post this edit link belongs to - no separate id/route attribute needed here. */
 const PERSONAL_ITEM_TEMPLATE = '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a> <a href="#" data-qu-blog-edit-link>✎ Bearbeiten</a></p>';
@@ -116,6 +129,7 @@ function globalPageFields(prefix, routeScheme) {
   <p data-qu-status></p>
 </form>
 <h2>Beiträge</h2>
+<p><input type="search" placeholder="Beiträge durchsuchen…" data-qu-search-for="${prefix}-index"></p>
 <div data-qu-view="${prefix}-index"></div>`,
   };
 }

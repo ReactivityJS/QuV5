@@ -149,3 +149,45 @@ test('Blog: a globally-published post becomes searchable by its own CONTENT, not
     await relay.close();
   }
 });
+
+test('Blog: the Global Feed\'s own rendered search box filters the visible feed by content, live, no reload', async () => {
+  const relay = await bootRelay();
+  try {
+    const adminSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl: adminMountEl, router: adminRouter } = mountAdmin(adminSpace);
+    await installViaForm(adminMountEl, 'blog', 'blog');
+    adminRouter.stop();
+
+    const authorSpace = await relay.connect(relay.relayAdmin);
+    const { window, mountEl, router } = mountAt(authorSpace, '/blog/');
+    await waitUntil(() => mountEl.querySelector('form[data-qu-action="blog-post-form"]'));
+    const form = mountEl.querySelector('form[data-qu-action="blog-post-form"]');
+
+    async function publish({ title, slug, content }) {
+      form.querySelector('[name="title"]').value = title;
+      form.querySelector('[name="slug"]').value = slug;
+      form.querySelector('[name="content"]').value = content;
+      form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      await waitUntil(() => /bestätigt/.test(form.querySelector('[data-qu-status]')?.textContent ?? ''), { timeout: 6000 });
+    }
+    await publish({ title: 'Wochenrückblick', slug: 'woche-42', content: '<p>Diese Woche ging es viel um Wanderungen in den Alpen.</p>' });
+    await publish({ title: 'Kochrezept', slug: 'kochrezept', content: '<p>Heute gibt es Pasta mit Tomatensauce.</p>' });
+
+    await waitUntil(() => mountEl.querySelectorAll('[data-qu-view="blog-index"] [data-qu-view-link]').length === 2, { timeout: 6000 });
+    const searchInput = mountEl.querySelector('[data-qu-search-for="blog-index"]');
+    assert.ok(searchInput, 'the Global Feed page ships a search box wired to its own blog-index View');
+
+    searchInput.value = 'Alpen';
+    searchInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await waitUntil(() => mountEl.querySelectorAll('[data-qu-view="blog-index"] [data-qu-view-link]').length === 1, { timeout: 3000 });
+    assert.equal(mountEl.querySelector('[data-qu-view="blog-index"] [data-qu-view-link]').textContent, 'Wochenrückblick', 'found by its own content text, not typed into the title field');
+
+    searchInput.value = '';
+    searchInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await waitUntil(() => mountEl.querySelectorAll('[data-qu-view="blog-index"] [data-qu-view-link]').length === 2, { timeout: 3000 });
+
+    router.stop();
+  } finally {
+    await relay.close();
+  }
+});

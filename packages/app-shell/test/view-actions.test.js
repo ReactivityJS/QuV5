@@ -84,3 +84,58 @@ test('a page declaring <div data-qu-view="name"> gets it populated from a live, 
   links = [...mountEl.querySelectorAll('[data-qu-view="feed"] a')];
   assert.deepEqual(links.map((a) => a.textContent).sort(), ['Alice', 'Bob', 'Hallo Welt'].sort());
 });
+
+test('<input data-qu-search-for="name"> filters the matching View live, and a non-matching name is a correct no-op', async () => {
+  const admin = await actor();
+  const members = [{ pub: admin.signingPub, xPub: admin.xPublicKey }];
+  const hub = createInProcessHub();
+  const resolveKindSchema = await createAppResolveKindSchema({ appAdminPub: admin.signingPub, sharedListNames: ['guestbook'] });
+  createRelayForwarder({ hub, members, resolveKindSchema, storage: createMemoryStore() });
+
+  async function connect(identity, peerId) {
+    const transport = new InProcessTransport(hub, peerId);
+    await transport.connect();
+    return new Space({ identity, members, transport });
+  }
+
+  const adminBootstrapSpace = await connect(admin, 'admin-bootstrap');
+  await createPage(adminBootstrapSpace, {
+    route: '/',
+    title: 'Start',
+    content:
+      '<input type="search" data-qu-search-for="feed">' +
+      '<input type="search" data-qu-search-for="no-such-view">' +
+      '<div data-qu-view="feed"></div>',
+  });
+  await pushToSharedList(adminBootstrapSpace, 'guestbook', { name: 'Alice', message: 'Katzen sind toll' });
+  await pushToSharedList(adminBootstrapSpace, 'guestbook', { name: 'Bob', message: 'Berge und Wandern' });
+  await createView(adminBootstrapSpace, {
+    name: 'feed',
+    sources: [{ type: 'shared-list', name: 'guestbook' }],
+    sortBy: 'title',
+    sortOrder: 'asc',
+    itemTemplate: '<a data-qu-view-link><qu-slot name="title"></qu-slot></a>',
+  });
+
+  const { window } = new JSDOM('<!doctype html><body><qu-app-shell></qu-app-shell></body>', { url: 'https://app.test/#/' });
+  const mountEl = window.document.querySelector('qu-app-shell');
+  startApp({ space: adminBootstrapSpace, appAdminPub: admin.signingPub, mountEl, window, resolveTimeout: 500 });
+
+  await waitUntil(() => mountEl.querySelectorAll('[data-qu-view="feed"] a').length === 2);
+
+  const searchInput = mountEl.querySelector('[data-qu-search-for="feed"]');
+  searchInput.value = 'katzen';
+  searchInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await waitUntil(() => mountEl.querySelectorAll('[data-qu-view="feed"] a').length === 1);
+  assert.equal(mountEl.querySelector('[data-qu-view="feed"] a').textContent, 'Alice', 'case-insensitive substring match against the entry\'s own message (excerpt)');
+
+  searchInput.value = '';
+  searchInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await waitUntil(() => mountEl.querySelectorAll('[data-qu-view="feed"] a').length === 2);
+
+  // A search box naming a View this page has no matching [data-qu-view] element for never throws
+  // and never affects the OTHER, correctly-wired one.
+  const strayInput = mountEl.querySelector('[data-qu-search-for="no-such-view"]');
+  strayInput.value = 'anything';
+  assert.doesNotThrow(() => strayInput.dispatchEvent(new window.Event('input', { bubbles: true })));
+});

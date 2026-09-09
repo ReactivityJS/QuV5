@@ -1272,6 +1272,27 @@ again without touching the registry) - a lower-level, faster, and more
 robust test surface than driving the same transitions through a
 browser-simulated relay-admin click sequence.
 
+**UPDATE - SEARCH BOXES (`view-actions.js`'s `wireViews()`).** An
+`<input data-qu-search-for="<view-name>">` anywhere on a page is wired,
+on every `'input'` event, to that named View's own `setQuery()`
+(`view-sources.js`'s own "UPDATE - CLIENT-SIDE FULL-TEXT SEARCH" doc
+comment) - matched by NAME against the View's `[data-qu-view="name"]`
+element, not DOM position, so a search box doesn't have to be a literal
+sibling of the feed it filters. The SAME "framework code wires an inert,
+content-authored element by attribute convention" posture `[data-qu-view]`
+itself already uses - a template author writes one `<input>` tag, no JS.
+Deliberately NOT debounced: `setQuery()` filters data already synced
+locally, no relay round-trip per keystroke, so there's no real cost to
+avoid. A `data-qu-search-for` naming a View this page never opens (typo,
+or a box meant for a different page) is a correct no-op - `wireViews()`
+only looks for a matching search input INSIDE the loop that already
+successfully opened that View. Wired into ONE example: Blog's Global Feed
+gained `<input data-qu-search-for="${prefix}-index">` right above its
+`blog-index` View - `blog-search.test.js` proves the RENDERED box filters
+the visible feed by a post's own content, live, no reload; `view-actions.test.js`
+proves the underlying wiring generically (including the no-op case) with
+a bare `viewKind`, no Blog involved.
+
 **UPDATE - `setFormStatus()` (`@qu/app-shell`'s new `src/form-status.js`).**
 The "find or create this form's own `[data-qu-status]` paragraph, then
 set its text" three-liner was duplicated verbatim across every form-
