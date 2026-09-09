@@ -101,7 +101,7 @@ export const appManifestKind = defineKind('qu-app', {
  */
 export const routeRegistryKind = defineKind('qu-route-registry', {
   fields: {
-    /** `Array<{route: string, title: string}>` - see resolver.js's `resolveRoutes()`. */
+    /** `Array<{route: string, title: string, excerpt?: string}>` - see resolver.js's `resolveRoutes()`. `excerpt` (optional, dev.js's `publishRoute()`/`publishGlobalRoute()`) is a plaintext snippet of the page's own content, captured at PUBLISH time only (never updated on a later edit - see `dev.js`'s own doc comment) - what `view-sources.js`'s `'pages'` source surfaces as `item.excerpt`, the thing that makes `openLiveView()`'s `setQuery()` full-text search actually search page CONTENT, not just titles. */
     routes: { shape: 'list', visibility: 'public' },
   },
   acl: { write: 'named' },

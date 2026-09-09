@@ -2272,6 +2272,33 @@ document's own still-open question on that below).
   only takes effect on the NEXT resolve, same as any other Space content
   edit never hot-reloading an already-rendered page (`openLiveView()`'s own
   doc comment).
+
+  **UPDATE - CLIENT-SIDE FULL-TEXT SEARCH (`setQuery()`).** The returned
+  object gained `setQuery(text)`: a live, case-insensitive substring filter
+  over `searchFields` (default `['title', 'excerpt']`), applied BEFORE
+  `sortBy`/`limit` and re-notifying observers, same as any other source
+  change. Deliberately client-side over whatever a View's sources have
+  ALREADY synced - no relay-side search index/query exists (a relay only
+  forwards signed envelopes) - the same honest "only as good as what a
+  client has locally" limitation `ListField.slice()` already accepts. The
+  real gap this closes: a `'pages'` source previously only ever exposed
+  `item.title` (`routeRegistryKind`'s `routes` entries had no content at
+  all), so searching a Blog/CMS feed could only ever match a PAGE TITLE,
+  never its actual content. `routeRegistryKind` gained an optional
+  `excerpt` per route (`dev.js`'s `publishRoute()`/`publishGlobalRoute()`,
+  a new `excerptFromHtml()` helper - strip tags, collapse whitespace,
+  truncate) - captured ONCE, at publish time (never kept in sync on a
+  later edit, the same accepted scope cut as the aggregate index's own
+  cached title) - which the `'pages'` adapter now also normalizes into
+  `item.excerpt`. Wired into ONE example, Blog (`blog-actions.js`'s
+  `publishGlobalPost()`/personal-create branch both pass `excerpt:
+  excerptFromHtml(content)`) - `blog-search.test.js` proves a post
+  published through the real form is findable by its own body text via
+  the SAME `blog-index` View `blog-bundle.js` already builds, no new
+  View/UI wiring needed for the underlying mechanism. A `<qu-search-box>`
+  UI Component (a plain `<input>` calling `setQuery()`) remains open -
+  UI-Feinheiten deliberately come last, per this whole roadmap's own
+  stated ordering.
 - **Rendering lives in `@qu/app-shell`, deliberately NOT `@qu/app-renderer`**:
   `@qu/app-renderer` is a pure "already-resolved plan -> DOM" renderer with
   ZERO dependency on `@qu/space-core`/`@qu/app-core` (turns plain

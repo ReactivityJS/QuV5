@@ -110,6 +110,7 @@ import {
   globalAppAnchor,
   createPage,
   publishRoute,
+  excerptFromHtml,
   pageKind,
   deriveContentNodeId,
   editPage,
@@ -138,7 +139,7 @@ async function publishGlobalPost(space, prefix, { route, title, content }) {
   const anchor = await globalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
   await verifyWritesAcked(space, id, async () => {
-    await publishGlobalRoute(space, prefix, { route, title });
+    await publishGlobalRoute(space, prefix, { route, title, excerpt: excerptFromHtml(content) });
     await new Promise((resolve) => setTimeout(resolve, 400));
     await createGlobalPage(space, prefix, { route, title, content });
   });
@@ -260,7 +261,7 @@ export function wireBlog({ mountEl, doc, space }) {
           const id = await deriveContentNodeId(space.identity.signingPub, pageKind.kind, route);
           await verifyWritesAcked(space, id, async () => {
             await createPage(space, { route, title, content });
-            await publishRoute(space, { route, title });
+            await publishRoute(space, { route, title, excerpt: excerptFromHtml(content) });
           });
           // Indexes this NEW post into the aggregate feed - see `pushAggregateIndexEntry()`'s own
           // doc comment. AFTER the post itself is durably acked, never before - a stale index entry

@@ -782,6 +782,22 @@ export async function grantContentWriter(space, { kind, path, granteePub }) {
 }
 
 /**
+ * Strips tags from `html` (a page/post's own raw content, e.g. `'<p>Hallo
+ * <b>Welt</b></p>'`), collapses whitespace, and truncates to `maxLen`
+ * characters (`'…'` appended if it was actually cut) - the plaintext
+ * snippet `publishRoute()`/`publishGlobalRoute()` store as `excerpt` for
+ * `view-sources.js`'s full-text search to match against. Not an HTML
+ * parser - a bare regex tag-strip - good enough for a SNIPPET (never
+ * re-rendered as markup) from content this same Space's own author wrote,
+ * not third-party/adversarial input.
+ * @param {string} html @param {number} [maxLen] @returns {string}
+ */
+export function excerptFromHtml(html, maxLen = 200) {
+  const text = (html ?? '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  return text.length > maxLen ? `${text.slice(0, maxLen).trimEnd()}…` : text;
+}
+
+/**
  * Adds one entry to this Space identity's Route Registry (creating it on
  * first call - see kinds.js's `routeRegistryKind` and this file's own
  * `getOrSyncRegistryNode()` doc comment on why that's never a blind
@@ -792,10 +808,19 @@ export async function grantContentWriter(space, { kind, path, granteePub }) {
  * never registered here. Unlike `registerContentName()`, never deduplicates
  * by `route` - unchanged, pre-existing behavior (calling this twice for the
  * same route adds two entries).
+ *
+ * `excerpt` (optional) - a plaintext snippet of the page's own content,
+ * captured HERE, at publish time, because this Node (not the page's own)
+ * is what `view-sources.js`'s `'pages'` source actually reads to build a
+ * feed - see `routeRegistryKind`'s own doc comment. NOT kept in sync on a
+ * later edit (a caller that re-publishes on edit gets a fresh excerpt for
+ * free; one that doesn't keeps the original) - same accepted scope cut as
+ * the aggregate index's own cached title (`blog-actions.js`'s
+ * `pushAggregateIndexEntry()`).
  */
-export async function publishRoute(space, { route, title }) {
+export async function publishRoute(space, { route, title, excerpt }) {
   const node = await getOrSyncRegistryNode(space, routeRegistryKind);
-  await node.field('routes').push({ route, title });
+  await node.field('routes').push(excerpt ? { route, title, excerpt } : { route, title });
   return node;
 }
 
@@ -1311,11 +1336,11 @@ export async function nullGlobalAppContent(space, prefix) {
  * call for the same route is always a harmless no-op, never a meaningful
  * "second announcement" the way it might be for an independently-owned app.
  */
-export async function publishGlobalRoute(space, prefix, { route, title }) {
+export async function publishGlobalRoute(space, prefix, { route, title, excerpt }) {
   const anchor = await cachedGlobalAppAnchor(prefix);
   const node = await getOrSyncRegistryNode(space, adminRouteRegistryKind, anchor);
   const existing = await node.field('routes').toArray();
-  if (!existing.some((entry) => entry?.route === route)) await node.field('routes').push({ route, title });
+  if (!existing.some((entry) => entry?.route === route)) await node.field('routes').push(excerpt ? { route, title, excerpt } : { route, title });
   return node;
 }
 

@@ -39,6 +39,7 @@ export {
   deleteStyle,
   deletePage,
   grantContentWriter,
+  excerptFromHtml,
   publishRoute,
   unpublishRoute,
   installAppBundle,

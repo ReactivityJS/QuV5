@@ -135,3 +135,73 @@ test('a View merges a pages source and a shared-list source into one live, sorte
     view.close();
   }
 });
+
+test('openLiveView().setQuery() live, case-insensitive full-text search across merged sources - matches content excerpt, not just title', async () => {
+  const owner = await actor();
+  const members = [{ pub: owner.signingPub, xPub: owner.xPublicKey }];
+  const hub = createInProcessHub();
+  const resolveKindSchema = await createAppResolveKindSchema({ sharedListNames: ['guestbook'] });
+  createRelayForwarder({ hub, members, resolveKindSchema, storage: createMemoryStore() });
+
+  const ownerSpace = await connect(hub, owner, members, 'owner');
+
+  await createPage(ownerSpace, { route: '/blog/katzen-post', title: 'Wochenrückblick', content: '<p>Heute ging es um Katzen und Hunde.</p>' });
+  await publishRoute(ownerSpace, { route: '/blog/katzen-post', title: 'Wochenrückblick', excerpt: 'Heute ging es um Katzen und Hunde.' });
+  await createPage(ownerSpace, { route: '/blog/reise-post', title: 'Reisebericht', content: '<p>Ein Bericht über Berge.</p>' });
+  await publishRoute(ownerSpace, { route: '/blog/reise-post', title: 'Reisebericht', excerpt: 'Ein Bericht über Berge.' });
+  await pushToSharedList(ownerSpace, 'guestbook', { name: 'Alice', message: 'Ich mag auch Katzen!' });
+
+  await createView(ownerSpace, {
+    name: 'searchable-feed',
+    sources: [
+      { type: 'pages', prefix: '/blog/' },
+      { type: 'shared-list', name: 'guestbook' },
+    ],
+    sortBy: 'title',
+    sortOrder: 'asc',
+    itemTemplate: '<div><qu-slot name="title"></qu-slot></div>',
+  });
+
+  const readerSpace = await connect(hub, owner, members, 'reader');
+  const resolver = new ContentResolver(readerSpace, { appAdminPub: owner.signingPub });
+  const config = await resolver.resolveView('searchable-feed', { timeout: 2000 });
+  const view = await openLiveView(readerSpace, { appAdminPub: owner.signingPub, ...config });
+  try {
+    let items = await view.toArray();
+    assert.equal(items.length, 3, 'unfiltered - every item from both sources');
+
+    // Matches the BLOG POST's own content excerpt, not its title - proves this is genuine
+    // full-text search over content, not a title-only filter.
+    await view.setQuery('Katzen');
+    items = await view.toArray();
+    assert.deepEqual(
+      items.map((i) => i.title).sort(),
+      ['Alice', 'Wochenrückblick'],
+      'case-insensitive substring match against title+excerpt across BOTH source types finds the blog post by its CONTENT (not its title) and the guestbook entry by its message'
+    );
+
+    // Case-insensitive.
+    await view.setQuery('BERGE');
+    items = await view.toArray();
+    assert.deepEqual(items.map((i) => i.title), ['Reisebericht']);
+
+    // No match -> empty, not an error.
+    await view.setQuery('nonexistent-term-xyz');
+    items = await view.toArray();
+    assert.deepEqual(items, []);
+
+    // Clearing the query (empty/whitespace) restores the full, unfiltered feed.
+    await view.setQuery('   ');
+    items = await view.toArray();
+    assert.equal(items.length, 3);
+
+    // setQuery() is itself LIVE - observe() fires on it, same as a source change.
+    let notified = false;
+    const unobserve = view.observe(() => (notified = true));
+    await view.setQuery('Reise');
+    assert.equal(notified, true, 'setQuery() notifies observers, same as any other recompute');
+    unobserve();
+  } finally {
+    view.close();
+  }
+});
