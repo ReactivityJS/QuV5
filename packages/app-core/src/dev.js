@@ -255,8 +255,8 @@ export async function createStyle(space, { name, css }) {
 }
 
 /** Creates a page at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-page', route)` - see `createTemplate()`'s own doc comment. `template` is a template NAME (resolved via content-id.js at render time), not a Node id. `data` is optional STRUCTURED content beyond the single `content` blob - see kinds.js's `pageKind` own doc comment on its `data` field (an arbitrary JSON object, one extra named `<qu-slot>` filled per top-level key). `style` (optional) is a `qu-style` NAME to load for THIS page instead of the app Manifest's own single `theme` - `kinds.js`'s `pageKind` own doc comment, `runtime.js`'s `AppRuntime.resolveRoute()` for how it's auto-loaded. Does NOT auto-register into `routeRegistryKind` (unlike `createTemplate()`/`createStyle()`'s own registries) - call `publishRoute()` separately, unchanged pre-existing behavior. */
-export async function createPage(space, { route, title, template = null, content = '', data = null, style = null }) {
-  return space.createNode(pageKind, { route, title, template, content, data, style }, { path: route });
+export async function createPage(space, { route, title, template = null, content = '', data = null, style = null, status = null }) {
+  return space.createNode(pageKind, { route, title, template, content, data, style, status }, { path: route });
 }
 
 /**
@@ -356,8 +356,8 @@ export async function deleteStyle(space, { name, timeout } = {}) {
   }
 }
 
-/** Page counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). Only fields actually passed are updated; omit `title`/`template`/`content`/`data`/`style` to leave them unchanged. `title`/`template`/`data`/`style` are `'atomic'`-shape (`field.set()`); `content` is `'text'`-shape, see `replaceText()`'s own doc comment. `data` is kinds.js's `pageKind` own structured-data field (see its doc comment) - passing it REPLACES the whole object (an `'atomic'` field is one opaque last-write-wins value, not merged key-by-key). `style` - see `createPage()`'s own doc comment; pass `null` explicitly to revert to the app Manifest's own `theme`. */
-export async function editPage(space, { route, title, template, content, data, style, ownerPub = space.identity.signingPub, timeout } = {}) {
+/** Page counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). Only fields actually passed are updated; omit `title`/`template`/`content`/`data`/`style`/`status` to leave them unchanged. `title`/`template`/`data`/`style`/`status` are `'atomic'`-shape (`field.set()`); `content` is `'text'`-shape, see `replaceText()`'s own doc comment. `data` is kinds.js's `pageKind` own structured-data field (see its doc comment) - passing it REPLACES the whole object (an `'atomic'` field is one opaque last-write-wins value, not merged key-by-key). `style` - see `createPage()`'s own doc comment; pass `null` explicitly to revert to the app Manifest's own `theme`. `status` - see `kinds.js`'s `pageKind.status` own doc comment; pass `'published'` to promote an existing draft (the caller is still responsible for a matching `publishRoute()`/`publishGlobalRoute()` call if this route was never registered while it was a draft - see `@qu/app-shell`'s `blog-actions.js`'s own draft/publish submit-handler branch for the reference sequencing). */
+export async function editPage(space, { route, title, template, content, data, style, status, ownerPub = space.identity.signingPub, timeout } = {}) {
   const id = await deriveContentNodeId(ownerPub, pageKind.kind, route);
   const { node, release } = await space.useNode(id, pageKind);
   // Wait for BOTH title AND content (separate envelopes - see resolver.js's own resolvePage() doc
@@ -377,6 +377,7 @@ export async function editPage(space, { route, title, template, content, data, s
   if (content !== undefined) replaceText(node.field('content'), content);
   if (data !== undefined) await node.field('data').set(data);
   if (style !== undefined) await node.field('style').set(style);
+  if (status !== undefined) await node.field('status').set(status);
   release();
   return node;
 }
@@ -1207,10 +1208,10 @@ export async function createGlobalStyle(space, prefix, { name, css }) {
 }
 
 /** Global-app counterpart to `createPage()` - see `createGlobalApp()`'s own doc comment on `prefix`, and `createPage()`'s own on `style`. */
-export async function createGlobalPage(space, prefix, { route, title, template = null, content = '', style = null }) {
+export async function createGlobalPage(space, prefix, { route, title, template = null, content = '', style = null, status = null }) {
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
-  return space.createNode(adminPageKind, { route, title, template, content, style }, { id });
+  return space.createNode(adminPageKind, { route, title, template, content, style, status }, { id });
 }
 
 /** Global-app counterpart to `installAppBundle()` - see that function's own doc comment; identical shape, writes the `qu-admin-*` Kinds via the four functions just above, all anchored on `prefix` (see `createGlobalApp()`'s own doc comment). No `routes`/route-registry counterpart yet - not needed for the built-in admin console's one page (see this package's own README on the reference bundle). */
@@ -1261,7 +1262,7 @@ export async function editGlobalStyle(space, prefix, { name, css, timeout } = {}
 }
 
 /** Global-app counterpart to `editPage()` - see `editGlobalTemplate()`'s own doc comment, and `editPage()`'s own on the per-field update semantics (only fields actually passed are updated). */
-export async function editGlobalPage(space, prefix, { route, title, template, content, data, style, timeout } = {}) {
+export async function editGlobalPage(space, prefix, { route, title, template, content, data, style, status, timeout } = {}) {
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
   const { node, release } = await space.useNode(id, adminPageKind);
@@ -1278,6 +1279,7 @@ export async function editGlobalPage(space, prefix, { route, title, template, co
   if (content !== undefined) replaceText(node.field('content'), content);
   if (data !== undefined) await node.field('data').set(data);
   if (style !== undefined) await node.field('style').set(style);
+  if (status !== undefined) await node.field('status').set(status);
   release();
   return node;
 }

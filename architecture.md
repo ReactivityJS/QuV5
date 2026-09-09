@@ -1224,6 +1224,54 @@ real headless-CMS-style content model, not the whole vision at once:
   enumeration write - proven by a dedicated regression test, not just
   asserted).
 
+**UPDATE - DRAFT/PUBLISH WORKFLOW.** `pageKind`/`adminPageKind` gained a
+`status` field (`'draft'` | `'published'` | `null`/unset, treated as
+published - every pre-existing page keeps working unchanged, no
+migration). `resolver.js`'s `resolvePage()` treats a `'draft'` page as
+NOT FOUND (`null`, the exact same signal an unpublished route already
+produces) unless the caller passes `includeDrafts: true` - the app's own
+ordinary navigation/View rendering never does, only an editor's own
+"load this draft back into the form" call site does. This is
+DELIBERATELY NOT a confidentiality mechanism: the field, like every
+other on this Kind, is `visibility: 'public'` - content-addressed id
+derivation still works for anyone who already knows/guesses the route
+(this Kind's own doc comment already makes the identical point about
+`routeRegistryKind` being enumeration-only, never access control); only
+the app's OWN resolver path honors `status`. A draft is a REAL Node,
+simply never registered into the route registry until actually
+published - invisible to every View/feed for the same reason an
+unregistered route already was, `openLiveView()`'s `'pages'` source
+included. `createPage()`/`editPage()`/`createGlobalPage()`/
+`editGlobalPage()` all thread an optional `status` through (only written
+when actually passed - `editPage()`'s pre-existing "only touch what you
+pass" semantics, unchanged for every caller that doesn't). Wired into
+ONE example, Blog: both post forms gained a second submit button
+(`[data-qu-draft-btn]`, "Als Entwurf speichern") - `blog-actions.js`'s
+`wireBlog()` tracks which button was clicked via `form.dataset.intent`
+(set on 'click', read once and cleared on 'submit' - works for a real
+click AND a synthetic `dispatchEvent('submit')` a test issues after its
+own synthetic button click, unlike relying on `SubmitEvent.submitter`).
+Saving a draft does NOT reset the form - it stays open, primed
+(`editingRoute`/`loadedStatus` set directly, no `ContentResolver`
+round-trip needed) so the SAME author can continue and click
+"Veröffentlichen" later in the SAME session, which THEN calls
+`publishRoute()`/`publishGlobalRoute()` for the first time (tracked via
+`loadedStatus === 'draft'`, so an ordinary edit of an already-published
+post never re-registers the route a second time - `blog-draft.test.js`
+proves both this and the create→draft→publish round trip end to end).
+No drafts-LIST UI exists yet (there is no way to reach an OLDER, already
+-saved draft from a fresh page load) - it would need its own View
+source, since `'pages'`/`'shared-list'` both only ever read
+PUBLISHED/registered content; deliberately left for later, `resolvePage(
+{includeDrafts: true})` already being ready for it to build on directly.
+`resolver.test.js` proves the underlying mechanism directly (draft →
+not found → `includeDrafts` sees it → `editPage({status:'published'})` +
+one `publishRoute()` call → found, exactly once registered; and the
+reverse, editing an already-published page back to `'draft'` hides it
+again without touching the registry) - a lower-level, faster, and more
+robust test surface than driving the same transitions through a
+browser-simulated relay-admin click sequence.
+
 **Phase 2, reactive/live component bindings — DELIVERED**
 (`packages/space-components/`, `@qu/space-components`): the user's own
 stated goal was "Daten aus dem Storage reactive genutzt... wenn irgendwie

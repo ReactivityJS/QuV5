@@ -54,6 +54,21 @@
  * never provisions an app's OWN `personalBundle`, only the generic "Mein
  * Bereich" CMS starter - this used to be reachable, just silently wrong).
  *
+ * UPDATE - ENTWURF/VERÖFFENTLICHEN: both post forms gained a second submit
+ * button, `[data-qu-draft-btn]` ("Als Entwurf speichern") - see
+ * `blog-actions.js`'s own `wireBlog()` doc comment for the full mechanism
+ * (`kinds.js`'s `pageKind.status`/`resolver.js`'s `resolvePage()` own doc
+ * comments underneath it). A draft is a REAL `qu-page`/`qu-admin-page`
+ * Node, just never registered into the route registry until actually
+ * published - invisible to every View/feed and to ordinary navigation
+ * (`resolvePage()` treats it as "not found," the same signal an
+ * unpublished route already produces) until "Veröffentlichen" is clicked.
+ * No drafts-LIST UI exists yet (only the form that just saved a draft
+ * stays pointed at it, for continuing in the SAME session) - a genuine
+ * "Meine Entwürfe" browseable list is real, natural future work (it would
+ * need its own View source, since `'pages'`/`'shared-list'` both only ever
+ * read PUBLISHED/registered content), deliberately not built here.
+ *
  * `routeScheme` (optional, default `'flat'` - `qu-placeholders.js`'s own
  * `ROUTE_SCHEMES` doc comment on the full list and reasoning) - a QuV3
  * requirement raised again for V5: a date-segmented post route
@@ -72,7 +87,7 @@ import { upsertGlobalPage, upsertGlobalView, upsertPage, upsertView } from './bu
 import { ROUTE_SCHEMES } from './src/qu-placeholders.js';
 
 /** Bumped whenever this bundle's own shipped content changes - see `guestbook-bundle.js`'s own `GUESTBOOK_VERSION` doc comment, identical reasoning. */
-export const BLOG_VERSION = 3;
+export const BLOG_VERSION = 4;
 
 /** `data-qu-blog-edit-link` - ALWAYS present on the personal template (it's always the visitor's own post, no ACL question), wrapped in `data-qu-admin-only` on the global one (`blog-actions.js`'s `wireBlog()` shows/hides every `[data-qu-admin-only]` element the same way it already gates the post-forms below - only a relay-admin can actually save an edit to a GLOBAL post, `adminPageKind`'s own `acl.write: 'relay-admins'`). `wireBlog()` reads the sibling `[data-qu-view-link]`'s own already-resolved `href` (`view-actions.js`'s `renderItem()` sets it) to know which post this edit link belongs to - no separate id/route attribute needed here. */
 const PERSONAL_ITEM_TEMPLATE = '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a> <a href="#" data-qu-blog-edit-link>✎ Bearbeiten</a></p>';
@@ -97,6 +112,7 @@ function globalPageFields(prefix, routeScheme) {
   <label>Route (z.B. "erster-post", nur Kleinbuchstaben/Zahlen/Bindestriche): <input name="slug" required pattern="[a-z0-9\\-]+"></label><br>
   <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required></textarea></label><br>
   <button type="submit">Veröffentlichen</button>
+  <button type="submit" data-qu-draft-btn>Als Entwurf speichern</button>
   <p data-qu-status></p>
 </form>
 <h2>Beiträge</h2>
@@ -187,6 +203,7 @@ function personalPageFields(prefix, routeScheme) {
   <label>Inhalt (HTML):<br><textarea name="content" rows="6" cols="60" required></textarea></label><br>
   <label data-qu-admin-only hidden><input type="checkbox" name="alsoGlobal"> Auch im globalen Feed veröffentlichen</label><br>
   <button type="submit">Veröffentlichen</button>
+  <button type="submit" data-qu-draft-btn>Als Entwurf speichern</button>
   <p data-qu-status></p>
 </form>
 <h2>Beiträge</h2>

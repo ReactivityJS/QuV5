@@ -200,10 +200,19 @@ export function wireBlog({ mountEl, doc, space }) {
   const alsoGlobalCheckbox = isPersonal ? form.querySelector('[name="alsoGlobal"]') : null;
   const slugField = form.querySelector('[name="slug"]');
   const submitBtn = form.querySelector('button[type="submit"]');
+  const draftBtn = form.querySelector('[data-qu-draft-btn]'); // see this file's own top doc comment, "ENTWURF/VERÖFFENTLICHEN" - absent on an older/hand-authored form, optional-chained below.
   let activeEdit = null; // see this file's own top doc comment, "INLINE EDIT" - same `cms-actions.js` shape, including its accepted scope cut.
+
+  // Whichever submit button was actually clicked decides `form.dataset.intent` - read once, then
+  // cleared, by the submit handler below. Set on 'click' (fires before 'submit') rather than relying
+  // on the (real-browser-only) `SubmitEvent.submitter`, so this also works for a synthetic
+  // `dispatchEvent(new Event('submit'))` a test issues after its own synthetic button click.
+  submitBtn.addEventListener('click', () => (form.dataset.intent = 'publish'));
+  draftBtn?.addEventListener('click', () => (form.dataset.intent = 'draft'));
 
   function enterCreateMode() {
     delete form.dataset.editingRoute;
+    delete form.dataset.loadedStatus;
     slugField.readOnly = false;
     submitBtn.textContent = 'Veröffentlichen';
     activeEdit?.release();
@@ -215,7 +224,10 @@ export function wireBlog({ mountEl, doc, space }) {
       ? new ContentResolver(space, { appAdminPub: space.identity.signingPub })
       : new ContentResolver(space, { appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
     activeEdit?.release();
-    const { page, release } = await resolver.resolvePage(route, { timeout: 2000, hold: true });
+    // `includeDrafts: true` - see `resolvePage()`'s own doc comment: without this, an already-saved
+    // DRAFT loaded back into this exact form (see this file's own "ENTWURF/VERÖFFENTLICHEN" doc
+    // comment) would resolve as `null`, indistinguishable from "does not exist," even to its own author.
+    const { page, release } = await resolver.resolvePage(route, { timeout: 2000, hold: true, includeDrafts: true });
     activeEdit = { release };
     if (!page) return;
     form.querySelector('[name="title"]').value = page.title ?? '';
@@ -223,6 +235,7 @@ export function wireBlog({ mountEl, doc, space }) {
     slugField.readOnly = true;
     form.querySelector('[name="content"]').value = page.content ?? '';
     form.dataset.editingRoute = route;
+    form.dataset.loadedStatus = page.status === 'draft' ? 'draft' : 'published';
     submitBtn.textContent = 'Aktualisieren';
   }
 
@@ -244,23 +257,41 @@ export function wireBlog({ mountEl, doc, space }) {
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const status = form.querySelector('[data-qu-status]') ?? form.appendChild(doc.createElement('p'));
-    status.setAttribute('data-qu-status', '');
-    status.textContent = '';
+    const statusEl = form.querySelector('[data-qu-status]') ?? form.appendChild(doc.createElement('p'));
+    statusEl.setAttribute('data-qu-status', '');
+    statusEl.textContent = '';
+    // See this file's own top doc comment, "ENTWURF/VERÖFFENTLICHEN" - whichever button's own
+    // 'click' listener (above) ran last decides this; absent (a plain `dispatchEvent('submit')` with
+    // no preceding button click, e.g. most of this file's own PRE-EXISTING tests) defaults to
+    // 'publish' - the unchanged, original behavior.
+    const intent = form.dataset.intent === 'draft' ? 'draft' : 'publish';
+    delete form.dataset.intent;
+    const pageStatus = intent === 'draft' ? 'draft' : 'published';
     try {
       const title = form.querySelector('[name="title"]').value.trim();
       const slug = form.querySelector('[name="slug"]').value.trim();
       const content = form.querySelector('[name="content"]').value;
       const editingRoute = form.dataset.editingRoute;
       const route = editingRoute ?? resolvePlaceholders(routeTemplate, { space, fields: { slug } });
+      // Was this SAME route, moments ago, still an unregistered draft (this exact form, still open -
+      // `loadForEdit()`/the draft-save branch below both set this)? Only THEN does going live now
+      // still need `publishRoute()`/`publishGlobalRoute()` - an ordinary edit of an already-published
+      // post (the pre-existing, tested path) must never register a second route entry.
+      const wasDraft = form.dataset.loadedStatus === 'draft';
 
       if (isPersonal) {
         if (editingRoute) {
-          await editPage(space, { route, title, content });
+          await editPage(space, { route, title, content, status: pageStatus });
+          if (intent === 'publish' && wasDraft) {
+            await publishRoute(space, { route, title, excerpt: excerptFromHtml(content) });
+            await pushAggregateIndexEntry(space, prefix, { personalRoute: route, title });
+          }
+        } else if (intent === 'draft') {
+          await createPage(space, { route, title, content, status: 'draft' });
         } else {
           const id = await deriveContentNodeId(space.identity.signingPub, pageKind.kind, route);
           await verifyWritesAcked(space, id, async () => {
-            await createPage(space, { route, title, content });
+            await createPage(space, { route, title, content, status: 'published' });
             await publishRoute(space, { route, title, excerpt: excerptFromHtml(content) });
           });
           // Indexes this NEW post into the aggregate feed - see `pushAggregateIndexEntry()`'s own
@@ -274,15 +305,32 @@ export function wireBlog({ mountEl, doc, space }) {
           }
         }
       } else if (editingRoute) {
-        await editGlobalPage(space, prefix, { route, title, content });
+        await editGlobalPage(space, prefix, { route, title, content, status: pageStatus });
+        if (intent === 'publish' && wasDraft) {
+          await publishGlobalRoute(space, prefix, { route, title, excerpt: excerptFromHtml(content) });
+        }
+      } else if (intent === 'draft') {
+        await createGlobalPage(space, prefix, { route, title, content, status: 'draft' });
       } else {
         await publishGlobalPost(space, prefix, { route, title, content });
       }
-      form.reset();
-      enterCreateMode();
-      status.textContent = 'Veröffentlicht und vom Relay bestätigt.';
+
+      if (intent === 'draft') {
+        // Stay in place, editing THIS SAME draft - see this file's own top doc comment: no
+        // drafts-LIST UI exists yet, so the only way back to an unpublished draft, right now, is
+        // this still-open form (never reset, unlike a completed publish below).
+        slugField.readOnly = true;
+        form.dataset.editingRoute = route;
+        form.dataset.loadedStatus = 'draft';
+        submitBtn.textContent = 'Veröffentlichen'; // already live-appropriate wording, e.g. after loadForEdit() had set 'Aktualisieren'.
+        statusEl.textContent = 'Als Entwurf gespeichert (noch nicht veröffentlicht).';
+      } else {
+        form.reset();
+        enterCreateMode();
+        statusEl.textContent = 'Veröffentlicht und vom Relay bestätigt.';
+      }
     } catch (err) {
-      status.textContent = `Fehler: ${err.message}`;
+      statusEl.textContent = `Fehler: ${err.message}`;
     }
   });
 }
