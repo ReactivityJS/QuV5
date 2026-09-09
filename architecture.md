@@ -212,6 +212,40 @@ is built on, and what a Kind like it needs instead of any relay/transport-
 level special-casing: presence/typing are ordinary Node writes on a
 volatile-persistence Kind, nothing more.
 
+**UPDATE - the browser CLIENT's own persistent tier.** `@qu/space-storage`'s
+`indexeddb-store.js` is the missing counterpart to the relay's own
+`file-store.js`, using the exact same `{append, load, replace}` adapter
+contract `Space` already supported (no change to `Space`/`Node`/`Field`
+needed) - `@qu/app-shell`'s `shell.js` now constructs `Space` with it
+(`isIndexedDbAvailable()`-guarded, falling back to memory-only where
+unavailable), so a returning visitor's already-seen content renders
+instantly from local storage while whatever's new resyncs in the
+background, instead of every reload re-fetching everything from scratch.
+Exposed via a dedicated `@qu/space-storage/indexeddb-store` subpath export,
+not the package's own barrel (`.`) - the barrel also re-exports
+`file-store.js` (real `node:fs/promises` I/O, relay-only), which broke the
+esbuild browser bundle outright, the same "browser code imports a
+dedicated subpath, never the barrel" idiom `@qu/space-transport`'s own
+`./ws-client-transport` export already established for its identical
+Node-vs-browser split (`ws-server-hub.js`/`ws`).
+
+**UPDATE - opt-in compaction.** `Space.compactNode()` (below) always
+existed but nothing ever called it automatically - genuinely CAN'T,
+structurally: the relay never holds a signing/encryption key (this
+section's own top framing), so producing a compacted snapshot (a new,
+validly-signed envelope) can only ever happen client-side, in an
+authorized writer's own Space. `@qu/space-core`'s new `compaction.js`
+(`compactIfNeeded(space, id, {threshold})`, built on a new `Space.
+envelopeCount(id)` reading the local storage-backed count) is therefore a
+small, OPT-IN helper a write-path Dev API call can invoke right after its
+own write - `@qu/app-core`'s `pushToSharedList()` (a Guestbook/Forum entry,
+the highest-churn content this framework has) is the first real caller, via
+an optional `compactThreshold` param; every EXISTING call site that never
+passes it keeps behaving exactly as before, zero added cost. Deliberately
+NOT a background scheduler - see `compaction.js`'s own doc comment for the
+full "why automatic can only ever mean opt-in here" reasoning, and its own
+"COST NOTE" on `envelopeCount()`'s O(n) check.
+
 ### 3.5 Presence, typing, and delivery status — ordinary data, not protocol
 
 Online/offline liveness stays exactly the pre-existing `hello`/
@@ -326,6 +360,7 @@ existed.
 | `src/alias.js` | `deriveAliasIdentity()`, `aliasRegistryKind`/`aliasRegistryNodeId()`, `publishAlias()`, `AliasRegistry` — per-space pseudonymity. |
 | `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes (§3.5). |
 | `src/wire-codec.js` | `encodeForWire()`/`decodeFromWire()` — Uint8Array ↔ base64 for any JSON serialization boundary (WebSocket, on-disk file). |
+| `src/compaction.js` | `compactIfNeeded(space, id, {threshold})` — opt-in compaction policy on top of `Space.compactNode()`/`envelopeCount()` (§3.4 UPDATE). |
 | `src/index.js` | Package's public export surface — the authoritative list of what's public API vs. internal. |
 
 ### `packages/space-storage/` — `@qu/space-storage`
@@ -334,9 +369,10 @@ existed.
 |---|---|
 | `src/memory-store.js` | `createMemoryStore()` — ephemeral, in-process-only tier. |
 | `src/durable-store.js` | `createDurableStore()` — simulated persistence (in-memory backing object) for tests; same contract as real disk. |
-| `src/file-store.js` | `createFileStore(dataDir)` — real on-disk persistence, one newline-delimited JSON file per Node. |
+| `src/file-store.js` | `createFileStore(dataDir)` — real on-disk persistence, one newline-delimited JSON file per Node. Relay-only (`node:fs/promises`) — never import this into browser-bundled code. |
+| `src/indexeddb-store.js` | `createIndexedDbStore()`/`isIndexedDbAvailable()` — the browser CLIENT's own persistent tier (§3.4 UPDATE). Exposed via its own `@qu/space-storage/indexeddb-store` subpath export, not the barrel — see that UPDATE note for why. |
 
-All three implement the same contract: `append(nodeId, envelope)`,
+All four implement the same contract: `append(nodeId, envelope)`,
 `load(nodeId)`, `replace(nodeId, envelopes)` (compaction — discards prior
 history in favor of the given envelopes, typically one `snapshot: true`
 envelope).

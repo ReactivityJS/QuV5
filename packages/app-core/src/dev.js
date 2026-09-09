@@ -15,7 +15,7 @@
  * granteePub, {path})` - not something this file wraps, since it is
  * already exactly one call.
  */
-import { deriveOwnerNodeId, stampMeta } from '@qu/space-core';
+import { deriveOwnerNodeId, stampMeta, compactIfNeeded } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
 import { deriveContentNodeId } from './content-id.js';
 import {
@@ -573,14 +573,30 @@ export async function editPrivatePage(space, { route, title, template, content, 
  * `entry` is caller-defined (a guestbook might use `{name, message, ts}`) -
  * this Kind imposes no shape on it, same as `groupKind.members`/
  * `platformAppsKind.apps`.
+ * `compactThreshold` (optional, OPT-IN - `@qu/space-core`'s `compaction.js`
+ * own top doc comment on why this can only ever be opt-in, never automatic
+ * background scheduling) - once given, checks after THIS push whether the
+ * list's own stored envelope count has grown past it and, if so, compacts
+ * the Node (`Space.compactNode()`) down to one snapshot. Omitted (the
+ * default): zero behavior change, exactly as before this param existed -
+ * every EXISTING caller (a Guestbook/Forum entry form) never pays the
+ * extra `envelopeCount()` check unless it explicitly asks to. A caller
+ * writing at high frequency should pick a threshold well above ordinary
+ * traffic (compaction's own O(n) cost, `compaction.js`'s own doc comment)
+ * rather than compacting on every single push.
  * @param {import('@qu/space-core').Space} space
  * @param {string} name - which named list (e.g. `'guestbook'`) - see `sharedListAnchor()`.
  * @param {object} entry
+ * @param {{compactThreshold?: number}} [options]
  */
-export async function pushToSharedList(space, name, entry) {
+export async function pushToSharedList(space, name, entry, { compactThreshold } = {}) {
   const anchor = await sharedListAnchor(name);
   const node = await getOrSyncRegistryNode(space, sharedListKind, anchor);
   await node.field('entries').push(entry);
+  if (compactThreshold != null) {
+    const id = await deriveOwnerNodeId(anchor, sharedListKind.kind);
+    await compactIfNeeded(space, id, { threshold: compactThreshold });
+  }
   return node;
 }
 

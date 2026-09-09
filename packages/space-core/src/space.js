@@ -613,6 +613,25 @@ export class Space {
   }
 
   /**
+   * How many envelopes THIS Space's own storage currently holds for `id` -
+   * `null` if `id` isn't attached, or its Kind has no storage adapter
+   * mounted (nothing to count against - a purely memory-only Space, or one
+   * using a `persistence: 'volatile'` Kind with no `volatileStorage`
+   * override). Meant for `compaction.js`'s `compactIfNeeded()` to decide
+   * whether a Node has grown enough to be worth compacting - `_hydrateFromStorage()`
+   * itself never needs this, it already reads the full array directly.
+   * @param {string} id
+   * @returns {Promise<number|null>}
+   */
+  async envelopeCount(id) {
+    const node = this._nodes.get(id);
+    if (!node) return null;
+    const storage = this._storageFor(node.kindSchema);
+    if (!storage) return null;
+    return (await storage.load(id)).length;
+  }
+
+  /**
    * Which storage adapter a Kind's writes go through - see kind-schema.js's
    * own `persistence` doc comment. `'volatile'` ALWAYS resolves to
    * something (a caller-supplied `volatileStorage` or the private default
