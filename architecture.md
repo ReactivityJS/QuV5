@@ -2209,6 +2209,89 @@ this document's own still-open "app modules" question just below: that
 question is about apps that DO need real execution logic (game rules, a
 Live-Ticker's own scoring), a genuinely different class from these four.
 
+**UPDATE - Blog: klare Pfade (Global Feed / User Feed / Post anlegen /
+Post editieren), and a second real, deployment-observed bug in the SAME
+family as the `setAppMode()` one above.** A relay-admin reported switching
+Blog to `mode: 'multiuser'` made the previously-reachable global blog 404,
+and that it wasn't clear where a visitor's OWN blog even was or how to post
+to it. Root cause, NOT a framework bug: `mode: 'multiuser'` is documented
+(this section's own `platformAppsKind` doc comment) as "a whole personal
+SITE per visitor," not a feed shape - `boot.js`'s own `mode:'multiuser'`
+dispatch (`renderMultiUserRoute()`, no `routeNamespace`/`personalBundle`)
+never provisions an app's OWN `personalBundle` there, only the generic
+"Mein Bereich" CMS starter, while the app's real global content moves to
+relay-admin-only `#/admin/<prefix>/...` - exactly wrong for Blog (or
+Guestbook), which already has its OWN, working, blog-shaped personal
+instance via the ADDITIVE `/u/<ref>/` route under `mode: 'global'` (the
+mode Blog was actually registered with, `personalBundle: 'blog'` already
+wired since before this pass) - it was simply never linked to, and
+`mode: 'multiuser'` was never actually the right choice, just never
+prevented.
+
+Two-part fix, `blog-bundle.js`/`blog-actions.js`/`admin-actions.js` only,
+no framework (`boot.js`/`platform.js`/`dev.js`) change:
+
+1. **Klare Pfade, within the already-correct `mode: 'global'`:** the Global
+   Feed (`#/<prefix>/`) and User Feed (`#/<prefix>/u/me/`) pages now
+   cross-link each other and label themselves as such; the global page's
+   own post form (`acl.write: 'relay-admins'` - previously shown to EVERY
+   visitor, silently rejected for anyone else) and a "⚙ Views verwalten"
+   link into the existing generic CMS/Views editor (`#/admin/<prefix>/cms`)
+   are now only ever SHOWN to a relay-admin (`space.isRelayAdmin()`,
+   `blog-actions.js`'s `applyAdminVisibility()` toggling every
+   `[data-qu-admin-only]` element - the SAME per-element `hidden` idiom
+   `cms-actions.js`'s own form-visibility toggling already uses elsewhere),
+   not merely rejected after the fact. The User Feed form's own admin-only
+   "auch im globalen Feed veröffentlichen" checkbox lets a relay-admin's
+   OWN post default to their personal feed and OPTIONALLY also publish to
+   the global one in the SAME submit (`publishGlobalPost()`, the exact
+   global-write sequence the bare global form already used, factored out
+   so both call sites share it) - "default: User Feed, optional
+   Relay-Admin: Global Feed," the user's own framing. Each post in either
+   feed's list now shows an inline "Bearbeiten" link (event-delegated on
+   `mountEl`, `forum-actions.js`'s own `event.target.closest()` idiom,
+   WeakMap-tracked and removed/re-added on every `wireBlog()` call the same
+   "SELF-CLEANING ACROSS ROUTE CHANGES" way `view-actions.js`'s own
+   `openViewsByMountEl` already is, since `mountEl` itself persists across
+   renders unlike the form) that loads the post back into the SAME create
+   form via `resolver.resolvePage(route, {hold: true})` (`cms-actions.js`'s
+   own "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE" pattern, reused
+   verbatim) and switches the submit handler to `editPage()`/
+   `editGlobalPage()`. A REAL bug caught while building this: the edit
+   link's route must be read off its sibling `[data-qu-view-link]`'s own
+   `dataset.route` (the raw, unprefixed stored route `view-actions.js`'s
+   `renderItem()` also exposes as a data attribute), NOT its `href` - for a
+   post reached through the additive `/u/<ref>/` route, `renderItem()`
+   deliberately REWRITES `href` to a navigation-shaped
+   `/<prefix>/u/<ref>/post/<slug>` path (that file's own doc comment on
+   why), which is NOT the id `deriveContentNodeId()` was actually derived
+   from - using it silently resolved nothing.
+2. **The admin console's mode-toggle buttons now refuse to offer a mode
+   that would silently break a given app**, rather than allowing the click
+   and leaving a confusing/broken result to discover afterward -
+   `admin-actions.js`'s new `unsupportedModes()`, purely DATA-DRIVEN (never
+   a hardcoded per-app-prefix list, so it applies to any app shaped the
+   same way, not just the one reported): `'multiuser'` is disabled whenever
+   a registered app's own `personalBundle` is set (Guestbook and Blog both,
+   today) - the exact mismatch above, generalized. `'personal'` is disabled
+   when the app's own installer (`APP_INSTALLERS`, resolved via its stored
+   `appType`) is known and its `viewNames()` build no `-aggregate-feed`/
+   `-personal-feed`-named View - Blog specifically (its own aggregate feed
+   is a real, still-deliberately-deferred gap, this section's earlier
+   "`mode: 'personal'`'s own aggregate feed... DELIBERATELY NOT built here
+   yet" note), Guestbook is unaffected (its `${prefix}-aggregate-feed`
+   already exists). An app with no known installer (a bare `registerApp()`)
+   is left unrestricted - nothing to check it against.
+
+Verified against the exact reported shape (`packages/app-shell/test/
+blog-feeds.test.js`): admin-vs-non-admin visibility on both feed pages,
+the dual-publish checkbox actually landing a post in both feeds, an inline
+edit round-trip for both a global post (relay-admin) and a personal one
+(an ordinary visitor editing their own), and the mode-button gating for
+Blog/Guestbook/Forum side by side (Forum has no `personalBundle` at all -
+its own "Multi-User" button stays exactly as before, the control case
+proving the gate doesn't over-restrict).
+
 **Still an open question, deliberately not decided in this pass**: apps
 whose EXECUTION LOGIC (not just content) lives in the filesystem/repo
 itself (`/packages/app-modules/<Name>/`, administratively enabled via

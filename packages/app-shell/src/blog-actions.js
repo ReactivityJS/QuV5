@@ -7,7 +7,7 @@
  * `renderPage()` (via `installed-apps-actions.js`'s `wireInstalledApps()`) -
  * a correct no-op on any page that isn't a Blog's own index.
  *
- * Publishing a post writes `qu-admin-page`/`qu-admin-route-registry`
+ * Publishing a GLOBAL post writes `qu-admin-page`/`qu-admin-route-registry`
  * (`createGlobalPage()`/`publishGlobalRoute()`, `acl.write: 'relay-admins'`)
  * - `blog-bundle.js`'s own doc comment on why: Blog is now a `realm:
  * 'global'` app (anchored on its own prefix, `globalAppAnchor()`), so ONLY
@@ -38,18 +38,167 @@
  * {slug}` for a personal one) when the attribute is absent - an
  * already-published Blog instance from before `routeScheme` existed keeps
  * behaving exactly as it always did.
+ *
+ * UPDATE - "klare Pfade":
+ *
+ * ADMIN-ONLY VISIBILITY: every `[data-qu-admin-only]` element in either
+ * form's own page content (`blog-bundle.js`'s own markup - the global post
+ * form itself, the personal form's "auch im globalen Feed veröffentlichen"
+ * checkbox, both feeds' "Views verwalten"/"Bearbeiten" links) starts
+ * `hidden` (the safe default - matches what actually happens if submitted
+ * by a non-admin: `acl.write: 'relay-admins'` silently rejects it) and is
+ * un-hidden here, once, based on `space.isRelayAdmin()` - a normal visitor
+ * on the global feed now sees ONLY the cross-link to their own feed, never
+ * a form they can't actually use. The post-list's own per-item "Bearbeiten"
+ * links (`blog-bundle.js`'s `GLOBAL_ITEM_TEMPLATE`) render LIVE and
+ * asynchronously (`view-actions.js`'s own `wireViews()`/`bindList()`, wired
+ * independently of this file) - each freshly-stamped item starts `hidden`
+ * again, so a short settle-delayed re-application catches the initial
+ * population burst; a post published by someone ELSE while this admin is
+ * already on the page needs a reload to reveal ITS OWN edit link - the same
+ * "no live cross-session UI patching beyond the View's own content" limit
+ * every other admin-only affordance in this codebase already accepts.
+ *
+ * OPTIONAL DUAL-PUBLISH: the personal form's own admin-only "auch im
+ * globalen Feed veröffentlichen" checkbox, when checked (only possible for
+ * a relay-admin - see above), publishes the SAME title/content into the
+ * GLOBAL feed too, right after the personal write - `publishGlobalPost()`
+ * below is the exact same global-write sequence the bare global form's own
+ * submit already used, factored out so both call sites share it.
+ *
+ * INLINE EDIT: a `[data-qu-blog-edit-link]` click (event-delegated on
+ * `mountEl`, the same `event.target.closest()` idiom `forum-actions.js`
+ * already uses for its own `[data-qu-view-link]`) reads the ROUTE off its
+ * sibling `[data-qu-view-link]`'s own `dataset.route` - NOT its `href`,
+ * which `view-actions.js`'s `renderItem()` rewrites to a navigation-shaped
+ * `/u/<ref>/...` path for a personal feed (its own doc comment on why);
+ * `dataset.route` always stays the STORED, unprefixed route regardless -
+ * resolves that page through
+ * a `ContentResolver` scoped to whichever form is on THIS page (personal:
+ * the default self-owned resolver; global: `appAdminPub: globalAppAnchor
+ * (prefix)` + the `qu-admin-*` Kinds override, the exact same shape
+ * `cms-actions.js`'s own `wireCms()` already uses for a global app), with
+ * `{hold: true}` - `cms-actions.js`'s own top doc comment on
+ * "KEEPING THE EDITED NODE'S SUBSCRIPTION ALIVE" applies unchanged here,
+ * including its accepted "a later render/navigation before this session's
+ * own next edit-load leaks this one held subscription" scope cut (the SAME
+ * `activeEdit`-without-cross-render-teardown shape `cms-actions.js` itself
+ * already ships with, not a new risk this file introduces). Loads the
+ * result into the SAME create form (title/content, `slug` becomes
+ * read-only - editing never renames a route, the same "no rename support"
+ * scope cut every other `editX()` in this codebase already has), flips the
+ * submit button to "Aktualisieren", and the submit handler then calls
+ * `editPage()`/`editGlobalPage()` instead of `createPage()`/
+ * `createGlobalPage()` - no `publishRoute()`/`publishGlobalRoute()` needed,
+ * the route already exists.
  */
-import { createGlobalPage, publishGlobalRoute, adminPageKind, globalAppAnchor, createPage, publishRoute, pageKind, deriveContentNodeId } from '@qu/app-core';
+import {
+  createGlobalPage,
+  publishGlobalRoute,
+  adminPageKind,
+  adminRouteRegistryKind,
+  adminViewKind,
+  globalAppAnchor,
+  createPage,
+  publishRoute,
+  pageKind,
+  deriveContentNodeId,
+  editPage,
+  editGlobalPage,
+  ContentResolver,
+} from '@qu/app-core';
 import { verifyWritesAcked } from './verify-writes.js';
 import { resolvePlaceholders } from './qu-placeholders.js';
 
+const GLOBAL_KINDS = { pageKind: adminPageKind, routeRegistryKind: adminRouteRegistryKind, viewKind: adminViewKind };
+
+/** `[data-qu-blog-edit-link]` clicks are delegated on `mountEl` itself (see this file's own top doc comment, "INLINE EDIT") - unlike the FORM's own submit listener (naturally discarded with the old, now-detached form element on the next render), `mountEl` persists ACROSS renders (only its children are replaced, `render.js`'s own `mountEl.innerHTML = ...`), so a delegated listener attached directly to it would otherwise accumulate one more copy every time `wireBlog()` runs - the SAME "SELF-CLEANING ACROSS ROUTE CHANGES" bookkeeping `view-actions.js`'s own `openViewsByMountEl` already established, applied here to a plain listener instead of a held View subscription. */
+const clickListenerByMountEl = new WeakMap();
+
+function applyAdminVisibility(root, isAdmin) {
+  for (const el of root.querySelectorAll('[data-qu-admin-only]')) el.hidden = !isAdmin;
+}
+
+/** The global-write sequence both the bare global form AND the personal form's own "auch im globalen Feed" checkbox use - see this file's own top doc comment, "OPTIONAL DUAL-PUBLISH". */
+async function publishGlobalPost(space, prefix, { route, title, content }) {
+  const anchor = await globalAppAnchor(prefix);
+  const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
+  await verifyWritesAcked(space, id, async () => {
+    await publishGlobalRoute(space, prefix, { route, title });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await createGlobalPage(space, prefix, { route, title, content });
+  });
+}
+
+/** `personalTemplate` (`/<prefix>/post/...`) -> the GLOBAL blog's own template (`/post/...`), by stripping the `/<prefix>` namespace `blog-bundle.js`'s `personalPageFields()` always prepends - see that file's own doc comment on why the personal template IS exactly the global one, prefixed. Falls back to the flat default if the namespace isn't present (an unexpected/hand-authored template). */
+function toGlobalRouteTemplate(personalTemplate, prefix) {
+  const ns = `/${prefix}`;
+  return personalTemplate.startsWith(ns) ? personalTemplate.slice(ns.length) || '/post/{slug}' : '/post/{slug}';
+}
+
 /** @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space}} params */
 export function wireBlog({ mountEl, doc, space }) {
+  clickListenerByMountEl.get(mountEl)?.();
+  clickListenerByMountEl.delete(mountEl);
   const form = mountEl.querySelector('form[data-qu-action="blog-post-form"]');
   if (!form) return;
   const prefix = form.getAttribute('data-qu-prefix');
   const isPersonal = form.getAttribute('data-qu-mode') === 'personal';
   const routeTemplate = form.getAttribute('data-qu-route-template') || (isPersonal ? `/${prefix}/post/{slug}` : '/post/{slug}');
+
+  const isAdmin = space.isRelayAdmin();
+  applyAdminVisibility(mountEl, isAdmin);
+  // see this file's own top doc comment, "ADMIN-ONLY VISIBILITY" - `mountEl.contains(form)` guards
+  // against a STALE re-application firing after a later render/navigation already replaced this
+  // page's own content with something else entirely (the same "this specific wire-up got superseded"
+  // concern `qu-list.js`'s own `_generation` counter guards against, just via the DOM itself here -
+  // no separate counter needed, `form` IS this wire-up's own identity).
+  if (isAdmin) setTimeout(() => mountEl.contains(form) && applyAdminVisibility(mountEl, true), 300);
+
+  const alsoGlobalCheckbox = isPersonal ? form.querySelector('[name="alsoGlobal"]') : null;
+  const slugField = form.querySelector('[name="slug"]');
+  const submitBtn = form.querySelector('button[type="submit"]');
+  let activeEdit = null; // see this file's own top doc comment, "INLINE EDIT" - same `cms-actions.js` shape, including its accepted scope cut.
+
+  function enterCreateMode() {
+    delete form.dataset.editingRoute;
+    slugField.readOnly = false;
+    submitBtn.textContent = 'Veröffentlichen';
+    activeEdit?.release();
+    activeEdit = null;
+  }
+
+  async function loadForEdit(route) {
+    const resolver = isPersonal
+      ? new ContentResolver(space, { appAdminPub: space.identity.signingPub })
+      : new ContentResolver(space, { appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
+    activeEdit?.release();
+    const { page, release } = await resolver.resolvePage(route, { timeout: 2000, hold: true });
+    activeEdit = { release };
+    if (!page) return;
+    form.querySelector('[name="title"]').value = page.title ?? '';
+    slugField.value = route.split('/').pop() ?? '';
+    slugField.readOnly = true;
+    form.querySelector('[name="content"]').value = page.content ?? '';
+    form.dataset.editingRoute = route;
+    submitBtn.textContent = 'Aktualisieren';
+  }
+
+  const onClick = (event) => {
+    const link = event.target.closest('[data-qu-blog-edit-link]');
+    if (!link || link.hidden || !mountEl.contains(link)) return;
+    event.preventDefault();
+    const viewLink = link.closest('p')?.querySelector('[data-qu-view-link]');
+    // `dataset.route`, NOT the link's own `href` - `view-actions.js`'s `renderItem()` rewrites
+    // `href` to a NAVIGATION-shaped path for a personal feed reached via the additive `/u/<ref>/`
+    // route (re-inserting that segment, its own doc comment on why), while `dataset.route` (that
+    // same file's "every SCALAR field of the source's own raw item is ALSO exposed as a `data-*`
+    // attribute" behavior) always stays the STORED, unprefixed route `deriveContentNodeId()` needs.
+    const route = viewLink?.dataset?.route;
+    if (route) loadForEdit(route);
+  };
+  mountEl.addEventListener('click', onClick);
+  clickListenerByMountEl.set(mountEl, () => mountEl.removeEventListener('click', onClick));
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -60,23 +209,30 @@ export function wireBlog({ mountEl, doc, space }) {
       const title = form.querySelector('[name="title"]').value.trim();
       const slug = form.querySelector('[name="slug"]').value.trim();
       const content = form.querySelector('[name="content"]').value;
-      const route = resolvePlaceholders(routeTemplate, { space, fields: { slug } });
+      const editingRoute = form.dataset.editingRoute;
+      const route = editingRoute ?? resolvePlaceholders(routeTemplate, { space, fields: { slug } });
+
       if (isPersonal) {
-        const id = await deriveContentNodeId(space.identity.signingPub, pageKind.kind, route);
-        await verifyWritesAcked(space, id, async () => {
-          await createPage(space, { route, title, content });
-          await publishRoute(space, { route, title });
-        });
+        if (editingRoute) {
+          await editPage(space, { route, title, content });
+        } else {
+          const id = await deriveContentNodeId(space.identity.signingPub, pageKind.kind, route);
+          await verifyWritesAcked(space, id, async () => {
+            await createPage(space, { route, title, content });
+            await publishRoute(space, { route, title });
+          });
+          if (alsoGlobalCheckbox?.checked) {
+            const globalRoute = resolvePlaceholders(toGlobalRouteTemplate(routeTemplate, prefix), { space, fields: { slug } });
+            await publishGlobalPost(space, prefix, { route: globalRoute, title, content });
+          }
+        }
+      } else if (editingRoute) {
+        await editGlobalPage(space, prefix, { route, title, content });
       } else {
-        const anchor = await globalAppAnchor(prefix);
-        const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
-        await verifyWritesAcked(space, id, async () => {
-          await publishGlobalRoute(space, prefix, { route, title });
-          await new Promise((resolve) => setTimeout(resolve, 400));
-          await createGlobalPage(space, prefix, { route, title, content });
-        });
+        await publishGlobalPost(space, prefix, { route, title, content });
       }
       form.reset();
+      enterCreateMode();
       status.textContent = 'Veröffentlicht und vom Relay bestätigt.';
     } catch (err) {
       status.textContent = `Fehler: ${err.message}`;
