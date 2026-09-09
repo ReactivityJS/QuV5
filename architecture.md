@@ -246,6 +246,26 @@ NOT a background scheduler - see `compaction.js`'s own doc comment for the
 full "why automatic can only ever mean opt-in here" reasoning, and its own
 "COST NOTE" on `envelopeCount()`'s O(n) check.
 
+**UPDATE - `ListField.slice(start, end)` - windowed reads.** `toArray()`
+always decrypted (for an `'encrypted'`-visibility list) EVERY item just to
+render, say, the first 20 of a large Guestbook. `slice()` (`Array.prototype
+.slice()` semantics, negative indices included - `Y.Array.slice()`'s own
+native support) decrypts only the requested window. IMPORTANT SCOPE: this
+reduces LOCAL read/decrypt cost only, never SYNC cost - `Y.Array` (every
+Yjs shared type) has no partial/windowed sync at all, the full CRDT
+structure is already resident in memory once a Node has synced, regardless
+of whether/how `slice()` is later called. The "replay every envelope on a
+fresh subscribe" network cost is `compaction.js`'s own concern above,
+entirely separate. NOT yet wired into `openLiveView()`'s own multi-source
+merge-then-sort-then-limit pipeline (`@qu/app-core`'s `view-sources.js`) -
+correctly combining a windowed READ with that pipeline's own "true top-N
+by sort key across possibly-several sources" guarantee needs its own
+design (a raw insertion-order window is not generally the same set as the
+top-N by `sortBy`, e.g. a late-arriving update from a peer that was
+offline) - real, separate follow-up work, not attempted here. Available
+today as a foundational primitive for any caller that already knows it
+wants "the most recent N pushes" directly.
+
 ### 3.5 Presence, typing, and delivery status — ordinary data, not protocol
 
 Online/offline liveness stays exactly the pre-existing `hello`/
@@ -355,7 +375,7 @@ existed.
 | `src/kind-schema.js` | `defineKind()` (now also `persistence: 'durable'\|'volatile'`, §3.4), `KindRegistry`, `deriveOwnerNodeId()` (self-certifying nodeId derivation for `'owner'`/`'named'` ACL). |
 | `src/grant.js` | `signGrant()`/`verifyGrant()` — the `'named'`-ACL delegated-authority mechanism. |
 | `src/node.js` | `SpaceNode` (one Node = one Y.Doc, `meta` + `content` maps), `stampMeta()`. |
-| `src/field.js` | `AtomicField`/`TextField`/`ListField`, `createField()`, `withWriteContext()` (the shared transact-with-origin wrapper every field mutation goes through), `setFieldValue()` (shape-agnostic "replace the whole value" helper — see `@qu/space-ui` note below). |
+| `src/field.js` | `AtomicField`/`TextField`/`ListField` (now also `ListField.slice()` — windowed reads, §3.4 UPDATE), `createField()`, `withWriteContext()` (the shared transact-with-origin wrapper every field mutation goes through), `setFieldValue()` (shape-agnostic "replace the whole value" helper — see `@qu/space-ui` note below). |
 | `src/space.js` | `Space` — the main class, now also reconnect/resync (`onStatusChange` wiring, §3.4) and per-Kind storage routing (`_storageFor()`). See §5 below for its full method surface. |
 | `src/alias.js` | `deriveAliasIdentity()`, `aliasRegistryKind`/`aliasRegistryNodeId()`, `publishAlias()`, `AliasRegistry` — per-space pseudonymity. |
 | `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes (§3.5). |

@@ -235,6 +235,34 @@ class ListField {
   }
 
   /**
+   * A WINDOW of this list, `Array.prototype.slice(start, end)` semantics
+   * (negative indices count from the end, e.g. `slice(-20)` = "the last 20
+   * pushed" - `Y.Array.slice()`'s own native support, not reimplemented
+   * here) - same insertion order `toArray()` returns, just a sub-range of
+   * it. For an `'encrypted'`-visibility list, this decrypts ONLY the items
+   * actually in the requested window, not the whole array first - real
+   * savings for a large list (a Guestbook with thousands of entries)
+   * rendering only its most recent page.
+   *
+   * WHAT THIS DOES NOT DO: reduce SYNC cost. `Y.Array` (like every Yjs
+   * shared type) has no partial/windowed sync - the full CRDT structure is
+   * already resident in memory locally once this Node has synced at all,
+   * regardless of whether `slice()` or `toArray()` is ever called
+   * afterward, and regardless of how small a window is requested. The
+   * "replaying every envelope on a fresh subscribe" cost this exists
+   * alongside is `compaction.js`'s own concern (`compactIfNeeded()`),
+   * entirely separate from this - `slice()` only ever narrows LOCAL
+   * decrypt/read work on data already fully synced, never what crosses the
+   * network to get here.
+   * @param {number} [start] @param {number} [end]
+   */
+  async slice(start, end) {
+    const raw = this._yarray.slice(start, end);
+    if (this._visibility === 'public') return raw;
+    return Promise.all(raw.map((envelope) => decryptEnvelopeFor(envelope, this._ctx.identity)));
+  }
+
+  /**
    * Removes `length` entries starting at `index` - Yjs' own
    * `Y.Array.delete()`, CRDT-merged against a concurrent insert/remove
    * exactly like `TextField.delete()` already is for `Y.Text` (this file's
