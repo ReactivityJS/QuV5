@@ -38,6 +38,7 @@ import { deriveOwnerNodeId } from '@qu/space-core';
 import { sanitizeHtml } from '@qu/app-renderer';
 import { bindList } from '@qu/space-ui';
 import { verifyWritesAcked } from './verify-writes.js';
+import { setFormStatus } from './form-status.js';
 
 /** @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space}} params */
 export function wireForum({ mountEl, doc, space }) {
@@ -114,9 +115,7 @@ export function wireForum({ mountEl, doc, space }) {
 
   topicForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const status = topicForm.querySelector('[data-qu-status]') ?? topicForm.appendChild(doc.createElement('p'));
-    status.setAttribute('data-qu-status', '');
-    status.textContent = '';
+    setFormStatus(topicForm, '');
     try {
       const title = topicForm.querySelector('[name="title"]').value.trim();
       const author = topicForm.querySelector('[name="author"]').value.trim();
@@ -127,18 +126,16 @@ export function wireForum({ mountEl, doc, space }) {
         pushToSharedList(space, `${prefix}:topics`, { name: title, message: `von ${author}`, ts: Date.now(), topicId, body })
       );
       topicForm.reset();
-      status.textContent = 'Thema erstellt und vom Relay bestätigt.';
+      setFormStatus(topicForm, 'Thema erstellt und vom Relay bestätigt.');
     } catch (err) {
-      status.textContent = `Fehler: ${err.message}`;
+      setFormStatus(topicForm, `Fehler: ${err.message}`);
     }
   });
 
   if (replyForm) {
     replyForm.addEventListener('submit', async (event) => {
       event.preventDefault();
-      const status = replyForm.querySelector('[data-qu-status]') ?? replyForm.appendChild(doc.createElement('p'));
-      status.setAttribute('data-qu-status', '');
-      status.textContent = '';
+      setFormStatus(replyForm, '');
       try {
         const author = replyForm.querySelector('[name="author"]').value.trim();
         const message = replyForm.querySelector('[name="message"]').value.trim();
@@ -147,9 +144,9 @@ export function wireForum({ mountEl, doc, space }) {
           pushToSharedList(space, `${prefix}:replies`, { name: author, message, ts: Date.now(), topicId: currentTopicId })
         );
         replyForm.reset();
-        status.textContent = 'Antwort gesendet und vom Relay bestätigt.';
+        setFormStatus(replyForm, 'Antwort gesendet und vom Relay bestätigt.');
       } catch (err) {
-        status.textContent = `Fehler: ${err.message}`;
+        setFormStatus(replyForm, `Fehler: ${err.message}`);
       }
     });
   }

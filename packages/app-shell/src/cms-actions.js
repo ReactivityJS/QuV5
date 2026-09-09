@@ -171,6 +171,7 @@ import { verifyWritesAcked } from './verify-writes.js';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { registerAdminSection, listAdminSections } from './admin-sections.js';
 import { extensionPoints } from './extension-points.js';
+import { setFormStatus as setStatus } from './form-status.js';
 
 /** See this file's own top doc comment, "KEEPING EACH SECTION'S OWN REGISTRY SUBSCRIPTION ALIVE...". Opens (and never releases - see that comment on why) a subscription to `ownerPub`'s `registryKind` Node (defaults to `space.identity` - a GLOBAL app's registry passes `globalAppAnchor(prefix)` instead), so every later `refreshList()`/`registerContentName()`/`publishRoute()`/`publishGlobalRoute()` call in the same CMS session finds it already attached. */
 async function holdRegistry(space, registryKind, ownerPub = space.identity.signingPub) {
@@ -213,12 +214,6 @@ function wireCmsNav(mountEl, doc) {
     const target = link.getAttribute('data-qu-cms-nav');
     link.setAttribute('href', `#${target === 'index' ? base : `${base}/${target}`}`);
   }
-}
-
-function setStatus(form, text) {
-  const status = form.querySelector('[data-qu-status]') ?? form.appendChild(form.ownerDocument.createElement('p'));
-  status.setAttribute('data-qu-status', '');
-  status.textContent = text;
 }
 
 /** Switches `form` into "edit" mode: locks `keyFieldName` to `keyValue` (the Node this save must target) and fills every other field in `fields`. */

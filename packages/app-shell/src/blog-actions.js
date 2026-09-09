@@ -124,6 +124,7 @@ import { deriveOwnerNodeId } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
 import { verifyWritesAcked } from './verify-writes.js';
 import { resolvePlaceholders } from './qu-placeholders.js';
+import { setFormStatus } from './form-status.js';
 
 const GLOBAL_KINDS = { pageKind: adminPageKind, routeRegistryKind: adminRouteRegistryKind, viewKind: adminViewKind };
 
@@ -257,9 +258,7 @@ export function wireBlog({ mountEl, doc, space }) {
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const statusEl = form.querySelector('[data-qu-status]') ?? form.appendChild(doc.createElement('p'));
-    statusEl.setAttribute('data-qu-status', '');
-    statusEl.textContent = '';
+    setFormStatus(form, '');
     // See this file's own top doc comment, "ENTWURF/VERÖFFENTLICHEN" - whichever button's own
     // 'click' listener (above) ran last decides this; absent (a plain `dispatchEvent('submit')` with
     // no preceding button click, e.g. most of this file's own PRE-EXISTING tests) defaults to
@@ -323,14 +322,14 @@ export function wireBlog({ mountEl, doc, space }) {
         form.dataset.editingRoute = route;
         form.dataset.loadedStatus = 'draft';
         submitBtn.textContent = 'Veröffentlichen'; // already live-appropriate wording, e.g. after loadForEdit() had set 'Aktualisieren'.
-        statusEl.textContent = 'Als Entwurf gespeichert (noch nicht veröffentlicht).';
+        setFormStatus(form, 'Als Entwurf gespeichert (noch nicht veröffentlicht).');
       } else {
         form.reset();
         enterCreateMode();
-        statusEl.textContent = 'Veröffentlicht und vom Relay bestätigt.';
+        setFormStatus(form, 'Veröffentlicht und vom Relay bestätigt.');
       }
     } catch (err) {
-      statusEl.textContent = `Fehler: ${err.message}`;
+      setFormStatus(form, `Fehler: ${err.message}`);
     }
   });
 }

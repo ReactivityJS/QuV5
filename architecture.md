@@ -1272,6 +1272,27 @@ again without touching the registry) - a lower-level, faster, and more
 robust test surface than driving the same transitions through a
 browser-simulated relay-admin click sequence.
 
+**UPDATE - `setFormStatus()` (`@qu/app-shell`'s new `src/form-status.js`).**
+The "find or create this form's own `[data-qu-status]` paragraph, then
+set its text" three-liner was duplicated verbatim across every form-
+wiring file in this package (`blog-actions.js`, `guestbook-actions.js`,
+`forum-actions.js` ×2, `admin-actions.js` ×2, `generic-write-actions.js`)
+- `cms-actions.js` already had its own private copy (`setStatus()`) of
+exactly this function, unnoticed by the others. Extracted into ONE
+shared `setFormStatus(form, text)`, imported everywhere the old 3-line
+block used to live (`cms-actions.js` keeps calling it `setStatus` via an
+aliased import - `import {setFormStatus as setStatus}` - so its own
+existing call sites needed zero changes). Deliberately a plain function,
+not a `<qu-form-status>` Web Component - no reactive Space data is
+involved, just "set some text on an element," so a Component's
+registration/shadow-DOM machinery would be pure overhead here. The OTHER
+`[data-qu-status]` usages in this package (`admin-actions.js`'s
+per-list-item mode/uninstall buttons, `installed-apps-actions.js`'s
+update banner) are a genuinely different shape - a plain element created
+ONCE and held via closure across several button handlers, not a `<form>`
+re-queried on every submit - so they were deliberately left as they were,
+not force-fit onto this helper.
+
 **Phase 2, reactive/live component bindings — DELIVERED**
 (`packages/space-components/`, `@qu/space-components`): the user's own
 stated goal was "Daten aus dem Storage reactive genutzt... wenn irgendwie

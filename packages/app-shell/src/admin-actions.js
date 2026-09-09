@@ -69,6 +69,7 @@ import { installForum } from '../forum-bundle.js';
 import { installGlobalCms, cmsBundle } from '../cms-bundle.js';
 import { verifyWritesAcked } from './verify-writes.js';
 import { discoveredApps } from '../apps-registry.generated.js';
+import { setFormStatus } from './form-status.js';
 
 // `'personal'` (kinds.js's own `platformAppsKind` doc comment) - a read-only, aggregated feed at
 // the bare prefix instead of a relay-admin-authored page, for an app whose personal instances
@@ -409,19 +410,17 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
   if (form) {
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
-      const status = form.querySelector('[data-qu-status]') ?? form.appendChild(doc.createElement('p'));
-      status.setAttribute('data-qu-status', '');
-      status.textContent = '';
+      setFormStatus(form, '');
       try {
         const prefix = form.querySelector('input[name="prefix"]').value.trim();
         const rawPub = form.querySelector('input[name="appAdminPub"]').value.trim();
         const name = form.querySelector('input[name="name"]').value.trim();
         const appAdminPub = QuCrypto.fromBase64(rawPub);
         await registerApp(mainSpace, { prefix, appAdminPub, name });
-        status.textContent = 'Gesendet. Falls du der Relay-Admin bist, ist die App jetzt registriert.';
+        setFormStatus(form, 'Gesendet. Falls du der Relay-Admin bist, ist die App jetzt registriert.');
         await renderList();
       } catch (err) {
-        status.textContent = `Fehler: ${err.message}`;
+        setFormStatus(form, `Fehler: ${err.message}`);
       }
     });
   }
@@ -463,9 +462,7 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
     if (!installer) continue;
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
-      const status = form.querySelector('[data-qu-status]') ?? form.appendChild(doc.createElement('p'));
-      status.setAttribute('data-qu-status', '');
-      status.textContent = '';
+      setFormStatus(form, '');
       try {
         const prefix = form.querySelector('input[name="prefix"]').value.trim();
         // Every OTHER named field on this form (Blog's own `routeScheme` `<select>`,
@@ -502,11 +499,11 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
         await new Promise((resolve) => setTimeout(resolve, 400)); // let the relay's live resolver start watching this app's own route registry/shared lists/View names.
         await installer.install(mainSpace, { prefix, ...options });
         if (Object.keys(options).length) await setAppConfig(mainSpace, { prefix, config: options });
-        status.textContent = `${installer.label} installiert - erreichbar unter #/${prefix}/.`;
+        setFormStatus(form, `${installer.label} installiert - erreichbar unter #/${prefix}/.`);
         form.reset();
         await renderList();
       } catch (err) {
-        status.textContent = `Fehler: ${err.message}`;
+        setFormStatus(form, `Fehler: ${err.message}`);
       }
     });
   }
