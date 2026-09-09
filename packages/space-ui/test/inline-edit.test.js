@@ -29,6 +29,29 @@ function fakeField(initial = '') {
   };
 }
 
+/** A 'text'-shape field, `get`/`insert`/`delete`/`observe` only - NO `set()` at all, same shape `@qu/space-core`'s real `TextField` has (`field.js`'s own doc comment) - proves `makeInlineEditable()` routes through `setFieldValue()`'s delete-then-insert branch, not a bare (nonexistent) `field.set()`. */
+function fakeTextField(initial = '') {
+  let value = initial;
+  const observers = new Set();
+  return {
+    get() {
+      return value; // synchronous, like the real TextField.get() - not async.
+    },
+    insert(index, text) {
+      value = value.slice(0, index) + text + value.slice(index);
+      for (const cb of observers) cb();
+    },
+    delete(index, length) {
+      value = value.slice(0, index) + value.slice(index + length);
+      for (const cb of observers) cb();
+    },
+    observe(cb) {
+      observers.add(cb);
+      return () => observers.delete(cb);
+    },
+  };
+}
+
 function dom() {
   const { window } = new JSDOM('<!doctype html><body></body>');
   return window;
@@ -114,4 +137,30 @@ test('Enter (without Shift) saves, same as blur', async () => {
 
   assert.equal(await field.get(), 'via enter');
   assert.deepEqual(saved, ['via enter']);
+});
+
+test('works on a \'text\'-shape field too (no set() at all) - blur saves via delete-then-insert, never accumulates stale characters across repeated edits', async () => {
+  const { document, FocusEvent } = dom();
+  const el = document.createElement('div');
+  const field = fakeTextField('Erster Inhalt, recht lang.');
+  const saved = [];
+  makeInlineEditable(el, field, { onSave: (v) => saved.push(v) });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(el.textContent, 'Erster Inhalt, recht lang.');
+
+  el.dispatchEvent(new FocusEvent('focus'));
+  el.textContent = 'Kurz.'; // SHORTER than the original - would leave stale trailing chars if this only inserted.
+  el.dispatchEvent(new FocusEvent('blur'));
+  await new Promise((r) => setTimeout(r, 5));
+
+  assert.equal(field.get(), 'Kurz.');
+  assert.deepEqual(saved, ['Kurz.']);
+
+  // A second edit round-trips correctly too - no leftover state from the first save.
+  el.dispatchEvent(new FocusEvent('focus'));
+  el.textContent = 'Noch ein Versuch, wieder länger.';
+  el.dispatchEvent(new FocusEvent('blur'));
+  await new Promise((r) => setTimeout(r, 5));
+
+  assert.equal(field.get(), 'Noch ein Versuch, wieder länger.');
 });

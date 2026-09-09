@@ -7,3 +7,4 @@ export { deriveAliasIdentity, aliasRegistryKind, aliasRegistryNodeId, publishAli
 export { presenceKind, presenceNodeId, publishPresence, setStatus, setTyping, watchPresence, PresenceWatcher } from './presence.js';
 export { encodeForWire, decodeFromWire } from './wire-codec.js';
 export { compactIfNeeded } from './compaction.js';
+export { setFieldValue } from './field.js';

@@ -355,7 +355,7 @@ existed.
 | `src/kind-schema.js` | `defineKind()` (now also `persistence: 'durable'\|'volatile'`, §3.4), `KindRegistry`, `deriveOwnerNodeId()` (self-certifying nodeId derivation for `'owner'`/`'named'` ACL). |
 | `src/grant.js` | `signGrant()`/`verifyGrant()` — the `'named'`-ACL delegated-authority mechanism. |
 | `src/node.js` | `SpaceNode` (one Node = one Y.Doc, `meta` + `content` maps), `stampMeta()`. |
-| `src/field.js` | `AtomicField`/`TextField`/`ListField`, `createField()`, `withWriteContext()` (the shared transact-with-origin wrapper every field mutation goes through). |
+| `src/field.js` | `AtomicField`/`TextField`/`ListField`, `createField()`, `withWriteContext()` (the shared transact-with-origin wrapper every field mutation goes through), `setFieldValue()` (shape-agnostic "replace the whole value" helper — see `@qu/space-ui` note below). |
 | `src/space.js` | `Space` — the main class, now also reconnect/resync (`onStatusChange` wiring, §3.4) and per-Kind storage routing (`_storageFor()`). See §5 below for its full method surface. |
 | `src/alias.js` | `deriveAliasIdentity()`, `aliasRegistryKind`/`aliasRegistryNodeId()`, `publishAlias()`, `AliasRegistry` — per-space pseudonymity. |
 | `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes (§3.5). |
@@ -409,13 +409,28 @@ awareness either of these exist, same as `alias.js`.
 | File | Purpose |
 |---|---|
 | `src/bind.js` | `bindField()`/`bindCheckbox()` — one/two-way reactive binding between a DOM element and a `Field`. |
-| `src/inline-edit.js` | `makeInlineEditable()` — `[contenteditable]` bound to a `Field` with explicit save (Enter/blur)/cancel (Escape) semantics; never applies a remote change while the element has focus. |
+| `src/inline-edit.js` | `makeInlineEditable()` — `[contenteditable]` bound to a `Field` with explicit save (Enter/blur)/cancel (Escape) semantics; never applies a remote change while the element has focus. Now works on a `'text'`-shape field too (`@qu/space-core`'s `setFieldValue()`, see §3.4-adjacent note below), not just `'atomic'`. |
 | `src/list-bind.js` | `bindList()` — keyed reconciliation of a list `Field` into a DOM container; skips re-rendering items whose value hasn't changed even without a caller-supplied `update()`. |
 | `src/upload-status.js` | `bindFileInput()`/`bindUploadStatusIcon()` — wires `<input type="file">` and status icons to `@qu/space-plugins`' `UploadOutbox`; a status icon is never auto-hidden on `'done'`. |
 | `src/index.js` | Package's public export surface. |
 
 Vanilla JS/DOM, no framework dependency, no build step — `Space` has zero
 awareness this package exists either.
+
+**UPDATE - `setFieldValue()` closes a real gap.** `@qu/space-core`'s new
+`setFieldValue(field, value)` (`field.js`'s own doc comment) writes a
+COMPLETE new value regardless of a field's shape - `'atomic'` via its own
+`set()`, `'text'` via delete-then-insert (`TextField` has no `set()` at
+all). `makeInlineEditable()` now uses it instead of a bare `field.set()`,
+which would have thrown outright for any `'text'`-shape field (a Blog
+post's own `content`, e.g.) - so `<qu-bind editable="inline">` now works on
+either shape. Deliberately a discrete "commit on save," not live
+character-level merging - the wrong tool for two people typing in the SAME
+field at once (point a real editor at `field.ytext` for that); `bindField()`'s
+own per-keystroke two-way binding stays `'atomic'`-only, unchanged, for the
+identical reason. `@qu/app-core`'s `dev.js` keeps its own, separate,
+already-working `replaceText()` private helper (13 call sites) rather than
+being migrated onto this - not worth the churn for zero behavior change.
 
 ### `packages/space-components/` — `@qu/space-components` (OPTIONAL)
 
