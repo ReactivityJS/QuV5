@@ -72,6 +72,12 @@ test('the admin console\'s per-app mode buttons flip a registered global app\'s 
   assert.ok(li.querySelector('a[href="#/admin/cms/"]'), '"cms" (a realm:\'global\' app) gets a "Verwalten" link into its own global shell');
   assert.ok(!li.querySelector('a[href="#/cms/u/me/"]'), 'not yet mode:"multiuser" - no "Eigener Bereich" shortcut yet');
 
+  function adminListItem() {
+    return [...mountEl.querySelectorAll('[data-qu-bind="platform-apps-list"] li')].find((row) => row.textContent.includes('#/admin'));
+  }
+  const adminRowBefore = adminListItem();
+  assert.ok(adminRowBefore, 'a second, unrelated app row (the built-in "admin" app itself) is also listed');
+
   const buttons = [...li.querySelectorAll('button')];
   const multiuserBtn = buttons.find((b) => b.textContent === 'Multi-User');
   assert.ok(multiuserBtn && !multiuserBtn.disabled, 'the "Multi-User" button is present and clickable (not the currently-active mode)');
@@ -82,6 +88,12 @@ test('the admin console\'s per-app mode buttons flip a registered global app\'s 
   assert.ok(li.textContent.includes('Multi-User'), 'the list re-rendered to reflect the new mode');
   assert.ok(li.querySelector('a[href="#/cms/u/me/"]'), 'now mode:"multiuser" - the "Eigener Bereich" shortcut appears');
   assert.ok(!li.querySelector('[data-qu-status]')?.textContent, 'no error surfaced - the click actually succeeded (setAppMode() found the registry, thanks to getOrSyncRegistryNode())');
+
+  // `bindList()`'s own keyed reconciliation (`admin-actions.js`'s "EAT YOUR OWN DOG FOOD" doc
+  // comment) - only the "cms" row (the one that actually changed) got replaced; the UNRELATED
+  // "admin" row's own DOM element is the SAME node as before, not torn down and rebuilt just
+  // because a sibling row changed.
+  assert.equal(adminListItem(), adminRowBefore, 'an unrelated row is untouched by a different row\'s own mode change');
 
   router.stop();
 });

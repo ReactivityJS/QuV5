@@ -1272,6 +1272,32 @@ again without touching the registry) - a lower-level, faster, and more
 robust test surface than driving the same transitions through a
 browser-simulated relay-admin click sequence.
 
+**UPDATE - ADMIN CONSOLE EATS ITS OWN DOG FOOD (`admin-actions.js`'s
+installed-apps list).** The app list used to be its own bespoke "clear
+the whole `<ul>`, rebuild every `<li>` by hand with `doc.createElement()`"
+loop on every single mutation (a mode click, an install, an uninstall) -
+duplicating, by hand, the exact keyed reconciliation `@qu/space-ui`'s
+`bindList()` already provides and `view-actions.js`'s `wireViews()`
+already uses for every OTHER live list in this framework. Refactored to
+use that same shared primitive: `platform.resolveApps()` (already a
+plain, REDUCED array - last write per prefix wins, `platformAppsKind`'s
+own "ONLY ADDITIVE" doc comment) is wrapped in the minimal `{toArray,
+observe}` source `bindList()` needs; the old per-row DOM-building code
+became `renderAppRow(app)`, `bindList()`'s own `render` callback, now
+invoked once per NEW or CHANGED row (keyed by `app.prefix`, stable across
+a mode change) instead of unconditionally for every row on every
+recompute - a real behavior improvement, not just less code: an
+unrelated row's own DOM (and any in-progress interaction with it) is no
+longer torn down every time a DIFFERENT app's mode button is clicked.
+`renderList()` keeps its name and external call sites unchanged (every
+mutation handler still just calls it) - internally it now only
+re-fetches `resolveApps()` and notifies `bindList()`'s observer, never
+rebuilds anything itself. The empty-state message moved from a
+placeholder `<li>` `bindList()` would have had to specially ignore into
+an ordinary sibling `<p data-qu-empty-apps hidden>` (`admin-console-
+bundle.js`), toggled the same way any other `[data-qu-admin-only]`-style
+element in this codebase already is.
+
 **UPDATE - RICH TEXT (`@qu/space-ui`'s new `src/rich-text.js` +
 `@qu/app-shell`'s new `src/rich-text-actions.js`).** A minimal,
 dependency-free WYSIWYG surface for a plain `<textarea>` a form already

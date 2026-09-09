@@ -26,7 +26,9 @@
  *     per currently registered app/alias (via `PlatformRuntime.resolveApps()`),
  *     re-rendered after every mode change (`renderList()` below, not just
  *     once at wiring time any more - a mode toggle needs to visibly reflect
- *     its own effect without a full page reload).
+ *     its own effect without a full page reload) - via `@qu/space-ui`'s
+ *     `bindList()`, this file's own "EAT YOUR OWN DOG FOOD" doc comment
+ *     below on why.
  *   - A "Besuchen" link (`#/<prefix>/`) on EVERY entry, main or global -
  *     visiting the bare prefix already works regardless of realm, this is
  *     just a discoverable shortcut instead of typing the URL by hand.
@@ -70,6 +72,7 @@ import { installGlobalCms, cmsBundle } from '../cms-bundle.js';
 import { verifyWritesAcked } from './verify-writes.js';
 import { discoveredApps } from '../apps-registry.generated.js';
 import { setFormStatus } from './form-status.js';
+import { bindList } from '@qu/space-ui';
 
 // `'personal'` (kinds.js's own `platformAppsKind` doc comment) - a read-only, aggregated feed at
 // the bare prefix instead of a relay-admin-authored page, for an app whose personal instances
@@ -217,194 +220,225 @@ function unsupportedModes(app) {
 /** @param {{mountEl: Element, doc: Document, mainSpace: import('@qu/space-core').Space, platform: import('@qu/app-core').PlatformRuntime}} params */
 export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
   const list = mountEl.querySelector('[data-qu-bind="platform-apps-list"]');
+  const emptyState = mountEl.querySelector('[data-qu-empty-apps]');
 
-  async function renderList() {
-    if (!list) return;
-    const apps = await platform.resolveApps({ timeout: 500 });
-    list.replaceChildren();
-    if (apps.length === 0) {
-      const li = doc.createElement('li');
-      li.textContent = '(noch keine App registriert)';
-      list.appendChild(li);
-      return;
-    }
-    for (const app of apps) {
-      const isGlobal = (app.realm ?? 'main') === 'global';
-      const li = doc.createElement('li');
-      const info = doc.createElement('span');
-      const owner = isGlobal ? `Global (${MODE_LABELS[app.mode ?? 'global']})` : `${QuCrypto.toBase64(app.appAdminPub).slice(0, 20)}…`;
-      info.textContent = `#/${app.prefix} — ${app.name ?? '(unbenannt)'} (${owner}) `;
-      li.appendChild(info);
+  /**
+   * Builds ONE app row's DOM - `bindList()`'s own `render(item)` callback
+   * (below), called once per NEW or CHANGED app, never on every recompute
+   * for every row the way the old hand-rolled "wipe the whole `<ul>` and
+   * rebuild it" version of this function used to (see this file's own
+   * "EAT YOUR OWN DOG FOOD" note below) - same content/behavior as before,
+   * just no longer torn down and rebuilt for rows that didn't change.
+   */
+  function renderAppRow(app) {
+    const isGlobal = (app.realm ?? 'main') === 'global';
+    const li = doc.createElement('li');
+    const info = doc.createElement('span');
+    const owner = isGlobal ? `Global (${MODE_LABELS[app.mode ?? 'global']})` : `${QuCrypto.toBase64(app.appAdminPub).slice(0, 20)}…`;
+    info.textContent = `#/${app.prefix} — ${app.name ?? '(unbenannt)'} (${owner}) `;
+    li.appendChild(info);
 
-      // Direct link to the app itself, for EVERY entry, main or global - visiting the bare prefix
-      // already works regardless of realm (`boot.js`'s own dispatch never special-cases either),
-      // this was previously only ever reachable by typing the URL by hand.
-      const visitLink = doc.createElement('a');
-      visitLink.href = `#/${app.prefix}/`;
-      visitLink.textContent = 'Besuchen';
-      visitLink.style.marginRight = '0.5rem';
-      li.appendChild(visitLink);
+    // Direct link to the app itself, for EVERY entry, main or global - visiting the bare prefix
+    // already works regardless of realm (`boot.js`'s own dispatch never special-cases either),
+    // this was previously only ever reachable by typing the URL by hand.
+    const visitLink = doc.createElement('a');
+    visitLink.href = `#/${app.prefix}/`;
+    visitLink.textContent = 'Besuchen';
+    visitLink.style.marginRight = '0.5rem';
+    li.appendChild(visitLink);
 
-      if (isGlobal) {
-        const manageLink = doc.createElement('a');
-        manageLink.href = `#/admin/${app.prefix}/`;
-        manageLink.textContent = 'Verwalten';
-        manageLink.style.marginRight = '0.5rem';
-        li.appendChild(manageLink);
+    if (isGlobal) {
+      const manageLink = doc.createElement('a');
+      manageLink.href = `#/admin/${app.prefix}/`;
+      manageLink.textContent = 'Verwalten';
+      manageLink.style.marginRight = '0.5rem';
+      li.appendChild(manageLink);
 
-        // `'multiuser'` - the bare prefix ITSELF already means "my own space" (this link is then
-        // purely a convenience, identical to just clicking "Besuchen" above). `'personal'` - the
-        // bare prefix shows the read-only aggregate feed instead, so THIS is the only link that
-        // reaches this identity's own write-side instance at all.
-        if (app.mode === 'multiuser' || app.mode === 'personal') {
-          const ownLink = doc.createElement('a');
-          ownLink.href = `#/${app.prefix}/u/me/`;
-          ownLink.textContent = 'Eigener Bereich';
-          ownLink.style.marginRight = '0.5rem';
-          li.appendChild(ownLink);
+      // `'multiuser'` - the bare prefix ITSELF already means "my own space" (this link is then
+      // purely a convenience, identical to just clicking "Besuchen" above). `'personal'` - the
+      // bare prefix shows the read-only aggregate feed instead, so THIS is the only link that
+      // reaches this identity's own write-side instance at all.
+      if (app.mode === 'multiuser' || app.mode === 'personal') {
+        const ownLink = doc.createElement('a');
+        ownLink.href = `#/${app.prefix}/u/me/`;
+        ownLink.textContent = 'Eigener Bereich';
+        ownLink.style.marginRight = '0.5rem';
+        li.appendChild(ownLink);
+      }
+
+      const status = doc.createElement('span');
+      status.setAttribute('data-qu-status', '');
+
+      // "Views/Seiten (CMS)" - self-provisions (idempotent, `cms-bundle.js`'s own
+      // `installGlobalCms()` doc comment: "re-running is harmless") this app's OWN
+      // Templates/Styles/Pages/VIEWS editor at `#/admin/<prefix>/cms`
+      // (`parseAdminSubPath()`/`renderGlobalShell()`'s existing delegation - already wired,
+      // nothing new there) if it doesn't exist yet, then navigates there. THE POINT: any
+      // `realm: 'global'` app - including one with no bundle.js at all, just a bare
+      // `registerApp()` - gets a full Page+View authoring UI this way, `createGlobalView()`'s
+      // own `route`/`template` params already connecting a path to a live, generated feed
+      // (`docs/example-apps.md`'s own "Gästebuch nachbauen, nur per UI" walkthrough has the
+      // full worked example, including the "form above/below the list" case: create the View
+      // WITH a route first, THEN edit the auto-created wrapper page's own content afterward to
+      // wrap the `<div data-qu-view>` in whatever surrounding markup is wanted - there is no
+      // separate "header/footer" field, the wrapper page IS ordinary, freely editable content).
+      // Optional - a shared-list name to ADD to this app's own registration before opening the
+      // CMS editor (`dev.js`'s `addSharedLists()` own doc comment on why this exists at all: a
+      // Gästebuch-style "many visitors contribute" View, built ENTIRELY through that editor's own
+      // View form, needs its list's name registered SOMEWHERE first - there is no `bundle.js`
+      // install step to have done that for an app created this way). Leave blank for a Page-
+      // sourced View (single-author content) - those need no shared list at all.
+      const sharedListInput = doc.createElement('input');
+      sharedListInput.placeholder = 'neue shared-list (optional)';
+      sharedListInput.style.marginRight = '0.25rem';
+      li.appendChild(sharedListInput);
+
+      const cmsBtn = doc.createElement('button');
+      cmsBtn.type = 'button';
+      cmsBtn.textContent = 'Views/Seiten (CMS)';
+      cmsBtn.style.marginRight = '0.25rem';
+      cmsBtn.addEventListener('click', async () => {
+        status.textContent = '';
+        try {
+          const newList = sharedListInput.value.trim();
+          if (newList) {
+            await addSharedLists(mainSpace, { prefix: app.prefix, sharedLists: [newList] });
+            await new Promise((resolve) => setTimeout(resolve, 400)); // settle - the live resolver needs a moment to start watching this new name before anything writes to it.
+            sharedListInput.value = '';
+          }
+          // ALWAYS declare "__cms__" (cmsBundle.template.name) here, unconditionally - a REAL,
+          // previously-shipped bug this fixes: unlike the built-in admin console's own hardcoded
+          // "main" template, installGlobalCms()'s own template write below was silently REJECTED
+          // for any OTHER prefix (kinds.js's own platformAppsKind doc comment on why) until the
+          // relay was told to expect this exact name for THIS prefix - addGlobalTemplateNames()
+          // dedupes, so re-clicking this button for an app that already declared it is a no-op.
+          await addGlobalTemplateNames(mainSpace, { prefix: app.prefix, globalTemplateNames: [cmsBundle.template.name] });
+          await new Promise((resolve) => setTimeout(resolve, 400)); // settle - same reasoning as addSharedLists() above.
+          // installGlobalCms() itself now publishes EVERY one of its own pages' routes (the /cms
+          // index AND one per registered section) before writing each - no separate publishGlobalRoute()
+          // call needed here any more (cms-bundle.js's own installGlobalCms() doc comment).
+          await installGlobalCms(mainSpace, app.prefix);
+          doc.defaultView.location.hash = `/admin/${app.prefix}/cms`;
+        } catch (err) {
+          status.textContent = `Fehler: ${err.message}`;
         }
+      });
+      li.appendChild(cmsBtn);
 
-        const status = doc.createElement('span');
-        status.setAttribute('data-qu-status', '');
-
-        // "Views/Seiten (CMS)" - self-provisions (idempotent, `cms-bundle.js`'s own
-        // `installGlobalCms()` doc comment: "re-running is harmless") this app's OWN
-        // Templates/Styles/Pages/VIEWS editor at `#/admin/<prefix>/cms`
-        // (`parseAdminSubPath()`/`renderGlobalShell()`'s existing delegation - already wired,
-        // nothing new there) if it doesn't exist yet, then navigates there. THE POINT: any
-        // `realm: 'global'` app - including one with no bundle.js at all, just a bare
-        // `registerApp()` - gets a full Page+View authoring UI this way, `createGlobalView()`'s
-        // own `route`/`template` params already connecting a path to a live, generated feed
-        // (`docs/example-apps.md`'s own "Gästebuch nachbauen, nur per UI" walkthrough has the
-        // full worked example, including the "form above/below the list" case: create the View
-        // WITH a route first, THEN edit the auto-created wrapper page's own content afterward to
-        // wrap the `<div data-qu-view>` in whatever surrounding markup is wanted - there is no
-        // separate "header/footer" field, the wrapper page IS ordinary, freely editable content).
-        // Optional - a shared-list name to ADD to this app's own registration before opening the
-        // CMS editor (`dev.js`'s `addSharedLists()` own doc comment on why this exists at all: a
-        // Gästebuch-style "many visitors contribute" View, built ENTIRELY through that editor's own
-        // View form, needs its list's name registered SOMEWHERE first - there is no `bundle.js`
-        // install step to have done that for an app created this way). Leave blank for a Page-
-        // sourced View (single-author content) - those need no shared list at all.
-        const sharedListInput = doc.createElement('input');
-        sharedListInput.placeholder = 'neue shared-list (optional)';
-        sharedListInput.style.marginRight = '0.25rem';
-        li.appendChild(sharedListInput);
-
-        const cmsBtn = doc.createElement('button');
-        cmsBtn.type = 'button';
-        cmsBtn.textContent = 'Views/Seiten (CMS)';
-        cmsBtn.style.marginRight = '0.25rem';
-        cmsBtn.addEventListener('click', async () => {
+      const unsupported = unsupportedModes(app);
+      for (const mode of ['off', 'global', 'multiuser', 'personal']) {
+        const btn = doc.createElement('button');
+        btn.type = 'button';
+        btn.textContent = MODE_LABELS[mode];
+        const isCurrent = (app.mode ?? 'global') === mode;
+        if (!isCurrent && unsupported.has(mode)) {
+          btn.disabled = true;
+          btn.title =
+            mode === 'multiuser'
+              ? 'Ignoriert das eigene Personal-Bundle dieser App - "Eigener Bereich" bliebe unerreichbar.'
+              : 'Diese App baut noch keinen Aggregat-Feed - der Feed bliebe dauerhaft leer.';
+        } else {
+          btn.disabled = isCurrent;
+        }
+        btn.style.marginRight = '0.25rem';
+        btn.addEventListener('click', async () => {
           status.textContent = '';
           try {
-            const newList = sharedListInput.value.trim();
-            if (newList) {
-              await addSharedLists(mainSpace, { prefix: app.prefix, sharedLists: [newList] });
-              await new Promise((resolve) => setTimeout(resolve, 400)); // settle - the live resolver needs a moment to start watching this new name before anything writes to it.
-              sharedListInput.value = '';
-            }
-            // ALWAYS declare "__cms__" (cmsBundle.template.name) here, unconditionally - a REAL,
-            // previously-shipped bug this fixes: unlike the built-in admin console's own hardcoded
-            // "main" template, installGlobalCms()'s own template write below was silently REJECTED
-            // for any OTHER prefix (kinds.js's own platformAppsKind doc comment on why) until the
-            // relay was told to expect this exact name for THIS prefix - addGlobalTemplateNames()
-            // dedupes, so re-clicking this button for an app that already declared it is a no-op.
-            await addGlobalTemplateNames(mainSpace, { prefix: app.prefix, globalTemplateNames: [cmsBundle.template.name] });
-            await new Promise((resolve) => setTimeout(resolve, 400)); // settle - same reasoning as addSharedLists() above.
-            // installGlobalCms() itself now publishes EVERY one of its own pages' routes (the /cms
-            // index AND one per registered section) before writing each - no separate publishGlobalRoute()
-            // call needed here any more (cms-bundle.js's own installGlobalCms() doc comment).
-            await installGlobalCms(mainSpace, app.prefix);
-            doc.defaultView.location.hash = `/admin/${app.prefix}/cms`;
-          } catch (err) {
-            status.textContent = `Fehler: ${err.message}`;
-          }
-        });
-        li.appendChild(cmsBtn);
-
-        const unsupported = unsupportedModes(app);
-        for (const mode of ['off', 'global', 'multiuser', 'personal']) {
-          const btn = doc.createElement('button');
-          btn.type = 'button';
-          btn.textContent = MODE_LABELS[mode];
-          const isCurrent = (app.mode ?? 'global') === mode;
-          if (!isCurrent && unsupported.has(mode)) {
-            btn.disabled = true;
-            btn.title =
-              mode === 'multiuser'
-                ? 'Ignoriert das eigene Personal-Bundle dieser App - "Eigener Bereich" bliebe unerreichbar.'
-                : 'Diese App baut noch keinen Aggregat-Feed - der Feed bliebe dauerhaft leer.';
-          } else {
-            btn.disabled = isCurrent;
-          }
-          btn.style.marginRight = '0.25rem';
-          btn.addEventListener('click', async () => {
-            status.textContent = '';
-            try {
-              await setAppMode(mainSpace, { prefix: app.prefix, mode });
-              await renderList();
-            } catch (err) {
-              status.textContent = `Fehler: ${err.message}`;
-            }
-          });
-          li.appendChild(btn);
-        }
-
-        // "Update verfügbar" - only for a prefix installed FROM this console's own `APP_INSTALLERS`
-        // (`app.appType` set at registration time) whose bundle's CURRENT `version` is newer than
-        // what's actually installed (`app.bundleVersion`, absent entirely on an app registered
-        // before this versioning existed - treated as "0", i.e. always outdated, same posture a
-        // personal instance's own missing `data.bundleVersion` already gets - `installed-apps-
-        // actions.js`'s own `provisionPersonalInstance()` doc comment). A manually `registerApp()`ed
-        // app (no `appType`) never shows this - there is no known bundle to compare against.
-        const installer = app.appType ? resolveInstaller(app.appType) : null;
-        if (installer?.update && (app.bundleVersion ?? 0) < installer.version) {
-          const updateBtn = doc.createElement('button');
-          updateBtn.type = 'button';
-          updateBtn.textContent = 'Update verfügbar';
-          updateBtn.style.marginRight = '0.25rem';
-          updateBtn.addEventListener('click', async () => {
-            status.textContent = '';
-            try {
-              // `...(app.config ?? {})` - whatever install-time OPTIONS this prefix was last
-              // configured with (Blog's own `routeScheme`, kinds.js's `platformAppsKind` `config`
-              // doc comment) - re-applying an update must never silently drop back to that
-              // installer's own DEFAULTS just because this button doesn't otherwise know them.
-              await installer.update(mainSpace, { prefix: app.prefix, ...(app.config ?? {}) });
-              await setAppBundleVersion(mainSpace, { prefix: app.prefix, bundleVersion: installer.version });
-              await renderList();
-            } catch (err) {
-              status.textContent = `Fehler: ${err.message}`;
-            }
-          });
-          li.appendChild(updateBtn);
-        }
-
-        // "Deinstallieren" - retracts the registration (`unregisterApp()`) AND best-effort clears
-        // this app's own GLOBAL content (`nullGlobalAppContent()`, `dev.js`'s own doc comment on
-        // both the "not a genuine deletion" caveat and why a visitor's own personal instance, if
-        // any, is never touched by this - self-owned content this app's registration never had
-        // write access to in the first place).
-        const uninstallBtn = doc.createElement('button');
-        uninstallBtn.type = 'button';
-        uninstallBtn.textContent = 'Deinstallieren';
-        uninstallBtn.addEventListener('click', async () => {
-          status.textContent = '';
-          try {
-            await unregisterApp(mainSpace, { prefix: app.prefix });
-            await nullGlobalAppContent(mainSpace, app.prefix);
+            await setAppMode(mainSpace, { prefix: app.prefix, mode });
             await renderList();
           } catch (err) {
             status.textContent = `Fehler: ${err.message}`;
           }
         });
-        li.appendChild(uninstallBtn);
-        li.appendChild(status);
+        li.appendChild(btn);
       }
-      list.appendChild(li);
+
+      // "Update verfügbar" - only for a prefix installed FROM this console's own `APP_INSTALLERS`
+      // (`app.appType` set at registration time) whose bundle's CURRENT `version` is newer than
+      // what's actually installed (`app.bundleVersion`, absent entirely on an app registered
+      // before this versioning existed - treated as "0", i.e. always outdated, same posture a
+      // personal instance's own missing `data.bundleVersion` already gets - `installed-apps-
+      // actions.js`'s own `provisionPersonalInstance()` doc comment). A manually `registerApp()`ed
+      // app (no `appType`) never shows this - there is no known bundle to compare against.
+      const installer = app.appType ? resolveInstaller(app.appType) : null;
+      if (installer?.update && (app.bundleVersion ?? 0) < installer.version) {
+        const updateBtn = doc.createElement('button');
+        updateBtn.type = 'button';
+        updateBtn.textContent = 'Update verfügbar';
+        updateBtn.style.marginRight = '0.25rem';
+        updateBtn.addEventListener('click', async () => {
+          status.textContent = '';
+          try {
+            // `...(app.config ?? {})` - whatever install-time OPTIONS this prefix was last
+            // configured with (Blog's own `routeScheme`, kinds.js's `platformAppsKind` `config`
+            // doc comment) - re-applying an update must never silently drop back to that
+            // installer's own DEFAULTS just because this button doesn't otherwise know them.
+            await installer.update(mainSpace, { prefix: app.prefix, ...(app.config ?? {}) });
+            await setAppBundleVersion(mainSpace, { prefix: app.prefix, bundleVersion: installer.version });
+            await renderList();
+          } catch (err) {
+            status.textContent = `Fehler: ${err.message}`;
+          }
+        });
+        li.appendChild(updateBtn);
+      }
+
+      // "Deinstallieren" - retracts the registration (`unregisterApp()`) AND best-effort clears
+      // this app's own GLOBAL content (`nullGlobalAppContent()`, `dev.js`'s own doc comment on
+      // both the "not a genuine deletion" caveat and why a visitor's own personal instance, if
+      // any, is never touched by this - self-owned content this app's registration never had
+      // write access to in the first place).
+      const uninstallBtn = doc.createElement('button');
+      uninstallBtn.type = 'button';
+      uninstallBtn.textContent = 'Deinstallieren';
+      uninstallBtn.addEventListener('click', async () => {
+        status.textContent = '';
+        try {
+          await unregisterApp(mainSpace, { prefix: app.prefix });
+          await nullGlobalAppContent(mainSpace, app.prefix);
+          await renderList();
+        } catch (err) {
+          status.textContent = `Fehler: ${err.message}`;
+        }
+      });
+      li.appendChild(uninstallBtn);
+      li.appendChild(status);
     }
+    return li;
   }
+
+  /**
+   * EAT YOUR OWN DOG FOOD (this roadmap item's own stated goal): the app
+   * list used to be its own bespoke "clear the whole `<ul>`, rebuild every
+   * row" loop, duplicating the exact reconciliation `@qu/space-ui`'s
+   * `bindList()` already provides for `openLiveView()` (`view-actions.js`)
+   * and any list Field. `platform.resolveApps()` returns a plain,
+   * ALREADY-REDUCED array (last write per prefix wins - `platformAppsKind`'s
+   * own "ONLY ADDITIVE" doc comment), not a live `{toArray, observe}`
+   * source on its own, so `appsSource` below wraps it in the minimal such
+   * source `bindList()` needs. `key: app => app.prefix` is stable across a
+   * mode change/update (the SAME prefix, different fields) - only a row
+   * whose OWN content actually changed gets replaced, everything else
+   * stays untouched (no more losing scroll position/focus on every single
+   * button click the way a full rebuild used to).
+   */
+  let currentApps = [];
+  const appsListeners = new Set();
+  const appsSource = {
+    toArray: async () => currentApps,
+    observe(cb) {
+      appsListeners.add(cb);
+      return () => appsListeners.delete(cb);
+    },
+  };
+  /** Re-reads `platform.resolveApps()` and notifies `appsSource`'s own observer(s) - every mutation handler below calls this after a successful write, in place of the OLD "tear the whole list down and rebuild it" `renderList()`. */
+  async function renderList() {
+    if (!list) return;
+    currentApps = await platform.resolveApps({ timeout: 500 });
+    if (emptyState) emptyState.hidden = currentApps.length !== 0;
+    for (const cb of appsListeners) cb();
+  }
+  if (list) bindList(list, appsSource, { key: (app) => app.prefix, render: renderAppRow });
 
   const form = mountEl.querySelector('form[data-qu-action="register-app"]');
   if (form) {
