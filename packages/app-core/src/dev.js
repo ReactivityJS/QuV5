@@ -199,7 +199,16 @@ async function getOrSyncRegistryNode(space, registryKind, ownerPub = space.ident
   // never as whatever `id` was derived from) - for a shared list specifically, `ownerPub` here is
   // actually `sharedListAnchor()`'s content hash, not a real identity, so stamping IT as `ownerPub`
   // would be a meaningless value in a field meant to record who actually originated this Node.
-  if (!alreadyExists) stampMeta(node.doc, registryKind, space.identity.signingPub);
+  if (!alreadyExists) {
+    stampMeta(node.doc, registryKind, space.identity.signingPub);
+  } else {
+    // The meta-stamp only proves this Node was created at SOME point in the past - a fresh
+    // resubscribe (this call's own `useNode()` above) can observe that stamp long before the
+    // relay has replayed every LATER write (e.g. an `apps`/`names` list entry another caller
+    // pushed since). Without this, a caller right after (`setAppMode()` etc.) reads the list
+    // field before it is fully replayed and wrongly concludes an entry "is not registered."
+    await waitForSync(() => space.isNodeSynced(id), { timeout: 500, space, nodeId: id });
+  }
   return node;
 }
 

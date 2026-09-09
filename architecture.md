@@ -1020,6 +1020,37 @@ example.** Two compounding causes, both fixed together:
    and every single page (the edited root page included) renders correctly
    for a completely independent, anonymous visitor session afterward.
 
+**UPDATE - a third bug in this SAME family, again deployment-observed:
+`setAppMode()` throwing `"blog" is not a registered app - registerApp() it
+first` for a prefix that plainly WAS just registered.** `getOrSyncRegistryNode()`
+(above) checks `meta.get('kind')` to decide "does this registry already
+exist" - correct for THAT question, but `setAppMode()`/`registerApp()`/
+`setAppBundleVersion()`/`setAppConfig()`/`addSharedLists()`/
+`addGlobalViewNames()`/etc. (every one of them funnels through this same
+helper for `platformAppsKind`, the global `qu-platform-apps` registry) then
+go straight on to read the registry's `apps` list field - and the meta
+stamp being present only proves the Node was created at SOME point in the
+past, not that every LATER entry pushed to it (another relay-admin's
+`registerApp()` call, possibly still in flight) has actually finished
+replaying to THIS fresh subscription. `PlatformRuntime.resolveApps()`
+(`platform.js`, the admin console's own app-list source) had the identical
+weak gate one level up - waiting only for `apps.length > 0`, i.e. "at least
+one entry has arrived," not "every entry has." Fixed the same way as the
+`resolvePage()`/etc. fix earlier in this section: `getOrSyncRegistryNode()`
+now additionally waits on `space.isNodeSynced(id)` (via the existing
+event-driven `waitForSync()`) in its "registry already existed" branch
+before returning the Node, and `resolveApps()`'s own wait gates on
+`isNodeSynced()` instead of `apps.length`. Fixes every caller through this
+one shared helper at once, the same "one funnel, one fix" shape the
+registry helper itself was originally built for. Like the bug this section
+opens with, this exact race is inherently a real-network-latency
+phenomenon this project's in-process test hub cannot reliably force (its
+relay-to-subscriber delivery has no meaningful round-trip to lose against) -
+covered instead by a regression test (`platform.test.js`) that proves the
+fixed, `isNodeSynced()`-gated code path behaves correctly for the exact
+reported shape (several apps registered, then `setAppMode()` immediately
+against a brand-new Space connection, no held subscription to fall back on).
+
 **The relay's own unconfigured setup page is itself a working Qu identity
 tool, not just static instructions** (`build.mjs`'s `renderIndexHtml()`,
 the "neither QU_APP_ADMIN_PUB nor QU_RELAY_ADMINS is set" branch): it
