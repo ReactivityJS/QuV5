@@ -2343,6 +2343,46 @@ Blog/Guestbook/Forum side by side (Forum has no `personalBundle` at all -
 its own "Multi-User" button stays exactly as before, the control case
 proving the gate doesn't over-restrict).
 
+**UPDATE - Blog's `mode: 'personal'` aggregate feed, closing the gap the
+mode-button gating above documented.** Unlike Guestbook, a Blog post is a
+self-owned PAGE, not a shared-list entry, so there was no single
+cross-identity-readable source an aggregate View could merge for free.
+`blog-actions.js`'s personal-post CREATE path (never an EDIT - see below)
+now ALSO pushes a lightweight index entry (`{name: title, route, ts,
+ownerPub}`) into a shared list, `<prefix>:personal` (registered upfront,
+`admin-actions.js`'s `APP_INSTALLERS.blog.sharedLists` - the exact same
+"one physical list, many logical feeds" pattern Guestbook's own
+`<prefix>:personal` and `forum-bundle.js`'s topics/replies already
+establish); `blog-bundle.js`'s new `aggregateFeedViewFields()` reads it,
+installed unconditionally (harmless when `mode` never uses it, same
+posture as Guestbook's identically-named function). `admin-actions.js`'s
+`unsupportedModes()` (above) needed NO code change to re-enable the
+"Personal" button for Blog - it's entirely data-driven off `viewNames()`,
+which now includes `${prefix}-aggregate-feed` for Blog too.
+
+The pushed entry's own `route` is stored ABSOLUTE, with the `/u/<ownerRef>/`
+segment already baked in (`QuCrypto.toBase64Url()`, matching what `boot.js`'s
+`resolveUserRef()` decodes) - the aggregate feed renders OUTSIDE any one
+visitor's own `/u/<ref>/` context (`renderAggregateShell()` calls
+`wireViews()` with no `routeNamespace`/`userRef` at all), so `view-actions.js`'s
+`renderItem()` never rewrites this item's own link the way it would for a
+View rendered INSIDE that context - the route has to already be
+click-through-correct as stored. A REAL bug caught while writing this
+feature's own test: a genuinely anonymous, never-`joinSpace()`d reader
+cannot subscribe to a `'members'`-ACL shared list AT ALL (`relay.js`'s own
+subscribe-handler doc comment - membership gates reading it, not just
+writing), which at first looked like a broken aggregate feed; in a REAL
+deployment every visitor is already a member by the time they read
+anything (`shell.js`'s own boot sequence calls `joinSpace()` unconditionally
+before touching any Kind) - there is no genuinely anonymous, un-joined
+reader in this framework's actual model, only visitors who never happen to
+write. Scope cut, matching every other `editX()` in this codebase: editing
+an EXISTING personal post's title does NOT update its aggregate index
+entry's own cached title (`ListField` has no per-index update, only
+`push()`/`remove()`) - the entry's `route` always still resolves to the
+CURRENT content when followed, only the aggregate list's displayed title
+text could go stale after a title edit.
+
 **Still an open question, deliberately not decided in this pass**: apps
 whose EXECUTION LOGIC (not just content) lives in the filesystem/repo
 itself (`/packages/app-modules/<Name>/`, administratively enabled via

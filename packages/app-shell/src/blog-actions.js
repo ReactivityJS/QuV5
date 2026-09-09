@@ -91,6 +91,15 @@
  * `editPage()`/`editGlobalPage()` instead of `createPage()`/
  * `createGlobalPage()` - no `publishRoute()`/`publishGlobalRoute()` needed,
  * the route already exists.
+ *
+ * AGGREGATE INDEX (`mode: 'personal'`'s own read-only merged feed,
+ * `blog-bundle.js`'s `aggregateFeedViewFields()`): every NEW personal post
+ * (never an EDIT of an existing one - see `pushAggregateIndexEntry()`'s own
+ * doc comment) pushes a small index entry into the shared list
+ * `<prefix>:personal`, right after the post itself is durably confirmed.
+ * This is the ONLY thing that makes `mode: 'personal'` possible for Blog at
+ * all (unlike Guestbook, a Blog post is a self-owned PAGE, not a
+ * shared-list entry, with no cross-identity discovery mechanism otherwise).
  */
 import {
   createGlobalPage,
@@ -106,7 +115,12 @@ import {
   editPage,
   editGlobalPage,
   ContentResolver,
+  pushToSharedList,
+  sharedListAnchor,
+  sharedListKind,
 } from '@qu/app-core';
+import { deriveOwnerNodeId } from '@qu/space-core';
+import { QuCrypto } from '@qu/core';
 import { verifyWritesAcked } from './verify-writes.js';
 import { resolvePlaceholders } from './qu-placeholders.js';
 
@@ -134,6 +148,33 @@ async function publishGlobalPost(space, prefix, { route, title, content }) {
 function toGlobalRouteTemplate(personalTemplate, prefix) {
   const ns = `/${prefix}`;
   return personalTemplate.startsWith(ns) ? personalTemplate.slice(ns.length) || '/post/{slug}' : '/post/{slug}';
+}
+
+/**
+ * Pushes ONE index entry `{name: title, route, ts, ownerPub}` into
+ * `<prefix>:personal` - `blog-bundle.js`'s own `aggregateFeedViewFields()`
+ * doc comment on why this is what actually makes `mode: 'personal'`'s
+ * aggregate feed possible for a self-owned-PAGE app like Blog (unlike
+ * Guestbook, whose shared-list entry already IS the visible content).
+ * `route` is stored ABSOLUTE, with the `/u/<ownerRef>/` segment already
+ * baked in (`QuCrypto.toBase64Url()` - the SAME base64url encoding
+ * `boot.js`'s own `resolveUserRef()` decodes) - the aggregate feed renders
+ * outside any one visitor's own `/u/<ref>/` context (`boot.js`'s
+ * `renderAggregateShell()` calls `wireViews()` with no `routeNamespace`/
+ * `userRef` at all, unlike a personal-instance render), so `view-actions.js`'s
+ * `renderItem()` never rewrites this item's own link the way it would for a
+ * View rendered INSIDE that context - the route has to already be
+ * click-through-correct as stored.
+ * @param {import('@qu/space-core').Space} space @param {string} prefix
+ * @param {{personalRoute: string, title: string}} params - `personalRoute` is the UNPREFIXED-by-owner route this post was just saved at (`/<prefix>/post/<slug>`).
+ */
+async function pushAggregateIndexEntry(space, prefix, { personalRoute, title }) {
+  const listName = `${prefix}:personal`;
+  const ownerRef = QuCrypto.toBase64Url(space.identity.signingPub);
+  const route = `/${prefix}/u/${ownerRef}${personalRoute.slice(prefix.length + 1)}`;
+  const entry = { name: title, route, ts: Date.now(), ownerPub: QuCrypto.toBase64(space.identity.signingPub) };
+  const id = await deriveOwnerNodeId(await sharedListAnchor(listName), sharedListKind.kind);
+  await verifyWritesAcked(space, id, () => pushToSharedList(space, listName, entry));
 }
 
 /** @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space}} params */
@@ -221,6 +262,11 @@ export function wireBlog({ mountEl, doc, space }) {
             await createPage(space, { route, title, content });
             await publishRoute(space, { route, title });
           });
+          // Indexes this NEW post into the aggregate feed - see `pushAggregateIndexEntry()`'s own
+          // doc comment. AFTER the post itself is durably acked, never before - a stale index entry
+          // pointing at a not-yet-synced post would be worse than a brief delay before it appears
+          // here (the post is already live at its own route regardless, just not indexed yet).
+          await pushAggregateIndexEntry(space, prefix, { personalRoute: route, title });
           if (alsoGlobalCheckbox?.checked) {
             const globalRoute = resolvePlaceholders(toGlobalRouteTemplate(routeTemplate, prefix), { space, fields: { slug } });
             await publishGlobalPost(space, prefix, { route: globalRoute, title, content });

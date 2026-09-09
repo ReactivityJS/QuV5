@@ -264,7 +264,7 @@ test('Blog: an ordinary visitor edits their OWN personal post inline via the "Be
   }
 });
 
-test('Admin console: mode buttons are disabled for a mode that would silently break the app - "Multi-User" for Blog/Guestbook, "Personal" only for Blog', async () => {
+test('Admin console: "Multi-User" is disabled for Blog/Guestbook (own personalBundle); "Personal" is enabled for both now that Blog also builds an aggregate feed', async () => {
   const relay = await bootRelay();
   try {
     const adminSpace = await relay.connect(relay.relayAdmin);
@@ -286,7 +286,7 @@ test('Admin console: mode buttons are disabled for a mode that would silently br
     assert.equal(modeBtn('book', 'Nur Persönlich').disabled, false, 'Guestbook already builds an aggregate feed - Personal works');
 
     assert.equal(modeBtn('blog', 'Multi-User').disabled, true, 'Blog has its own personalBundle - Multi-User would ignore it');
-    assert.equal(modeBtn('blog', 'Nur Persönlich').disabled, true, 'Blog builds no aggregate feed yet - Personal would render permanently empty');
+    assert.equal(modeBtn('blog', 'Nur Persönlich').disabled, false, 'Blog now builds an aggregate feed too - Personal works (blog-aggregate-feed.test.js proves it end to end)');
 
     assert.equal(modeBtn('forum', 'Multi-User').disabled, false, 'Forum has no personalBundle at all - Multi-User behaves exactly as documented');
 

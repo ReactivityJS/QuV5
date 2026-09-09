@@ -17,19 +17,25 @@
  * through the upsert-based update once made every fresh install pay a
  * multi-second doomed-`edit()` cost for no benefit).
  *
- * `mode: 'personal'`'s own aggregate feed (kinds.js's `platformAppsKind` doc
- * comment) is DELIBERATELY NOT built here yet - unlike Guestbook's shared
- * list (already a single, cross-owner-readable source an aggregate View can
- * merge for free), a Blog post is a self-owned PAGE with no cross-identity
- * discovery mechanism at all; aggregating "every visitor's own posts"
- * without one would need each personal post to ALSO register itself into a
- * shared index (the same pattern `forum-bundle.js`'s topics/replies already
- * use) - real, separate follow-up work, not attempted in this pass. `mode:
- * 'personal'` is DISABLED in the admin console for a Blog registered from
- * THIS installer (`admin-actions.js`'s own mode-button doc comment) -
- * exactly BECAUSE of the empty-aggregate-feed gap above, not a separate
- * decision - once this gap closes, removing it from the disable-list there
- * is the only change needed to re-enable the button.
+ * UPDATE - `mode: 'personal'`'s own aggregate feed now exists: unlike
+ * Guestbook, a Blog post is a self-owned PAGE, not a shared-list entry, so
+ * there was no single cross-identity-readable source an aggregate View
+ * could merge for free - `blog-actions.js`'s own personal-post CREATE path
+ * now ALSO pushes a lightweight index entry (`{name: title, route, ts,
+ * ownerPub}`) into a shared list, `<prefix>:personal` (registered upfront,
+ * `admin-actions.js`'s own `APP_INSTALLERS.blog.sharedLists` - the exact
+ * same "one physical list, many logical feeds" pattern `forum-bundle.js`'s
+ * topics/replies and Guestbook's own `<prefix>:personal` already
+ * establish), which `aggregateFeedViewFields()` below reads. Post EDITS do
+ * NOT update this index entry's own cached title - the SAME "no rename/no
+ * full update" scope cut every other `editX()` in this codebase already
+ * accepts (`ListField` has no per-index update, only `push()`/`remove()`) -
+ * the entry's own `route` always still resolves to the CURRENT content,
+ * only the aggregate list's displayed title text could go stale after an
+ * edit. `admin-actions.js`'s own mode-button gating (`unsupportedModes()`)
+ * is entirely DATA-DRIVEN off `viewNames()` - no separate "re-enable"
+ * change was needed there once this file's own `viewNames` gained
+ * `${prefix}-aggregate-feed`.
  *
  * UPDATE - "klare Pfade": Global Feed (`#/<prefix>/`) and User Feed
  * (`#/<prefix>/u/me/`) now cross-link each other and each label itself as
@@ -66,11 +72,13 @@ import { upsertGlobalPage, upsertGlobalView, upsertPage, upsertView } from './bu
 import { ROUTE_SCHEMES } from './src/qu-placeholders.js';
 
 /** Bumped whenever this bundle's own shipped content changes - see `guestbook-bundle.js`'s own `GUESTBOOK_VERSION` doc comment, identical reasoning. */
-export const BLOG_VERSION = 2;
+export const BLOG_VERSION = 3;
 
 /** `data-qu-blog-edit-link` - ALWAYS present on the personal template (it's always the visitor's own post, no ACL question), wrapped in `data-qu-admin-only` on the global one (`blog-actions.js`'s `wireBlog()` shows/hides every `[data-qu-admin-only]` element the same way it already gates the post-forms below - only a relay-admin can actually save an edit to a GLOBAL post, `adminPageKind`'s own `acl.write: 'relay-admins'`). `wireBlog()` reads the sibling `[data-qu-view-link]`'s own already-resolved `href` (`view-actions.js`'s `renderItem()` sets it) to know which post this edit link belongs to - no separate id/route attribute needed here. */
 const PERSONAL_ITEM_TEMPLATE = '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a> <a href="#" data-qu-blog-edit-link>✎ Bearbeiten</a></p>';
 const GLOBAL_ITEM_TEMPLATE = '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a> <a href="#" data-qu-blog-edit-link data-qu-admin-only hidden>✎ Bearbeiten</a></p>';
+/** Read-only - no edit link at all (`aggregateFeedViewFields()`'s own doc comment: this merges EVERY visitor's own posts, editing one is only ever meaningful from that visitor's OWN personal feed, `PERSONAL_ITEM_TEMPLATE` above). */
+const AGGREGATE_ITEM_TEMPLATE = '<p><a data-qu-view-link><qu-slot name="title"></qu-slot></a></p>';
 
 /** `routeScheme` -> this bundle's own `{slug}`-ending route TEMPLATE (this file's own top doc comment) - `'flat'`/unset falls back to the pre-existing, unprefixed `/post/{slug}` unchanged. */
 function routeTemplate(routeScheme) {
@@ -100,12 +108,27 @@ function globalIndexViewFields(prefix) {
   return { name: `${prefix}-index`, sources: [{ type: 'pages', prefix: '/post/' }], sortBy: 'title', sortOrder: 'asc', itemTemplate: GLOBAL_ITEM_TEMPLATE };
 }
 
+/**
+ * The read-only, UNFILTERED merge of `<prefix>:personal` (the same shared
+ * list every visitor's own personal blog's CREATE path pushes an index
+ * entry into, `blog-actions.js`'s own doc comment) - `boot.js`'s
+ * `renderAggregateShell()`/kinds.js's `platformAppsKind` doc comment on why
+ * `mode: 'personal'` needs it. Installed unconditionally, regardless of
+ * this app's current `mode` - cheap to always have, harmless when `mode`
+ * never uses it (same posture `guestbook-bundle.js`'s own identically-named
+ * function already takes).
+ */
+function aggregateFeedViewFields(prefix) {
+  return { name: `${prefix}-aggregate-feed`, sources: [{ type: 'shared-list', name: `${prefix}:personal` }], sortBy: 'timestamp', sortOrder: 'desc', itemTemplate: AGGREGATE_ITEM_TEMPLATE };
+}
+
 /** @param {import('@qu/space-core').Space} space @param {{prefix: string, routeScheme?: 'flat'|'yyyy'|'yyyy/mm'|'yyyy/mm/dd'}} params */
 export async function installBlog(space, { prefix, routeScheme }) {
   await publishGlobalRoute(space, prefix, { route: '/', title: 'Blog' });
   await new Promise((resolve) => setTimeout(resolve, 400));
   await createGlobalPage(space, prefix, globalPageFields(prefix, routeScheme));
   await createGlobalView(space, prefix, globalIndexViewFields(prefix));
+  await createGlobalView(space, prefix, aggregateFeedViewFields(prefix));
 }
 
 /**
@@ -127,6 +150,7 @@ export async function updateBlog(space, { prefix, routeScheme }) {
   await publishGlobalRoute(space, prefix, { route: '/', title: 'Blog' });
   await upsertGlobalPage(space, prefix, globalPageFields(prefix, routeScheme));
   await upsertGlobalView(space, prefix, globalIndexViewFields(prefix));
+  await upsertGlobalView(space, prefix, aggregateFeedViewFields(prefix));
 }
 
 /**

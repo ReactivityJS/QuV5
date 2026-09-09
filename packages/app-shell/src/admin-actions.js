@@ -144,8 +144,8 @@ const APP_INSTALLERS = {
     install: installBlog,
     update: updateBlog,
     version: BLOG_VERSION,
-    sharedLists: () => [],
-    viewNames: (prefix) => [`${prefix}-index`],
+    sharedLists: (prefix) => [`${prefix}:personal`],
+    viewNames: (prefix) => [`${prefix}-index`, `${prefix}-aggregate-feed`],
     personalBundle: 'blog',
   },
   forum: {
@@ -192,16 +192,14 @@ function resolveInstaller(appType) {
  *     app that already has its own personal content shape).
  *   - `'personal'` - disabled when this app's OWN installer (`app.appType`
  *     -> `resolveInstaller()`) is KNOWN and its `viewNames()` do NOT
- *     include an aggregate/personal-feed-named View (Guestbook's own
- *     `${prefix}-aggregate-feed` vs. Blog's `${prefix}-index` only,
- *     `APP_INSTALLERS`' own entries above) - `mode: 'personal'` renders a
- *     read-only feed at exactly that well-known name (`boot.js`'s
- *     `renderAggregateShell()`), so an app that never creates it gets a
- *     permanently empty feed (`blog-bundle.js`'s own doc comment on this
- *     exact, deliberately-deferred gap). An app with NO known installer (a
- *     bare `registerApp()`, no `appType` match) is left unrestricted here -
- *     nothing to check it against, same "anything goes" behavior as before
- *     this function existed.
+ *     include an aggregate/personal-feed-named View (`APP_INSTALLERS`' own
+ *     entries above - both Guestbook's `${prefix}-aggregate-feed` and
+ *     Blog's now build one) - `mode: 'personal'` renders a read-only feed
+ *     at exactly that well-known name (`boot.js`'s `renderAggregateShell()`),
+ *     so an app that never creates it gets a permanently empty feed. An app
+ *     with NO known installer (a bare `registerApp()`, no `appType` match)
+ *     is left unrestricted here - nothing to check it against, same
+ *     "anything goes" behavior as before this function existed.
  * @param {{personalBundle?: string, appType?: string, prefix: string}} app
  * @returns {Set<'multiuser'|'personal'>}
  */
