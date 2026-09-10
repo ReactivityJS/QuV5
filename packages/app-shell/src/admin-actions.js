@@ -75,6 +75,7 @@ import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbo
 import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
 import { installForum } from '../forum-bundle.js';
 import { installGlobalCms, cmsBundle } from '../cms-bundle.js';
+import { updateAdminConsole, ADMIN_CONSOLE_VERSION } from '../admin-console-bundle.js';
 import { verifyWritesAcked } from './verify-writes.js';
 import { discoveredApps } from '../apps-registry.generated.js';
 import { setFormStatus } from './form-status.js';
@@ -163,6 +164,26 @@ const APP_INSTALLERS = {
     install: installForum,
     sharedLists: (prefix) => [`${prefix}:topics`, `${prefix}:replies`],
     viewNames: (prefix) => [`${prefix}-topics`],
+  },
+  /**
+   * The built-in admin console itself - no `install` (it's never seeded
+   * through the generic "install-app" form, only `bin/install-admin-
+   * console.mjs`/`bin/bootstrap-platform.mjs`, both of which now register
+   * it with `appType: 'admin-console'`/`bundleVersion: ADMIN_CONSOLE_VERSION`
+   * so THIS entry's `update`/`version` apply to it exactly like any
+   * reference app's own "Update verfügbar" button - a relay-admin no
+   * longer needs to know a CLI script even exists to pick up a NEW
+   * `admin-console-bundle.js` (e.g. this round's own "Editor-Einstellungen"
+   * form). A deployment bootstrapped BEFORE this existed has no `appType`
+   * on its already-registered "admin" entry yet - one re-run of
+   * `bin/install-admin-console.mjs` (still safe, see that file's own doc
+   * comment) backfills it; every future update after that needs only this
+   * button.
+   */
+  'admin-console': {
+    label: 'Relay-Admin (Admin-Konsole)',
+    update: updateAdminConsole,
+    version: ADMIN_CONSOLE_VERSION,
   },
 };
 

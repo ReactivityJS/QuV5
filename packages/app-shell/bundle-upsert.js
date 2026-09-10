@@ -40,6 +40,8 @@ import {
   editGlobalPage,
   createGlobalView,
   editGlobalView,
+  createGlobalTemplate,
+  editGlobalTemplate,
   createPage,
   editPage,
   createView,
@@ -60,6 +62,14 @@ export function upsertGlobalPage(space, prefix, fields) {
   return upsert(
     () => editGlobalPage(space, prefix, fields),
     () => createGlobalPage(space, prefix, fields)
+  );
+}
+
+/** `@qu/app-core`'s `editGlobalTemplate()`/`createGlobalTemplate()` pair, upserted - see this file's own top doc comment. */
+export function upsertGlobalTemplate(space, prefix, fields) {
+  return upsert(
+    () => editGlobalTemplate(space, prefix, fields),
+    () => createGlobalTemplate(space, prefix, fields)
   );
 }
 

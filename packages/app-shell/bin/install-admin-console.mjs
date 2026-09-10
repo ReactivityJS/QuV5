@@ -50,7 +50,7 @@ import { QuCrypto } from '@qu/core';
 import { Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport';
 import { installGlobalAppBundle, registerApp, publishGlobalRoute } from '@qu/app-core';
-import { adminConsoleBundle } from '../admin-console-bundle.js';
+import { adminConsoleBundle, ADMIN_CONSOLE_VERSION } from '../admin-console-bundle.js';
 
 /**
  * Tracks every LOCAL write this Space issues and whether the relay actually
@@ -145,7 +145,13 @@ async function main() {
   const writes = trackWrites(bus);
 
   console.log(`Registering the "${prefix}" alias…`);
-  await registerApp(space, { prefix, name, realm: 'global' });
+  // `appType`/`bundleVersion` - so the admin console's OWN "Update verfügbar" button
+  // (`admin-actions.js`'s `APP_INSTALLERS['admin-console']`) applies to it too, exactly like any
+  // reference app - a relay-admin no longer needs to know THIS script exists to pick up a later
+  // admin-console-bundle.js change. Re-running this script (even against an already-registered
+  // prefix - registerApp()'s own "push a newer entry, last one wins" doc comment) is how an
+  // EXISTING deployment (registered before this versioning existed) backfills both fields once.
+  await registerApp(space, { prefix, name, realm: 'global', appType: 'admin-console', bundleVersion: ADMIN_CONSOLE_VERSION });
   await new Promise((resolve) => setTimeout(resolve, 1000)); // let the relay's live resolver observe the new prefix and start watching its route registry.
 
   console.log('Publishing its route(s)…');

@@ -135,7 +135,7 @@ import { Space } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport';
 import { EventBus } from '@qu/events';
 import { installGlobalAppBundle, registerApp, publishGlobalRoute, createGlobalApp, createGlobalPage, PlatformRuntime, ContentResolver, adminAppManifestKind, globalAppAnchor } from '@qu/app-core';
-import { adminConsoleBundle } from '../admin-console-bundle.js';
+import { adminConsoleBundle, ADMIN_CONSOLE_VERSION } from '../admin-console-bundle.js';
 import { cmsBundle, installGlobalCms } from '../cms-bundle.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -361,7 +361,9 @@ async function main() {
   const existingApps = await platform.resolveApps({ timeout: 800 });
   if (!existingApps.some((a) => a.prefix === 'admin')) {
     console.log('  registering the "admin" alias...');
-    await registerApp(mainSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'global' });
+    // `appType`/`bundleVersion` - see `install-admin-console.mjs`'s own doc comment on the same
+    // addition: lets the admin console's own "Update verfügbar" button apply to it too.
+    await registerApp(mainSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'global', appType: 'admin-console', bundleVersion: ADMIN_CONSOLE_VERSION });
     await waitUntilAllWritesAcked(mainWrites);
     await new Promise((resolve) => setTimeout(resolve, 300)); // let the relay's live resolver start watching "admin"'s own route registry.
   } else {

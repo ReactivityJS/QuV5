@@ -1448,6 +1448,43 @@ nicht sichtbar." Two changes address this:
      is for, that "Sichtbarkeit" is the mode-toggle group) - purely
      structural, every existing class/placeholder/button text a test or
      caller depends on is unchanged.
+7. **The admin console itself now offers its own "Update verfügbar"
+   button** - closes a real gap: a relay-admin previously had no way to
+   pick up a NEW `admin-console-bundle.js` (this round's own "Editor-
+   Einstellungen" checkbox included) short of re-running `bin/install-
+   admin-console.mjs` from a terminal. Now it's the exact same in-app
+   affordance Guestbook/Blog/Forum already have:
+   - `admin-console-bundle.js` gains `ADMIN_CONSOLE_VERSION` and
+     `updateAdminConsole(space, {prefix})`, which re-applies this file's
+     own `templates`/`pages` IN PLACE via two new `bundle-upsert.js`
+     helpers (`upsertGlobalTemplate`, alongside the existing
+     `upsertGlobalPage`) - edit-first, create-as-fallback, the SAME safe
+     pattern Guestbook/Blog's own `updateX()` already use, never a raw
+     `createGlobalTemplate()`/`createGlobalPage()` re-call against a Node
+     that already exists.
+   - `admin-actions.js`'s `APP_INSTALLERS['admin-console']` entry (no
+     `install` - the admin console is never seeded through the generic
+     "install-app" form) wires this into the SAME generic "Update
+     verfügbar" button logic every reference app's row already renders -
+     no per-row special-casing needed.
+   - **The gap this doesn't close on its own**: an ALREADY-deployed
+     relay's `admin` registry entry (registered before this existed) has
+     no `appType` yet, so the button won't show for it. `bin/install-
+     admin-console.mjs` and `bin/bootstrap-platform.mjs` now both pass
+     `appType: 'admin-console', bundleVersion: ADMIN_CONSOLE_VERSION` to
+     their own `registerApp()` calls - one re-run of `install-admin-
+     console.mjs` (already the documented, safe-to-repeat way to push
+     updated content) backfills both fields once; every update after that
+     needs only the button.
+   - Verified end to end (`installed-apps.test.js`): register with
+     `appType: 'admin-console'`/`bundleVersion: 0`, click "Update
+     verfügbar", confirm `bundleVersion` becomes `ADMIN_CONSOLE_VERSION`
+     and a FRESH visitor sees the newly upserted content. Caught (and
+     documented in the test itself) a real test-authoring race along the
+     way: firing a SECOND `router.navigate()` before the FIRST onChange's
+     own async tail work had settled let the stale first render win,
+     overwriting the real page - fixed by awaiting the initial render
+     before touching the registry at all, not a bug in the feature itself.
 
 **UPDATE - ADMIN CONSOLE EATS ITS OWN DOG FOOD (`admin-actions.js`'s
 installed-apps list).** The app list used to be its own bespoke "clear
