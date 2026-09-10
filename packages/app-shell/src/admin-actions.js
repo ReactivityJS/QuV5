@@ -53,6 +53,12 @@
  *     `nullGlobalAppContent()` - `dev.js`'s own doc comments on both, and on
  *     why a visitor's own personal instance is never reachable by either).
  *
+ *   - `<form data-qu-action="set-platform-config">` with a `name="richTextEditor"`
+ *     checkbox - `setPlatformConfig()`, one PLATFORM-WIDE settings bag
+ *     (`kinds.js`'s own `platformAppsKind.platformConfig` doc comment),
+ *     unlike every other form above which is per-app. Read back and shown
+ *     checked/unchecked on load via `platform.resolvePlatformConfig()`.
+ *
  * WRITE-ACL, not this file, is what actually gates every write here:
  * `registerApp()`/`setAppMode()` both write `qu-platform-apps`, a
  * `'relay-admins'`-ACL Kind only an identity listed in the relay's own
@@ -63,7 +69,7 @@
  * gate keeps `#/admin/...` from rendering for them at all.
  */
 import { QuCrypto } from '@qu/core';
-import { registerApp, setAppMode, setAppBundleVersion, setAppConfig, addSharedLists, addGlobalTemplateNames, unregisterApp, nullGlobalAppContent, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
+import { registerApp, setAppMode, setAppBundleVersion, setAppConfig, setPlatformConfig, addSharedLists, addGlobalTemplateNames, unregisterApp, nullGlobalAppContent, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
 import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
@@ -439,6 +445,31 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
     for (const cb of appsListeners) cb();
   }
   if (list) bindList(list, appsSource, { key: (app) => app.prefix, render: renderAppRow });
+
+  // "Editor-Einstellungen" - `admin-console-bundle.js`'s own doc comment on this form: a SINGLE
+  // platform-wide flag (`platformAppsKind.platformConfig.richTextEditor`), not a per-app registry
+  // entry, so it's wired independently of the `apps` list above/`renderAppRow()` below. Reflects
+  // the CURRENT live value on load (`platform.resolvePlatformConfig()`, the same "read fresh, no
+  // caching" source `boot.js`'s own `startPlatform()` re-reads on every route render) - a relay-admin
+  // who reloads `#/admin` sees the setting they last saved, not a form that's silently reset to
+  // unchecked.
+  const platformConfigForm = mountEl.querySelector('form[data-qu-action="set-platform-config"]');
+  if (platformConfigForm) {
+    const checkbox = platformConfigForm.querySelector('input[name="richTextEditor"]');
+    platform.resolvePlatformConfig().then((config) => {
+      if (checkbox) checkbox.checked = Boolean(config.richTextEditor);
+    });
+    platformConfigForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      setFormStatus(platformConfigForm, '');
+      try {
+        await setPlatformConfig(mainSpace, { richTextEditor: checkbox.checked });
+        setFormStatus(platformConfigForm, 'Gespeichert - gilt sofort, auch für bereits verbundene Besucher.');
+      } catch (err) {
+        setFormStatus(platformConfigForm, `Fehler: ${err.message}`);
+      }
+    });
+  }
 
   const form = mountEl.querySelector('form[data-qu-action="register-app"]');
   if (form) {

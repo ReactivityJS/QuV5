@@ -29,6 +29,20 @@
  *     oversight). `visibility: 'public'` text (e.g. a public wiki page
  *     body) skips that outer wrapping too - genuinely plaintext end to end.
  *
+ *   'richtext': backed by a real Y.XmlFragment - `TextField`'s own
+ *     "backed by a real Y.Text" entry above, same reasoning, just
+ *     ProseMirror's STRUCTURED document model (nested block/inline nodes -
+ *     headings, lists, marks) instead of `'text'`'s flat character stream.
+ *     Also never field-level-encrypted, for the identical reason: Yjs'
+ *     merge algorithm needs the actual tree/ops, not an opaque blob.
+ *     `field.yxml` is the direct handle - `@qu/space-editor-prosemirror`'s
+ *     `bindCollabRichText()` (an OPTIONAL, separate package - never a
+ *     dependency of this one) binds `y-prosemirror`'s `ySyncPlugin`
+ *     straight to it for real multi-peer live editing. A caller wanting
+ *     `'text'`-shape "type into a plain HTML textarea, sync on save" (no
+ *     live collaboration) keeps using `'text'` - the two shapes are
+ *     independent choices, not a v1/v2 of each other.
+ *
  *   'list': a top-level Y.Array of items - `visibility: 'encrypted'` items
  *     are individually QuCrypto-encrypted (same shape as an atomic field);
  *     `visibility: 'public'` items are the raw pushed value. Concurrent
@@ -215,6 +229,44 @@ class TextField {
   }
 }
 
+class RichTextField {
+  // See TextField's own doc comment above - identical reasoning, just a
+  // Y.XmlFragment instead of a Y.Text: never auto-created/cached, always
+  // pre-created by the creating peer (node.js's stampMeta()).
+  constructor(contentMap, key, doc, visibility, kindSchema) {
+    this._map = contentMap;
+    this._key = key;
+    this._doc = doc;
+    this._visibility = visibility;
+    this._kindSchema = kindSchema;
+  }
+
+  /** Direct handle to the underlying Y.XmlFragment - bind `y-prosemirror`'s `ySyncPlugin` straight to this, no wrapper needed (see `@qu/space-editor-prosemirror`'s `bindCollabRichText()`). Throws if this Node's creation envelope has not synced yet - same reasoning as `TextField.ytext`. */
+  get yxml() {
+    const yxml = this._map.get(this._key);
+    if (!yxml) throw new Error(`RichTextField("${this._key}"): not synced yet - this Node's creation envelope has not arrived`);
+    return yxml;
+  }
+
+  /** Plain-text snapshot (every mark/node boundary stripped, `Y.XmlFragment.toString()`'s own tag-inclusive form is NOT what this returns - see below) - for a caller that just wants a quick preview/excerpt without pulling in a DOM renderer. */
+  get() {
+    const yxml = this._map.get(this._key);
+    if (!yxml) return '';
+    // Y.XmlFragment.toString() renders its own XML tags inline (e.g. `<paragraph>hi</paragraph>`) -
+    // stripped here with a bare regex (this framework's own content, not third-party/adversarial
+    // input - same "good enough for a snippet" posture `dev.js`'s `excerptFromHtml()` already takes).
+    return yxml.toString().replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  /** @param {(delta: Array<object>) => void} callback - Yjs' own delta, same shape `TextField.observe()`'s own callback gets. */
+  observe(callback) {
+    const yxml = this.yxml;
+    const handler = (event) => callback(event.delta);
+    yxml.observe(handler);
+    return () => yxml.unobserve(handler);
+  }
+}
+
 class ListField {
   constructor(yarray, ctx, doc, visibility) {
     this._yarray = yarray;
@@ -292,7 +344,7 @@ class ListField {
 }
 
 /**
- * @param {{shape: 'atomic'|'text'|'list', visibility: 'encrypted'|'public'}} fieldDecl
+ * @param {{shape: 'atomic'|'text'|'list'|'richtext', visibility: 'encrypted'|'public'}} fieldDecl
  * @param {Y.Map} contentMap
  * @param {Y.Doc} doc
  * @param {string} name
@@ -303,6 +355,7 @@ export function createField(fieldDecl, { contentMap, doc, name, ctx }) {
   if (shape === 'atomic') return new AtomicField(contentMap, name, ctx, doc, visibility);
   if (shape === 'text') return new TextField(contentMap, name, doc, visibility, ctx.kindSchema);
   if (shape === 'list') return new ListField(doc.getArray(name), ctx, doc, visibility);
+  if (shape === 'richtext') return new RichTextField(contentMap, name, doc, visibility, ctx.kindSchema);
   throw new Error(`createField: unknown shape "${shape}"`);
 }
 

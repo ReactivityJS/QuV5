@@ -373,6 +373,34 @@ export const platformAppsKind = publicMeta(
        * pattern, just more fields deep now.
        */
       apps: { shape: 'list', visibility: 'public' },
+      /**
+       * PLATFORM-WIDE (not per-app) admin settings - a small, free-form JSON
+       * bag, same "no shape imposed, whole-object last-write-wins" posture
+       * as `apps[].config` one level up, just scoped to the WHOLE platform
+       * instead of one prefix (`dev.js`'s `setPlatformConfig()` merges by
+       * key, same convention as `setAppConfig()`). `'atomic'`-shape, not
+       * `'list'` - there is only ever ONE current settings object, no
+       * "history of states per prefix" reason to keep every past value the
+       * way `apps` does.
+       *
+       * First (and so far only) key: `richTextEditor: boolean` - when
+       * `true`, `@qu/app-shell`'s `startPlatform()` binds every
+       * `[data-qu-richtext]` field platform-wide to the optional
+       * `@qu/space-editor-prosemirror` WYSIWYG editor instead of
+       * `@qu/space-ui`'s bare built-in one, with NO relay restart/redeploy -
+       * this field is read fresh on every route render, same live-without-
+       * reload posture `match.config`/`resolveApps()` already have (see
+       * `boot.js`'s own doc comment on `richTextBind`). Admin console UI:
+       * `admin-console-bundle.js`'s `<form data-qu-action="set-platform-
+       * config">`, wired by `admin-actions.js`. Whether any GIVEN field
+       * shows a rich-text editor AT ALL remains a template-author decision
+       * (the `data-qu-richtext` attribute on that one `<textarea>`, unrelated
+       * to this flag) - this setting only decides which BINDING a marked
+       * field gets, never adds the capability to fields that never asked
+       * for it in the first place ("nicht jedes Eingabefeld braucht einen
+       * WYSIWYG-Editor").
+       */
+      platformConfig: { shape: 'atomic', visibility: 'public' },
     },
     acl: { write: 'relay-admins' },
   })

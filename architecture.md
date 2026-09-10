@@ -1272,6 +1272,149 @@ again without touching the registry) - a lower-level, faster, and more
 robust test surface than driving the same transitions through a
 browser-simulated relay-admin click sequence.
 
+**UPDATE - A REAL, YJS-BACKED WYSIWYG EDITOR (replaces the OLD hand-rolled
+`bindRichText()`).** User feedback on the first rich-text pass: the
+`Range`/`Selection`-based editor was unpleasant to use, and the shared
+base stylesheet didn't exist yet, so its own surface (and a plain
+`<textarea>`) had no visible border/min-height at all - "Body-Feld gar
+nicht sichtbar." Two changes address this:
+
+1. **`@qu/space-core` gains a new field shape, `'richtext'`** (`kind-schema.js`'s
+   `SHAPES`, `node.js`'s `stampMeta()`, `field.js`'s new `RichTextField`) -
+   backed by a real `Y.XmlFragment`, ProseMirror's structured document
+   model (nested block/inline nodes), unlike `'text'`'s flat `Y.Text`
+   (fine for plain character-stream editing, too flat for headings/lists
+   as real nodes). `field.yxml` is the direct handle - "bind ProseMirror/
+   y-prosemirror straight to it," the SAME pattern `TextField.ytext`
+   already established for Quill/ProseMirror-on-Y.Text. Purely additive:
+   `pageKind`/`content` stays `'text'` - Blog's draft/publish model
+   (`resolvePage()`'s `includeDrafts` gate, `blog-actions.js`'s own submit
+   flow) is completely unaffected; `'richtext'` is a genuinely independent
+   choice for a field that wants LIVE Yjs collaboration instead.
+2. **A new, OPTIONAL package, `@qu/space-editor-prosemirror`** - never a
+   dependency of `@qu/app-shell`/`@qu/space-ui` (an app opts in by
+   installing and importing it directly, `@qu/app-shell`'s own
+   `package.json` only lists it as a DEV dependency, for its own
+   integration test). Two editors, sharing one schema
+   (`prosemirror-schema-basic` + `prosemirror-schema-list`'s list nodes -
+   the same well-exercised combination most ProseMirror apps start from)
+   and one toolbar (`toolbar.js` - Bold/Italic/Link/H2/bullet-list,
+   feature parity with the old editor, built on `prosemirror-commands`
+   instead of hand-rolled `Range` manipulation, so formatting always
+   produces a schema-valid document):
+   - `bindLocalRichText(textareaEl)` - a DROP-IN replacement for `@qu/space-ui`'s
+     old `bindRichText()` (identical `{refresh, stop}` contract, mirrors
+     into `.value`, zero networking - `prosemirror-history`'s own local
+     undo only). This is what Blog uses - "Draft/Save," the user's own
+     explicit choice for that field.
+   - `bindCollabRichText(container, field)` - binds `y-prosemirror`'s
+     `ySyncPlugin` DIRECTLY to a `'richtext'`-shape field's `field.yxml` -
+     REAL multi-peer live editing over the actual Space/relay sync, no
+     bespoke sync code at all. A real, deliberate consequence: content
+     exists on the relay the moment it's typed, not gated behind a
+     "Save"/"Veröffentlichen" action - the opposite tradeoff from the
+     local editor, which is why they're two separate functions rather
+     than one with a mode flag. Scope cut: no remote cursor/presence
+     highlighting (`y-prosemirror`'s `yCursorPlugin` needs a Yjs
+     `Awareness` instance with its own transport - this framework's own
+     presence mechanism is `@qu/space-core`'s `presence.js`, not Yjs
+     Awareness - wiring the two together is separate, real future work).
+
+   TESTABILITY, verified by hand before committing to this design:
+   `EditorView` mounts and `y-prosemirror`'s Yjs binding both work
+   correctly under jsdom (this project's own test runtime) - confirmed by
+   a throwaway spike before writing any package code. Two REAL bugs
+   caught BY those tests, not assumed away: (a) calling `editor.focus()`
+   before reading the selection collapses it in jsdom (removed - a real
+   browser doesn't need that call either, for the identical reason); (b)
+   `EditorView`'s own default `scrollToSelection()` calls
+   `Range.getClientRects()`, which jsdom does not implement, throwing on
+   every SECOND selection-changing command and silently dropping that
+   edit - fixed with the `handleScrollToSelection: () => true` prop
+   (skips PM's own scroll-into-view; a minor, deliberate UX trade-off for
+   a typically-already-visible small editor) AND reordering
+   `dispatchTransaction` to mirror into `textareaEl.value` BEFORE calling
+   `view.updateState()`, so the textarea mirror never depends on the
+   view's own redraw succeeding. Neither bug is jsdom-only noise dismissed
+   without checking - (b) specifically was caught by a test asserting a
+   SECOND toggle actually reverted a heading to a paragraph, which failed
+   outright before the fix.
+3. **`boot.js`'s `startApp()`/`startPlatform()` gain an optional
+   `richTextBind` param**, threaded down through every one of their own
+   `wireRichText()` call sites (`renderMultiUserRoute()`/
+   `renderGlobalShell()`/`renderAggregateShell()`/both inline
+   `startPlatform()` branches) - `rich-text-actions.js`'s own doc comment
+   on why this exists as an injection point rather than a hardcoded
+   import. An explicit value here (tests, or an embedder wanting ONE
+   editor regardless of admin config) always wins; omitted, it's decided
+   dynamically - see point 5 below. `rich-text-prosemirror-integration.test.js`
+   proves the explicit-override path end to end: `startPlatform({...,
+   richTextBind: bindLocalRichText})` against a REAL relay mounts the REAL
+   ProseMirror editor in Blog's own post form, and a post written through
+   it publishes and renders correctly.
+4. **A shared BASE STYLESHEET** (`@qu/app-shell`'s new `base-style.js`,
+   inlined ONCE into `build.mjs`'s `renderIndexHtml()` page `<head>` -
+   cascades to every app/form/rich-text surface rendered inside
+   `<qu-app-shell>`, no per-bundle wiring needed) - closes the "wild und
+   unübersichtlich" / invisible-body-field feedback directly: a border/
+   background/min-height on `.qu-richtext-editor` (both editors share
+   this class), consistent form/label/input/button spacing and borders,
+   status-message spacing. Deliberately minimal - spacing and visibility,
+   no color theme/branding decisions - and loads BEFORE an app's own
+   `theme` CSS in the cascade, so a Kind-Schema style can still override
+   anything here on equal specificity.
+5. **A relay-admin toggles the ProseMirror editor ON PLATFORM-WIDE, live,
+   from the admin console UI - no redeploy, no `richTextBind` param
+   anywhere in `shell.js`.** Follow-up to point 3 above once the user
+   confirmed this is what "vom Admin aktiviert, dem User angezeigt/
+   angeboten" actually means. Required closing a real gap: `shell.js` (the
+   ACTUAL browser entrypoint) never threaded `richTextBind` to
+   `startApp()`/`startPlatform()` at all, and `@qu/space-editor-prosemirror`
+   was only a `devDependency` of `@qu/app-shell` - the ProseMirror code
+   flat-out wasn't IN the shipped `bundle.js`. Fixed:
+   - `@qu/space-editor-prosemirror` moved to a real `dependency` of
+     `@qu/app-shell` (the user's own call: ship it in the main bundle now,
+     revisit lazy-loading/code-splitting later if bundle size becomes a
+     real concern - esbuild's `buildAppShellBundle()` has no code-splitting
+     set up today, and there's no dynamic-`import()` precedent anywhere in
+     this codebase to build on, see `extensions/src/extension-points.js`'s
+     own doc comment on why V5 deliberately dropped V3's version of that).
+   - New `platformAppsKind.platformConfig` field (`kinds.js`) - an
+     `'atomic'`-shape, platform-WIDE (not per-app, unlike `apps[].config`)
+     small settings bag on the SAME singleton registry Node `apps` already
+     lives on - no new Kind needed. First key: `richTextEditor: boolean`.
+     `dev.js`'s `setPlatformConfig()` merges by key (`setAppConfig()`'s own
+     pattern, one level up); `PlatformRuntime.resolvePlatformConfig()`
+     reads it back FRESH every call (same `isNodeSynced()`-gated `waitFor()`
+     `resolveApps()` already uses - a real regression test caught the
+     first version reading a just-created, not-yet-replayed local Y.Doc as
+     empty instead of actually waiting for the relay's reply).
+   - `boot.js`'s `startPlatform()` now resolves `platformConfig` FRESH
+     inside its router's `onChange` handler, on EVERY navigation (never
+     cached from `startPlatform()`'s own call time) - `effectiveRichTextBind
+     = richTextBind ?? (platformConfig.richTextEditor ? bindLocalRichText :
+     undefined)`. A relay-admin's toggle therefore reaches an ALREADY-
+     CONNECTED visitor's very next route render, not just a fresh page
+     load - proven by `rich-text-platform-toggle.test.js` toggling the
+     admin checkbox and then re-navigating the SAME already-open author
+     Space/router (no reconnect) to see the editor swap live.
+   - Admin console UI: `admin-console-bundle.js`'s new "Editor-
+     Einstellungen" `<form data-qu-action="set-platform-config">` (one
+     checkbox, `name="richTextEditor"`), wired by `admin-actions.js` -
+     reflects the CURRENT live value on load (so reloading `#/admin` never
+     shows a falsely-unchecked box) and calls `setPlatformConfig()` on
+     submit, same "inert markup + convention-based wiring" posture every
+     other admin console form already has.
+   - Deliberately scoped to `startPlatform()` only, not `startApp()` -
+     single-app deployments have no admin console/platform registry
+     concept to toggle this from in the first place; `startApp()` keeps
+     `richTextBind` as a pure explicit-override param for an embedder.
+   - What does NOT change: WHICH fields show a rich-text editor at all
+     stays a template-author decision (`data-qu-richtext` on that one
+     `<textarea>`) - this flag only decides which BINDING an already-
+     marked field gets, never adds the capability to a field that never
+     asked for it ("nicht jedes Eingabefeld braucht einen WYSIWYG-Editor").
+
 **UPDATE - ADMIN CONSOLE EATS ITS OWN DOG FOOD (`admin-actions.js`'s
 installed-apps list).** The app list used to be its own bespoke "clear
 the whole `<ul>`, rebuild every `<li>` by hand with `doc.createElement()`"

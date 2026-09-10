@@ -13,7 +13,7 @@ import { InProcessTransport, createInProcessHub, createRelayForwarder } from '@q
 import { createMemoryStore } from '@qu/space-storage';
 import { PlatformRuntime } from '../src/platform.js';
 import { AppRuntime } from '../src/runtime.js';
-import { createApp, createTemplate, createPage, registerApp, setAppMode } from '../src/dev.js';
+import { createApp, createTemplate, createPage, registerApp, setAppMode, setPlatformConfig } from '../src/dev.js';
 import { createAppResolveKindSchema } from '../src/relay-resolver.js';
 
 async function actor() {
@@ -148,4 +148,46 @@ test('setAppMode() works right after registerApp(), over a FRESH Space connectio
   const apps = await platform.resolveApps();
   const blog = apps.find((a) => a.prefix === 'blog');
   assert.equal(blog?.mode, 'multiuser');
+});
+
+test('setPlatformConfig()/resolvePlatformConfig() - a relay-admin\'s platform-wide setting reaches a DIFFERENT, already-connected visitor Space live, and later keys merge rather than clobber', async () => {
+  const relayAdmin = await actor();
+  const visitor = await actor();
+  const members = [
+    { pub: relayAdmin.signingPub, xPub: relayAdmin.xPublicKey },
+    { pub: visitor.signingPub, xPub: visitor.xPublicKey },
+  ];
+  const relayAdmins = [relayAdmin.signingPub];
+  const hub = createInProcessHub();
+  const resolveKindSchema = await createAppResolveKindSchema();
+  createRelayForwarder({ hub, members, relayAdmins, resolveKindSchema, storage: createMemoryStore() });
+
+  async function connect(identity, peerId) {
+    const transport = new InProcessTransport(hub, peerId);
+    await transport.connect();
+    return new Space({ identity, members, relayAdmins, transport });
+  }
+
+  const adminSpace = await connect(relayAdmin, 'relay-admin');
+  const visitorSpace = await connect(visitor, 'visitor');
+  const visitorPlatform = new PlatformRuntime(visitorSpace);
+
+  // Nothing set yet - `{}`, never null/undefined, so a caller can destructure straight off it.
+  assert.deepEqual(await visitorPlatform.resolvePlatformConfig(), {});
+
+  await setPlatformConfig(adminSpace, { richTextEditor: true });
+  await new Promise((resolve) => setTimeout(resolve, 300)); // settle - let the write reach the visitor's own Space.
+  assert.deepEqual(await visitorPlatform.resolvePlatformConfig(), { richTextEditor: true });
+
+  // A LATER call setting a DIFFERENT key merges in, rather than clobbering `richTextEditor` -
+  // same "whole-object read-merge-write" contract `setAppConfig()` already has one level down
+  // (kinds.js's own `platformConfig` doc comment).
+  await setPlatformConfig(adminSpace, { someOtherFlag: 'x' });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(await visitorPlatform.resolvePlatformConfig(), { richTextEditor: true, someOtherFlag: 'x' });
+
+  // Setting the SAME key again overwrites just that key.
+  await setPlatformConfig(adminSpace, { richTextEditor: false });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(await visitorPlatform.resolvePlatformConfig(), { richTextEditor: false, someOtherFlag: 'x' });
 });

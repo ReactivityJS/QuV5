@@ -22,6 +22,7 @@
     "@qu/space-ui": "^0.1.0",
     "@qu/space-storage": "^0.1.0",
     "@qu/space-transport": "^0.1.0",
+    "@qu/space-editor-prosemirror": "^0.1.0",
     "@qu/events": "^0.1.0",
     "@qu/extensions": "^0.1.0",
     "esbuild": "^0.25.0",

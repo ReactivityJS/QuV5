@@ -33,6 +33,13 @@
  * option only ever needs to add the input here, `admin-actions.js`'s own
  * generic submit handler needs no per-field change.
  *
+ * `<form data-qu-action="set-platform-config"><input name="richTextEditor"
+ * type="checkbox">` is the SAME "inert markup, `admin-actions.js` wires it"
+ * convention, one PLATFORM-WIDE setting instead of a per-app one -
+ * `dev.js`'s `setPlatformConfig()`/`kinds.js`'s `platformAppsKind.platformConfig`
+ * own doc comments have the full story on what this flag does and why it's
+ * live (no redeploy) for already-connected visitors.
+ *
  * `<div data-qu-bind="file-app-installers">` is the SAME convention's
  * DYNAMIC counterpart - `admin-actions.js`'s `wireAdminConsole()` fills it
  * with one more install form per discovered `/apps/*` app (repo root's own
@@ -58,6 +65,13 @@ export const adminConsoleBundle = {
 <h2>Installierte Apps</h2>
 <p data-qu-empty-apps hidden>(noch keine App registriert)</p>
 <ul data-qu-bind="platform-apps-list"></ul>
+<h2>Editor-Einstellungen</h2>
+<p>Gilt sofort plattformweit für jedes bereits geöffnete Formular mit einem markierten Rich-Text-Feld - kein Neustart nötig. Welche einzelnen Felder überhaupt ein Rich-Text-Feld sind, entscheidet weiterhin jede App selbst (nicht jedes Eingabefeld braucht einen WYSIWYG-Editor).</p>
+<form data-qu-action="set-platform-config">
+  <label><input type="checkbox" name="richTextEditor"> Verbesserten WYSIWYG-Editor (ProseMirror) für Rich-Text-Felder aktivieren</label>
+  <button type="submit">Speichern</button>
+  <p data-qu-status></p>
+</form>
 <h2>Beispiel-App installieren</h2>
 <p>Erstellt eine fertig eingerichtete App unter dem gewählten Pfad-Präfix (in diesem, dem Relay-Admin eigenen Space) und registriert sie sofort - kein separates <code>installAppBundle()</code> nötig.</p>
 <form data-qu-action="install-app" data-app-type="guestbook">

@@ -132,6 +132,29 @@ export class PlatformRuntime {
   }
 
   /**
+   * `platformAppsKind.platformConfig`, read fresh off the registry Node
+   * every call (no caching) - the same "current CRDT state, not a snapshot
+   * from whenever this runtime was constructed" posture `resolveApps()`
+   * already has, so a relay-admin's `setPlatformConfig()` write takes
+   * effect for every ALREADY-CONNECTED visitor's very next route render,
+   * no reload/redeploy needed. `{}` if never set.
+   * @param {{timeout?: number}} [options]
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async resolvePlatformConfig({ timeout } = {}) {
+    const id = await platformRegistryId();
+    const { node, release } = await this._space.useNode(id, platformAppsKind);
+    // Same `isNodeSynced()` gate as `resolveApps()` right above (see that method's own doc
+    // comment) - without it, a caller whose OWN Space never happened to already hold this Node
+    // open would read whatever the just-created, not-yet-replayed local Y.Doc starts as (i.e.
+    // nothing), not the relay's actual current value.
+    await waitFor(this._space, id, () => (this._space.isNodeSynced(id) ? true : null), { timeout: timeout ?? 500 });
+    const config = await node.field('platformConfig').get();
+    release();
+    return config ?? {};
+  }
+
+  /**
    * @param {string} fullPath - the CURRENT route, e.g. `"/forum/topic/123"`.
    * @returns {Promise<{prefix: string, subPath: string, realm: 'main'|'global', mode?: 'off'|'global'|'multiuser', appAdminPub?: Uint8Array, name: string|null}|null>}
    *   `null` if `prefix` matches NEITHER a registered alias NOR a valid

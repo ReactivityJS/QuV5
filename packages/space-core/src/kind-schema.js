@@ -148,7 +148,7 @@
  */
 import { QuCrypto } from '@qu/core';
 
-const SHAPES = new Set(['atomic', 'text', 'list']);
+const SHAPES = new Set(['atomic', 'text', 'list', 'richtext']);
 const VISIBILITIES = new Set(['encrypted', 'public']);
 const ACL_MODES = new Set(['members', 'owner', 'named', 'content', 'relay-admins']);
 const PERSISTENCE_MODES = new Set(['durable', 'volatile']);
@@ -160,7 +160,7 @@ const CONTENT_NODE_PREFIX = '~content:';
 
 /**
  * @param {string} kind
- * @param {{fields: Record<string, {shape: 'atomic'|'text'|'list', visibility?: 'encrypted'|'public'}>, acl?: {write?: 'members'|'owner'|'named'|'content'}, notifyTopics?: string[], persistence?: 'durable'|'volatile'}} def
+ * @param {{fields: Record<string, {shape: 'atomic'|'text'|'list'|'richtext', visibility?: 'encrypted'|'public'}>, acl?: {write?: 'members'|'owner'|'named'|'content'}, notifyTopics?: string[], persistence?: 'durable'|'volatile'}} def
  */
 export function defineKind(kind, { fields, acl = { write: 'members' }, notifyTopics = [], persistence = 'durable' }) {
   if (!kind || typeof kind !== 'string') throw new Error('defineKind: "kind" must be a non-empty string');
