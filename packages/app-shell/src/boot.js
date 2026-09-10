@@ -22,6 +22,7 @@ import { wireViews } from './view-actions.js';
 import { wireRichText } from './rich-text-actions.js';
 import { wireInstalledApps, provisionPersonalInstance, wirePersonalUpdateBanner } from './installed-apps-actions.js';
 import { installCms } from '../cms-bundle.js';
+import { bindLocalRichText } from '@qu/space-editor-prosemirror';
 
 /**
  * Passed as `AppRuntime`'s `kinds` override for `realm: 'global'` routes -
@@ -545,7 +546,17 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  * one pointing at this same identity - see the inline comment at that
  * check for why.
  * @param {{space: import('@qu/space-core').Space, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number, richTextBind?: (textarea: HTMLTextAreaElement) => {refresh: () => void, stop: () => void}}} params
- *   `richTextBind` - see `startApp()`'s own doc comment on the identical param.
+ *   `richTextBind` - see `startApp()`'s own doc comment on the identical
+ *   param. UNLIKE `startApp()`, an explicit value here is only ever a
+ *   forced OVERRIDE (tests, or an embedder who wants one editor regardless
+ *   of admin config) - when omitted (the real `shell.js` boot path), this
+ *   function decides for itself, FRESH on every route render, from the
+ *   live `platformAppsKind.platformConfig.richTextEditor` flag
+ *   (`kinds.js`'s own doc comment, `dev.js`'s `setPlatformConfig()`,
+ *   admin console UI: `admin-console-bundle.js`'s "Editor-Einstellungen"
+ *   form) - a relay-admin flipping that switch upgrades every
+ *   `[data-qu-richtext]` field platform-wide for every visitor already
+ *   connected, no redeploy needed.
  *   `space` - MUST have been constructed with a `relayAdmins` list (see
  *   `Space`'s own constructor doc comment) matching the relay's own
  *   `QU_RELAY_ADMINS` config, or BOTH `qu-platform-apps` AND any global
@@ -565,6 +576,15 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout,
   const router = new HashRouter({
     window,
     onChange: async (route) => {
+      // Resolved FRESH on every navigation, never cached from `startPlatform()`'s own call time -
+      // a relay-admin's `setPlatformConfig({richTextEditor: true})` (the admin console's own
+      // "Editor-Einstellungen" form, `admin-actions.js`) then takes effect for every already-
+      // connected visitor's very next route render, no reload/redeploy needed - same live-without-
+      // reload posture `match.config`/`resolveApps()` already have. An explicit `richTextBind` param
+      // (tests, or an embedder who wants to force one editor regardless of the live platform
+      // setting) always wins over this - see this function's own doc comment.
+      const platformConfig = await platform.resolvePlatformConfig();
+      const effectiveRichTextBind = richTextBind ?? (platformConfig.richTextEditor ? bindLocalRichText : undefined);
       const match = await platform.resolveForPath(route, timeoutOpt);
       if (!match) {
         await renderLandingPage({ mountEl, doc: window.document, platform, space });
@@ -585,7 +605,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout,
           const apps = await platform.resolveApps(timeoutOpt);
           const target = apps.find((a) => a.prefix === delegated.appPrefix && (a.realm ?? 'main') === 'global');
           if (target) {
-            await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: target.prefix, subPath: delegated.appSubPath, richTextBind });
+            await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: target.prefix, subPath: delegated.appSubPath, richTextBind: effectiveRichTextBind });
             return;
           }
         }
@@ -598,7 +618,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout,
         await wireInstalledApps({ mountEl, doc: window.document, space });
         wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
         await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor('admin'), kinds: GLOBAL_KINDS });
-        wireRichText({ mountEl, bind: richTextBind });
+        wireRichText({ mountEl, bind: effectiveRichTextBind });
         return;
       }
 
@@ -608,7 +628,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout,
         // comment on why the default flipped. `/u/<ref>/...` remains available to address "me"
         // explicitly or another identity's space on purpose.
         const userRoute = parseMultiUserSubPath(match.subPath) ?? { ref: 'me', userSubPath: match.subPath };
-        await renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ...userRoute, richTextBind });
+        await renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ...userRoute, richTextBind: effectiveRichTextBind });
         return;
       }
 
@@ -631,15 +651,15 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout,
             routeNamespace: `/${match.prefix}`,
             personalBundle: match.personalBundle,
             config: match.config,
-            richTextBind,
+            richTextBind: effectiveRichTextBind,
           });
           return;
         }
         if (match.mode === 'personal') {
-          await renderAggregateShell({ space, mountEl, window, styleId, prefix: match.prefix, richTextBind });
+          await renderAggregateShell({ space, mountEl, window, styleId, prefix: match.prefix, richTextBind: effectiveRichTextBind });
           return;
         }
-        await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: match.prefix, subPath: match.subPath, richTextBind });
+        await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: match.prefix, subPath: match.subPath, richTextBind: effectiveRichTextBind });
         return;
       }
 
@@ -669,7 +689,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout,
       await wireInstalledApps({ mountEl, doc: window.document, space });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
       await wireViews({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
-      wireRichText({ mountEl, bind: richTextBind });
+      wireRichText({ mountEl, bind: effectiveRichTextBind });
     },
   });
   router.start();

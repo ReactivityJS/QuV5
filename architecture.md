@@ -1345,15 +1345,13 @@ nicht sichtbar." Two changes address this:
    `renderGlobalShell()`/`renderAggregateShell()`/both inline
    `startPlatform()` branches) - `rich-text-actions.js`'s own doc comment
    on why this exists as an injection point rather than a hardcoded
-   import: passing it makes `@qu/app-shell` depend on ProseMirror for
-   EVERY deployment, not just the ones that opt in. Omitted (the default
-   for every existing caller, including the actual shipped `shell.js`
-   bundle), `wireRichText()` keeps using the built-in editor, completely
-   unchanged. `rich-text-prosemirror-integration.test.js` proves the
-   injection point end to end: `startPlatform({..., richTextBind:
-   bindLocalRichText})` against a REAL relay mounts the REAL ProseMirror
-   editor in Blog's own post form, and a post written through it
-   publishes and renders correctly.
+   import. An explicit value here (tests, or an embedder wanting ONE
+   editor regardless of admin config) always wins; omitted, it's decided
+   dynamically - see point 5 below. `rich-text-prosemirror-integration.test.js`
+   proves the explicit-override path end to end: `startPlatform({...,
+   richTextBind: bindLocalRichText})` against a REAL relay mounts the REAL
+   ProseMirror editor in Blog's own post form, and a post written through
+   it publishes and renders correctly.
 4. **A shared BASE STYLESHEET** (`@qu/app-shell`'s new `base-style.js`,
    inlined ONCE into `build.mjs`'s `renderIndexHtml()` page `<head>` -
    cascades to every app/form/rich-text surface rendered inside
@@ -1365,6 +1363,57 @@ nicht sichtbar." Two changes address this:
    no color theme/branding decisions - and loads BEFORE an app's own
    `theme` CSS in the cascade, so a Kind-Schema style can still override
    anything here on equal specificity.
+5. **A relay-admin toggles the ProseMirror editor ON PLATFORM-WIDE, live,
+   from the admin console UI - no redeploy, no `richTextBind` param
+   anywhere in `shell.js`.** Follow-up to point 3 above once the user
+   confirmed this is what "vom Admin aktiviert, dem User angezeigt/
+   angeboten" actually means. Required closing a real gap: `shell.js` (the
+   ACTUAL browser entrypoint) never threaded `richTextBind` to
+   `startApp()`/`startPlatform()` at all, and `@qu/space-editor-prosemirror`
+   was only a `devDependency` of `@qu/app-shell` - the ProseMirror code
+   flat-out wasn't IN the shipped `bundle.js`. Fixed:
+   - `@qu/space-editor-prosemirror` moved to a real `dependency` of
+     `@qu/app-shell` (the user's own call: ship it in the main bundle now,
+     revisit lazy-loading/code-splitting later if bundle size becomes a
+     real concern - esbuild's `buildAppShellBundle()` has no code-splitting
+     set up today, and there's no dynamic-`import()` precedent anywhere in
+     this codebase to build on, see `extensions/src/extension-points.js`'s
+     own doc comment on why V5 deliberately dropped V3's version of that).
+   - New `platformAppsKind.platformConfig` field (`kinds.js`) - an
+     `'atomic'`-shape, platform-WIDE (not per-app, unlike `apps[].config`)
+     small settings bag on the SAME singleton registry Node `apps` already
+     lives on - no new Kind needed. First key: `richTextEditor: boolean`.
+     `dev.js`'s `setPlatformConfig()` merges by key (`setAppConfig()`'s own
+     pattern, one level up); `PlatformRuntime.resolvePlatformConfig()`
+     reads it back FRESH every call (same `isNodeSynced()`-gated `waitFor()`
+     `resolveApps()` already uses - a real regression test caught the
+     first version reading a just-created, not-yet-replayed local Y.Doc as
+     empty instead of actually waiting for the relay's reply).
+   - `boot.js`'s `startPlatform()` now resolves `platformConfig` FRESH
+     inside its router's `onChange` handler, on EVERY navigation (never
+     cached from `startPlatform()`'s own call time) - `effectiveRichTextBind
+     = richTextBind ?? (platformConfig.richTextEditor ? bindLocalRichText :
+     undefined)`. A relay-admin's toggle therefore reaches an ALREADY-
+     CONNECTED visitor's very next route render, not just a fresh page
+     load - proven by `rich-text-platform-toggle.test.js` toggling the
+     admin checkbox and then re-navigating the SAME already-open author
+     Space/router (no reconnect) to see the editor swap live.
+   - Admin console UI: `admin-console-bundle.js`'s new "Editor-
+     Einstellungen" `<form data-qu-action="set-platform-config">` (one
+     checkbox, `name="richTextEditor"`), wired by `admin-actions.js` -
+     reflects the CURRENT live value on load (so reloading `#/admin` never
+     shows a falsely-unchecked box) and calls `setPlatformConfig()` on
+     submit, same "inert markup + convention-based wiring" posture every
+     other admin console form already has.
+   - Deliberately scoped to `startPlatform()` only, not `startApp()` -
+     single-app deployments have no admin console/platform registry
+     concept to toggle this from in the first place; `startApp()` keeps
+     `richTextBind` as a pure explicit-override param for an embedder.
+   - What does NOT change: WHICH fields show a rich-text editor at all
+     stays a template-author decision (`data-qu-richtext` on that one
+     `<textarea>`) - this flag only decides which BINDING an already-
+     marked field gets, never adds the capability to a field that never
+     asked for it ("nicht jedes Eingabefeld braucht einen WYSIWYG-Editor").
 
 **UPDATE - ADMIN CONSOLE EATS ITS OWN DOG FOOD (`admin-actions.js`'s
 installed-apps list).** The app list used to be its own bespoke "clear

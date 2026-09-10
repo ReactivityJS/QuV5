@@ -47,6 +47,7 @@ export {
   setAppMode,
   setAppBundleVersion,
   setAppConfig,
+  setPlatformConfig,
   addSharedLists,
   addGlobalViewNames,
   addGlobalTemplateNames,

@@ -1127,6 +1127,25 @@ export async function setAppConfig(space, { prefix, config }) {
 }
 
 /**
+ * `setAppConfig()`'s own counterpart for `platformAppsKind.platformConfig` -
+ * merges `config`'s keys into whatever's already there (an `'atomic'`
+ * field, so this reads-then-writes the WHOLE object, unlike `apps`' own
+ * "push a new entry" log - there is only one current platform settings
+ * object, nothing to keep a history of). A relay-admin only, same ACL as
+ * every other write to this Node. See `kinds.js`'s own `platformAppsKind`
+ * doc comment on `platformConfig` for what keys are meaningful today
+ * (`richTextEditor`).
+ * @param {import('@qu/space-core').Space} space - a relay-admin's own Space.
+ * @param {Record<string, unknown>} config
+ */
+export async function setPlatformConfig(space, config) {
+  const node = await getOrSyncRegistryNode(space, platformAppsKind, PLATFORM_REGISTRY_ANCHOR);
+  const current = (await node.field('platformConfig').get()) ?? {};
+  await node.field('platformConfig').set({ ...current, ...config });
+  return node;
+}
+
+/**
  * Retracts `prefix`'s own registration - kinds.js's own `platformAppsKind`
  * doc comment on the `removed` marker in full: pushes one more entry for
  * this prefix with `removed: true`, which `platform.js`'s `resolveApps()`
