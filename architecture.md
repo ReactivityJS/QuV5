@@ -212,6 +212,60 @@ is built on, and what a Kind like it needs instead of any relay/transport-
 level special-casing: presence/typing are ordinary Node writes on a
 volatile-persistence Kind, nothing more.
 
+**UPDATE - the browser CLIENT's own persistent tier.** `@qu/space-storage`'s
+`indexeddb-store.js` is the missing counterpart to the relay's own
+`file-store.js`, using the exact same `{append, load, replace}` adapter
+contract `Space` already supported (no change to `Space`/`Node`/`Field`
+needed) - `@qu/app-shell`'s `shell.js` now constructs `Space` with it
+(`isIndexedDbAvailable()`-guarded, falling back to memory-only where
+unavailable), so a returning visitor's already-seen content renders
+instantly from local storage while whatever's new resyncs in the
+background, instead of every reload re-fetching everything from scratch.
+Exposed via a dedicated `@qu/space-storage/indexeddb-store` subpath export,
+not the package's own barrel (`.`) - the barrel also re-exports
+`file-store.js` (real `node:fs/promises` I/O, relay-only), which broke the
+esbuild browser bundle outright, the same "browser code imports a
+dedicated subpath, never the barrel" idiom `@qu/space-transport`'s own
+`./ws-client-transport` export already established for its identical
+Node-vs-browser split (`ws-server-hub.js`/`ws`).
+
+**UPDATE - opt-in compaction.** `Space.compactNode()` (below) always
+existed but nothing ever called it automatically - genuinely CAN'T,
+structurally: the relay never holds a signing/encryption key (this
+section's own top framing), so producing a compacted snapshot (a new,
+validly-signed envelope) can only ever happen client-side, in an
+authorized writer's own Space. `@qu/space-core`'s new `compaction.js`
+(`compactIfNeeded(space, id, {threshold})`, built on a new `Space.
+envelopeCount(id)` reading the local storage-backed count) is therefore a
+small, OPT-IN helper a write-path Dev API call can invoke right after its
+own write - `@qu/app-core`'s `pushToSharedList()` (a Guestbook/Forum entry,
+the highest-churn content this framework has) is the first real caller, via
+an optional `compactThreshold` param; every EXISTING call site that never
+passes it keeps behaving exactly as before, zero added cost. Deliberately
+NOT a background scheduler - see `compaction.js`'s own doc comment for the
+full "why automatic can only ever mean opt-in here" reasoning, and its own
+"COST NOTE" on `envelopeCount()`'s O(n) check.
+
+**UPDATE - `ListField.slice(start, end)` - windowed reads.** `toArray()`
+always decrypted (for an `'encrypted'`-visibility list) EVERY item just to
+render, say, the first 20 of a large Guestbook. `slice()` (`Array.prototype
+.slice()` semantics, negative indices included - `Y.Array.slice()`'s own
+native support) decrypts only the requested window. IMPORTANT SCOPE: this
+reduces LOCAL read/decrypt cost only, never SYNC cost - `Y.Array` (every
+Yjs shared type) has no partial/windowed sync at all, the full CRDT
+structure is already resident in memory once a Node has synced, regardless
+of whether/how `slice()` is later called. The "replay every envelope on a
+fresh subscribe" network cost is `compaction.js`'s own concern above,
+entirely separate. NOT yet wired into `openLiveView()`'s own multi-source
+merge-then-sort-then-limit pipeline (`@qu/app-core`'s `view-sources.js`) -
+correctly combining a windowed READ with that pipeline's own "true top-N
+by sort key across possibly-several sources" guarantee needs its own
+design (a raw insertion-order window is not generally the same set as the
+top-N by `sortBy`, e.g. a late-arriving update from a peer that was
+offline) - real, separate follow-up work, not attempted here. Available
+today as a foundational primitive for any caller that already knows it
+wants "the most recent N pushes" directly.
+
 ### 3.5 Presence, typing, and delivery status — ordinary data, not protocol
 
 Online/offline liveness stays exactly the pre-existing `hello`/
@@ -321,11 +375,12 @@ existed.
 | `src/kind-schema.js` | `defineKind()` (now also `persistence: 'durable'\|'volatile'`, §3.4), `KindRegistry`, `deriveOwnerNodeId()` (self-certifying nodeId derivation for `'owner'`/`'named'` ACL). |
 | `src/grant.js` | `signGrant()`/`verifyGrant()` — the `'named'`-ACL delegated-authority mechanism. |
 | `src/node.js` | `SpaceNode` (one Node = one Y.Doc, `meta` + `content` maps), `stampMeta()`. |
-| `src/field.js` | `AtomicField`/`TextField`/`ListField`, `createField()`, `withWriteContext()` (the shared transact-with-origin wrapper every field mutation goes through). |
+| `src/field.js` | `AtomicField`/`TextField`/`ListField` (now also `ListField.slice()` — windowed reads, §3.4 UPDATE), `createField()`, `withWriteContext()` (the shared transact-with-origin wrapper every field mutation goes through), `setFieldValue()` (shape-agnostic "replace the whole value" helper — see `@qu/space-ui` note below). |
 | `src/space.js` | `Space` — the main class, now also reconnect/resync (`onStatusChange` wiring, §3.4) and per-Kind storage routing (`_storageFor()`). See §5 below for its full method surface. |
 | `src/alias.js` | `deriveAliasIdentity()`, `aliasRegistryKind`/`aliasRegistryNodeId()`, `publishAlias()`, `AliasRegistry` — per-space pseudonymity. |
 | `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes (§3.5). |
 | `src/wire-codec.js` | `encodeForWire()`/`decodeFromWire()` — Uint8Array ↔ base64 for any JSON serialization boundary (WebSocket, on-disk file). |
+| `src/compaction.js` | `compactIfNeeded(space, id, {threshold})` — opt-in compaction policy on top of `Space.compactNode()`/`envelopeCount()` (§3.4 UPDATE). |
 | `src/index.js` | Package's public export surface — the authoritative list of what's public API vs. internal. |
 
 ### `packages/space-storage/` — `@qu/space-storage`
@@ -334,9 +389,10 @@ existed.
 |---|---|
 | `src/memory-store.js` | `createMemoryStore()` — ephemeral, in-process-only tier. |
 | `src/durable-store.js` | `createDurableStore()` — simulated persistence (in-memory backing object) for tests; same contract as real disk. |
-| `src/file-store.js` | `createFileStore(dataDir)` — real on-disk persistence, one newline-delimited JSON file per Node. |
+| `src/file-store.js` | `createFileStore(dataDir)` — real on-disk persistence, one newline-delimited JSON file per Node. Relay-only (`node:fs/promises`) — never import this into browser-bundled code. |
+| `src/indexeddb-store.js` | `createIndexedDbStore()`/`isIndexedDbAvailable()` — the browser CLIENT's own persistent tier (§3.4 UPDATE). Exposed via its own `@qu/space-storage/indexeddb-store` subpath export, not the barrel — see that UPDATE note for why. |
 
-All three implement the same contract: `append(nodeId, envelope)`,
+All four implement the same contract: `append(nodeId, envelope)`,
 `load(nodeId)`, `replace(nodeId, envelopes)` (compaction — discards prior
 history in favor of the given envelopes, typically one `snapshot: true`
 envelope).
@@ -368,18 +424,71 @@ envelope).
 Built entirely on `@qu/space-core`'s public API — `Space` has zero
 awareness either of these exist, same as `alias.js`.
 
+**UPDATE - CONFIRMED FILE SYNC + PEER RECEIPTS.** `UploadOutbox` closes
+the three gaps a real file exchange needs, without inventing anything new:
+
+1. Local save + outbox entry were already both awaited before `enqueue()`
+   returns (see that method's own doc comment) - confirmed by construction,
+   nothing to add there.
+2. **Confirmed relay sync of the metadata** (not just "my own `upload()`
+   call resolved"): the constructor now takes an optional 4th `bus` param
+   (the SAME bus given to `space`'s own constructor). With it, a record
+   that reaches `'done'` advances to a new `'synced'` status once the
+   relay has actually ack'd the metadata write - `delivery-status.js`'s
+   existing `awaitRelayAck()`, no new mechanism. `uploadOutboxKind`'s Node
+   holds MANY files' records in one atomic field, so concurrent
+   `enqueue()`s race writes to the SAME Node - `awaitRelayAck()`'s "next
+   ack, not a per-write id" correlation still holds because a Space
+   flushes its own writes to one Node in order, so any ack landing after
+   our `set()` call proves ours already arrived. Omitting `bus` keeps the
+   old behavior (`'done'` stays terminal).
+3. **"Received, confirmed by the recipient peer"**: no bespoke file
+   mechanism - `delivery-status.js`'s `readReceiptKind` was already a
+   generic "reader confirms receipt of contentId" primitive (its
+   `contentNodeId` key is caller-defined, not required to be an actual
+   Node). `markFileReceived(space, fileId)`/`watchFileReceipts(space, pub)`
+   are one-line aliases of `markRead()`/`watchReadReceipts()` - a file id
+   works exactly like a chat message id. No new Kind, no duplicated state.
+
+Why the blob itself still can't just ride the same "default" CRDT sync
+that the metadata uses: a relay only forwards/mirrors signed envelopes,
+and Yjs's update history has no notion of discarding old bytes - fine for
+small structured state, unbounded growth for a large binary appended over
+and over. Files also don't need CRDT MERGE semantics (nobody wants two
+peers' concurrent writes to the SAME file's bytes to "merge") - so the
+split (`localStore`/`upload()` move the bytes out-of-band; `records`
+metadata rides the ordinary Node/Field sync) is deliberate, not a
+shortcut. `space-ui`'s `upload-status.js` gained a matching 5th
+`'synced'` status class (see below) - `@qu/app-shell` wiring this into an
+actual upload form (Blog image, profile picture, ...) remains open.
+
 ### `packages/space-ui/` — `@qu/space-ui` (OPTIONAL)
 
 | File | Purpose |
 |---|---|
 | `src/bind.js` | `bindField()`/`bindCheckbox()` — one/two-way reactive binding between a DOM element and a `Field`. |
-| `src/inline-edit.js` | `makeInlineEditable()` — `[contenteditable]` bound to a `Field` with explicit save (Enter/blur)/cancel (Escape) semantics; never applies a remote change while the element has focus. |
+| `src/inline-edit.js` | `makeInlineEditable()` — `[contenteditable]` bound to a `Field` with explicit save (Enter/blur)/cancel (Escape) semantics; never applies a remote change while the element has focus. Now works on a `'text'`-shape field too (`@qu/space-core`'s `setFieldValue()`, see §3.4-adjacent note below), not just `'atomic'`. |
 | `src/list-bind.js` | `bindList()` — keyed reconciliation of a list `Field` into a DOM container; skips re-rendering items whose value hasn't changed even without a caller-supplied `update()`. |
 | `src/upload-status.js` | `bindFileInput()`/`bindUploadStatusIcon()` — wires `<input type="file">` and status icons to `@qu/space-plugins`' `UploadOutbox`; a status icon is never auto-hidden on `'done'`. |
 | `src/index.js` | Package's public export surface. |
 
 Vanilla JS/DOM, no framework dependency, no build step — `Space` has zero
 awareness this package exists either.
+
+**UPDATE - `setFieldValue()` closes a real gap.** `@qu/space-core`'s new
+`setFieldValue(field, value)` (`field.js`'s own doc comment) writes a
+COMPLETE new value regardless of a field's shape - `'atomic'` via its own
+`set()`, `'text'` via delete-then-insert (`TextField` has no `set()` at
+all). `makeInlineEditable()` now uses it instead of a bare `field.set()`,
+which would have thrown outright for any `'text'`-shape field (a Blog
+post's own `content`, e.g.) - so `<qu-bind editable="inline">` now works on
+either shape. Deliberately a discrete "commit on save," not live
+character-level merging - the wrong tool for two people typing in the SAME
+field at once (point a real editor at `field.ytext` for that); `bindField()`'s
+own per-keystroke two-way binding stays `'atomic'`-only, unchanged, for the
+identical reason. `@qu/app-core`'s `dev.js` keeps its own, separate,
+already-working `replaceText()` private helper (13 call sites) rather than
+being migrated onto this - not worth the churn for zero behavior change.
 
 ### `packages/space-components/` — `@qu/space-components` (OPTIONAL)
 
@@ -497,8 +606,9 @@ notice.
 | `markRead(space, contentNodeId, upTo)` | Writes this Space's own read marker. |
 | `watchReadReceipts(space, pub)` | One-shot snapshot of another identity's read receipts. |
 | `ReadReceiptWatcher` | Reactive multi-reader cache — `.watch(pub)` / `.upToFor(pubB64, contentNodeId)`. |
+| `markFileReceived(space, fileId)` / `watchFileReceipts(space, pub)` | File-scoped aliases of `markRead()`/`watchReadReceipts()` — a file id works exactly like a `contentNodeId`. |
 | `uploadOutboxKind` | Self-certifying `'owner'`-ACL Kind, `records: {shape:'atomic', visibility:'public'}` map. |
-| `UploadOutbox` | `.enqueue(meta, blob)` (fire-and-forget upload, resolves once locally saved+queued) / `.retry(id)` / `.statusOf(id)` / `.list()` / `.watch(id, cb)` (reactive). |
+| `UploadOutbox` | `.enqueue(meta, blob)` (fire-and-forget upload, resolves once locally saved+queued) / `.retry(id)` / `.statusOf(id)` / `.list()` / `.watch(id, cb)` (reactive). Constructor takes an optional 4th `bus` param — with it, `'done'` records advance to `'synced'` once the relay ack's the metadata write. |
 
 ### UI bindings (`@qu/space-ui`, OPTIONAL)
 
@@ -1113,6 +1223,165 @@ real headless-CMS-style content model, not the whole vision at once:
   do (misclassifying it silently breaks `createCollectionItem()`'s own
   enumeration write - proven by a dedicated regression test, not just
   asserted).
+
+**UPDATE - DRAFT/PUBLISH WORKFLOW.** `pageKind`/`adminPageKind` gained a
+`status` field (`'draft'` | `'published'` | `null`/unset, treated as
+published - every pre-existing page keeps working unchanged, no
+migration). `resolver.js`'s `resolvePage()` treats a `'draft'` page as
+NOT FOUND (`null`, the exact same signal an unpublished route already
+produces) unless the caller passes `includeDrafts: true` - the app's own
+ordinary navigation/View rendering never does, only an editor's own
+"load this draft back into the form" call site does. This is
+DELIBERATELY NOT a confidentiality mechanism: the field, like every
+other on this Kind, is `visibility: 'public'` - content-addressed id
+derivation still works for anyone who already knows/guesses the route
+(this Kind's own doc comment already makes the identical point about
+`routeRegistryKind` being enumeration-only, never access control); only
+the app's OWN resolver path honors `status`. A draft is a REAL Node,
+simply never registered into the route registry until actually
+published - invisible to every View/feed for the same reason an
+unregistered route already was, `openLiveView()`'s `'pages'` source
+included. `createPage()`/`editPage()`/`createGlobalPage()`/
+`editGlobalPage()` all thread an optional `status` through (only written
+when actually passed - `editPage()`'s pre-existing "only touch what you
+pass" semantics, unchanged for every caller that doesn't). Wired into
+ONE example, Blog: both post forms gained a second submit button
+(`[data-qu-draft-btn]`, "Als Entwurf speichern") - `blog-actions.js`'s
+`wireBlog()` tracks which button was clicked via `form.dataset.intent`
+(set on 'click', read once and cleared on 'submit' - works for a real
+click AND a synthetic `dispatchEvent('submit')` a test issues after its
+own synthetic button click, unlike relying on `SubmitEvent.submitter`).
+Saving a draft does NOT reset the form - it stays open, primed
+(`editingRoute`/`loadedStatus` set directly, no `ContentResolver`
+round-trip needed) so the SAME author can continue and click
+"Veröffentlichen" later in the SAME session, which THEN calls
+`publishRoute()`/`publishGlobalRoute()` for the first time (tracked via
+`loadedStatus === 'draft'`, so an ordinary edit of an already-published
+post never re-registers the route a second time - `blog-draft.test.js`
+proves both this and the create→draft→publish round trip end to end).
+No drafts-LIST UI exists yet (there is no way to reach an OLDER, already
+-saved draft from a fresh page load) - it would need its own View
+source, since `'pages'`/`'shared-list'` both only ever read
+PUBLISHED/registered content; deliberately left for later, `resolvePage(
+{includeDrafts: true})` already being ready for it to build on directly.
+`resolver.test.js` proves the underlying mechanism directly (draft →
+not found → `includeDrafts` sees it → `editPage({status:'published'})` +
+one `publishRoute()` call → found, exactly once registered; and the
+reverse, editing an already-published page back to `'draft'` hides it
+again without touching the registry) - a lower-level, faster, and more
+robust test surface than driving the same transitions through a
+browser-simulated relay-admin click sequence.
+
+**UPDATE - ADMIN CONSOLE EATS ITS OWN DOG FOOD (`admin-actions.js`'s
+installed-apps list).** The app list used to be its own bespoke "clear
+the whole `<ul>`, rebuild every `<li>` by hand with `doc.createElement()`"
+loop on every single mutation (a mode click, an install, an uninstall) -
+duplicating, by hand, the exact keyed reconciliation `@qu/space-ui`'s
+`bindList()` already provides and `view-actions.js`'s `wireViews()`
+already uses for every OTHER live list in this framework. Refactored to
+use that same shared primitive: `platform.resolveApps()` (already a
+plain, REDUCED array - last write per prefix wins, `platformAppsKind`'s
+own "ONLY ADDITIVE" doc comment) is wrapped in the minimal `{toArray,
+observe}` source `bindList()` needs; the old per-row DOM-building code
+became `renderAppRow(app)`, `bindList()`'s own `render` callback, now
+invoked once per NEW or CHANGED row (keyed by `app.prefix`, stable across
+a mode change) instead of unconditionally for every row on every
+recompute - a real behavior improvement, not just less code: an
+unrelated row's own DOM (and any in-progress interaction with it) is no
+longer torn down every time a DIFFERENT app's mode button is clicked.
+`renderList()` keeps its name and external call sites unchanged (every
+mutation handler still just calls it) - internally it now only
+re-fetches `resolveApps()` and notifies `bindList()`'s observer, never
+rebuilds anything itself. The empty-state message moved from a
+placeholder `<li>` `bindList()` would have had to specially ignore into
+an ordinary sibling `<p data-qu-empty-apps hidden>` (`admin-console-
+bundle.js`), toggled the same way any other `[data-qu-admin-only]`-style
+element in this codebase already is.
+
+**UPDATE - RICH TEXT (`@qu/space-ui`'s new `src/rich-text.js` +
+`@qu/app-shell`'s new `src/rich-text-actions.js`).** A minimal,
+dependency-free WYSIWYG surface for a plain `<textarea>` a form already
+reads raw HTML from - `bindRichText(textareaEl)` hides the textarea,
+inserts a small Bold/Italic/Link/H2/bullet-list toolbar over a
+`contenteditable` `<div>` right after it, seeds the div from the
+textarea's current `.value`, and mirrors every edit back into
+`textareaEl.value` on the div's own `'input'` event - so whatever ALREADY
+reads `.value` at submit time keeps working completely unmodified, zero
+awareness this exists. Deliberately NOT built on `document.execCommand()`
+(deprecated, inconsistent, and unimplemented by jsdom - this project's
+own test runtime) - every command is a direct `Range`/`Selection`
+manipulation instead (wrap the selection in an inline tag for bold/
+italic/link; replace the closest block ancestor for the heading/list
+buttons), fully exercisable under jsdom. Two real, hand-caught bugs while
+building this: (1) calling `editor.focus()` before reading the selection
+collapses it in jsdom (a real browser doesn't need that call either, for
+the same reason - removed entirely); (2) a toolbar button's default
+`mousedown` behavior moves focus (and would collapse the editor's
+selection) BEFORE its own `'click'` handler ever runs in a real
+browser - fixed with `event.preventDefault()` on `mousedown`, a case
+jsdom itself doesn't reproduce (verified by hand instead, noted honestly
+in the code rather than claimed as test-covered). ONE-WAY MIRRORING is
+deliberate: setting `textareaEl.value` PROGRAMMATICALLY (an editor
+loading an existing post back into the form) does not reach the visible
+div on its own (no DOM event exists for that) - the returned `refresh()`
+pulls it back in, which is exactly what `@qu/app-shell`'s
+`rich-text-actions.js` exports as `refreshRichText()` for callers to use.
+`wireRichText({mountEl})` (called unconditionally by `boot.js` after
+EVERY `renderPage()`, the SAME "correct no-op" posture `wireViews()`
+already has) is the attribute-driven half: any `<textarea data-qu-richtext>`
+gets bound automatically, no JS per app. No explicit teardown needed
+(unlike `wireViews()`'s own tracked View subscriptions) - a rich-text
+binding holds no live Space subscription, only DOM listeners on elements
+this same render created, discarded with the rest of the old DOM subtree
+on the next render. Wired into ONE example: Blog's post-content
+`<textarea>` (both forms) - `blog-actions.js`'s `loadForEdit()` and a
+completed publish's own `form.reset()` each call `refreshRichText()`
+right after setting that field's `.value`, so the visible surface never
+goes stale; a dedicated test in `blog-feeds.test.js` types/formats
+through the ACTUAL rich-text surface (not a raw `.value =` assignment)
+and confirms the resulting HTML is what gets published and rendered.
+
+**UPDATE - SEARCH BOXES (`view-actions.js`'s `wireViews()`).** An
+`<input data-qu-search-for="<view-name>">` anywhere on a page is wired,
+on every `'input'` event, to that named View's own `setQuery()`
+(`view-sources.js`'s own "UPDATE - CLIENT-SIDE FULL-TEXT SEARCH" doc
+comment) - matched by NAME against the View's `[data-qu-view="name"]`
+element, not DOM position, so a search box doesn't have to be a literal
+sibling of the feed it filters. The SAME "framework code wires an inert,
+content-authored element by attribute convention" posture `[data-qu-view]`
+itself already uses - a template author writes one `<input>` tag, no JS.
+Deliberately NOT debounced: `setQuery()` filters data already synced
+locally, no relay round-trip per keystroke, so there's no real cost to
+avoid. A `data-qu-search-for` naming a View this page never opens (typo,
+or a box meant for a different page) is a correct no-op - `wireViews()`
+only looks for a matching search input INSIDE the loop that already
+successfully opened that View. Wired into ONE example: Blog's Global Feed
+gained `<input data-qu-search-for="${prefix}-index">` right above its
+`blog-index` View - `blog-search.test.js` proves the RENDERED box filters
+the visible feed by a post's own content, live, no reload; `view-actions.test.js`
+proves the underlying wiring generically (including the no-op case) with
+a bare `viewKind`, no Blog involved.
+
+**UPDATE - `setFormStatus()` (`@qu/app-shell`'s new `src/form-status.js`).**
+The "find or create this form's own `[data-qu-status]` paragraph, then
+set its text" three-liner was duplicated verbatim across every form-
+wiring file in this package (`blog-actions.js`, `guestbook-actions.js`,
+`forum-actions.js` ×2, `admin-actions.js` ×2, `generic-write-actions.js`)
+- `cms-actions.js` already had its own private copy (`setStatus()`) of
+exactly this function, unnoticed by the others. Extracted into ONE
+shared `setFormStatus(form, text)`, imported everywhere the old 3-line
+block used to live (`cms-actions.js` keeps calling it `setStatus` via an
+aliased import - `import {setFormStatus as setStatus}` - so its own
+existing call sites needed zero changes). Deliberately a plain function,
+not a `<qu-form-status>` Web Component - no reactive Space data is
+involved, just "set some text on an element," so a Component's
+registration/shadow-DOM machinery would be pure overhead here. The OTHER
+`[data-qu-status]` usages in this package (`admin-actions.js`'s
+per-list-item mode/uninstall buttons, `installed-apps-actions.js`'s
+update banner) are a genuinely different shape - a plain element created
+ONCE and held via closure across several button handlers, not a `<form>`
+re-queried on every submit - so they were deliberately left as they were,
+not force-fit onto this helper.
 
 **Phase 2, reactive/live component bindings — DELIVERED**
 (`packages/space-components/`, `@qu/space-components`): the user's own
@@ -2162,6 +2431,33 @@ document's own still-open question on that below).
   only takes effect on the NEXT resolve, same as any other Space content
   edit never hot-reloading an already-rendered page (`openLiveView()`'s own
   doc comment).
+
+  **UPDATE - CLIENT-SIDE FULL-TEXT SEARCH (`setQuery()`).** The returned
+  object gained `setQuery(text)`: a live, case-insensitive substring filter
+  over `searchFields` (default `['title', 'excerpt']`), applied BEFORE
+  `sortBy`/`limit` and re-notifying observers, same as any other source
+  change. Deliberately client-side over whatever a View's sources have
+  ALREADY synced - no relay-side search index/query exists (a relay only
+  forwards signed envelopes) - the same honest "only as good as what a
+  client has locally" limitation `ListField.slice()` already accepts. The
+  real gap this closes: a `'pages'` source previously only ever exposed
+  `item.title` (`routeRegistryKind`'s `routes` entries had no content at
+  all), so searching a Blog/CMS feed could only ever match a PAGE TITLE,
+  never its actual content. `routeRegistryKind` gained an optional
+  `excerpt` per route (`dev.js`'s `publishRoute()`/`publishGlobalRoute()`,
+  a new `excerptFromHtml()` helper - strip tags, collapse whitespace,
+  truncate) - captured ONCE, at publish time (never kept in sync on a
+  later edit, the same accepted scope cut as the aggregate index's own
+  cached title) - which the `'pages'` adapter now also normalizes into
+  `item.excerpt`. Wired into ONE example, Blog (`blog-actions.js`'s
+  `publishGlobalPost()`/personal-create branch both pass `excerpt:
+  excerptFromHtml(content)`) - `blog-search.test.js` proves a post
+  published through the real form is findable by its own body text via
+  the SAME `blog-index` View `blog-bundle.js` already builds, no new
+  View/UI wiring needed for the underlying mechanism. A `<qu-search-box>`
+  UI Component (a plain `<input>` calling `setQuery()`) remains open -
+  UI-Feinheiten deliberately come last, per this whole roadmap's own
+  stated ordering.
 - **Rendering lives in `@qu/app-shell`, deliberately NOT `@qu/app-renderer`**:
   `@qu/app-renderer` is a pure "already-resolved plan -> DOM" renderer with
   ZERO dependency on `@qu/space-core`/`@qu/app-core` (turns plain
@@ -2291,6 +2587,46 @@ edit round-trip for both a global post (relay-admin) and a personal one
 Blog/Guestbook/Forum side by side (Forum has no `personalBundle` at all -
 its own "Multi-User" button stays exactly as before, the control case
 proving the gate doesn't over-restrict).
+
+**UPDATE - Blog's `mode: 'personal'` aggregate feed, closing the gap the
+mode-button gating above documented.** Unlike Guestbook, a Blog post is a
+self-owned PAGE, not a shared-list entry, so there was no single
+cross-identity-readable source an aggregate View could merge for free.
+`blog-actions.js`'s personal-post CREATE path (never an EDIT - see below)
+now ALSO pushes a lightweight index entry (`{name: title, route, ts,
+ownerPub}`) into a shared list, `<prefix>:personal` (registered upfront,
+`admin-actions.js`'s `APP_INSTALLERS.blog.sharedLists` - the exact same
+"one physical list, many logical feeds" pattern Guestbook's own
+`<prefix>:personal` and `forum-bundle.js`'s topics/replies already
+establish); `blog-bundle.js`'s new `aggregateFeedViewFields()` reads it,
+installed unconditionally (harmless when `mode` never uses it, same
+posture as Guestbook's identically-named function). `admin-actions.js`'s
+`unsupportedModes()` (above) needed NO code change to re-enable the
+"Personal" button for Blog - it's entirely data-driven off `viewNames()`,
+which now includes `${prefix}-aggregate-feed` for Blog too.
+
+The pushed entry's own `route` is stored ABSOLUTE, with the `/u/<ownerRef>/`
+segment already baked in (`QuCrypto.toBase64Url()`, matching what `boot.js`'s
+`resolveUserRef()` decodes) - the aggregate feed renders OUTSIDE any one
+visitor's own `/u/<ref>/` context (`renderAggregateShell()` calls
+`wireViews()` with no `routeNamespace`/`userRef` at all), so `view-actions.js`'s
+`renderItem()` never rewrites this item's own link the way it would for a
+View rendered INSIDE that context - the route has to already be
+click-through-correct as stored. A REAL bug caught while writing this
+feature's own test: a genuinely anonymous, never-`joinSpace()`d reader
+cannot subscribe to a `'members'`-ACL shared list AT ALL (`relay.js`'s own
+subscribe-handler doc comment - membership gates reading it, not just
+writing), which at first looked like a broken aggregate feed; in a REAL
+deployment every visitor is already a member by the time they read
+anything (`shell.js`'s own boot sequence calls `joinSpace()` unconditionally
+before touching any Kind) - there is no genuinely anonymous, un-joined
+reader in this framework's actual model, only visitors who never happen to
+write. Scope cut, matching every other `editX()` in this codebase: editing
+an EXISTING personal post's title does NOT update its aggregate index
+entry's own cached title (`ListField` has no per-index update, only
+`push()`/`remove()`) - the entry's `route` always still resolves to the
+CURRENT content when followed, only the aggregate list's displayed title
+text could go stale after a title edit.
 
 **Still an open question, deliberately not decided in this pass**: apps
 whose EXECUTION LOGIC (not just content) lives in the filesystem/repo

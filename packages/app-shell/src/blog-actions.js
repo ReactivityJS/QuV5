@@ -91,6 +91,27 @@
  * `editPage()`/`editGlobalPage()` instead of `createPage()`/
  * `createGlobalPage()` - no `publishRoute()`/`publishGlobalRoute()` needed,
  * the route already exists.
+ *
+ * AGGREGATE INDEX (`mode: 'personal'`'s own read-only merged feed,
+ * `blog-bundle.js`'s `aggregateFeedViewFields()`): every NEW personal post
+ * (never an EDIT of an existing one - see `pushAggregateIndexEntry()`'s own
+ * doc comment) pushes a small index entry into the shared list
+ * `<prefix>:personal`, right after the post itself is durably confirmed.
+ * This is the ONLY thing that makes `mode: 'personal'` possible for Blog at
+ * all (unlike Guestbook, a Blog post is a self-owned PAGE, not a
+ * shared-list entry, with no cross-identity discovery mechanism otherwise).
+ *
+ * RICH TEXT: the content `<textarea>` is `data-qu-richtext` (`blog-bundle.js`'s
+ * own doc comment) - `rich-text-actions.js`'s `wireRichText()` (called
+ * unconditionally by `boot.js`, like every other framework wiring here)
+ * already turned it into a small formatting toolbar by the time this file
+ * ever touches it, so the submit handler's own `form.querySelector(
+ * '[name="content"]').value` read needs no changes at all. The two places
+ * THIS file sets that same `.value` PROGRAMMATICALLY - `loadForEdit()`
+ * and a completed publish's own `form.reset()` - each follow it with
+ * `refreshRichText()`, or the visible rich-text surface would silently
+ * go stale (`@qu/space-ui`'s `bindRichText()` own "ONE-WAY MIRRORING" doc
+ * comment on why that call can't be skipped).
  */
 import {
   createGlobalPage,
@@ -101,14 +122,22 @@ import {
   globalAppAnchor,
   createPage,
   publishRoute,
+  excerptFromHtml,
   pageKind,
   deriveContentNodeId,
   editPage,
   editGlobalPage,
   ContentResolver,
+  pushToSharedList,
+  sharedListAnchor,
+  sharedListKind,
 } from '@qu/app-core';
+import { deriveOwnerNodeId } from '@qu/space-core';
+import { QuCrypto } from '@qu/core';
 import { verifyWritesAcked } from './verify-writes.js';
 import { resolvePlaceholders } from './qu-placeholders.js';
+import { setFormStatus } from './form-status.js';
+import { refreshRichText } from './rich-text-actions.js';
 
 const GLOBAL_KINDS = { pageKind: adminPageKind, routeRegistryKind: adminRouteRegistryKind, viewKind: adminViewKind };
 
@@ -124,7 +153,7 @@ async function publishGlobalPost(space, prefix, { route, title, content }) {
   const anchor = await globalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
   await verifyWritesAcked(space, id, async () => {
-    await publishGlobalRoute(space, prefix, { route, title });
+    await publishGlobalRoute(space, prefix, { route, title, excerpt: excerptFromHtml(content) });
     await new Promise((resolve) => setTimeout(resolve, 400));
     await createGlobalPage(space, prefix, { route, title, content });
   });
@@ -134,6 +163,33 @@ async function publishGlobalPost(space, prefix, { route, title, content }) {
 function toGlobalRouteTemplate(personalTemplate, prefix) {
   const ns = `/${prefix}`;
   return personalTemplate.startsWith(ns) ? personalTemplate.slice(ns.length) || '/post/{slug}' : '/post/{slug}';
+}
+
+/**
+ * Pushes ONE index entry `{name: title, route, ts, ownerPub}` into
+ * `<prefix>:personal` - `blog-bundle.js`'s own `aggregateFeedViewFields()`
+ * doc comment on why this is what actually makes `mode: 'personal'`'s
+ * aggregate feed possible for a self-owned-PAGE app like Blog (unlike
+ * Guestbook, whose shared-list entry already IS the visible content).
+ * `route` is stored ABSOLUTE, with the `/u/<ownerRef>/` segment already
+ * baked in (`QuCrypto.toBase64Url()` - the SAME base64url encoding
+ * `boot.js`'s own `resolveUserRef()` decodes) - the aggregate feed renders
+ * outside any one visitor's own `/u/<ref>/` context (`boot.js`'s
+ * `renderAggregateShell()` calls `wireViews()` with no `routeNamespace`/
+ * `userRef` at all, unlike a personal-instance render), so `view-actions.js`'s
+ * `renderItem()` never rewrites this item's own link the way it would for a
+ * View rendered INSIDE that context - the route has to already be
+ * click-through-correct as stored.
+ * @param {import('@qu/space-core').Space} space @param {string} prefix
+ * @param {{personalRoute: string, title: string}} params - `personalRoute` is the UNPREFIXED-by-owner route this post was just saved at (`/<prefix>/post/<slug>`).
+ */
+async function pushAggregateIndexEntry(space, prefix, { personalRoute, title }) {
+  const listName = `${prefix}:personal`;
+  const ownerRef = QuCrypto.toBase64Url(space.identity.signingPub);
+  const route = `/${prefix}/u/${ownerRef}${personalRoute.slice(prefix.length + 1)}`;
+  const entry = { name: title, route, ts: Date.now(), ownerPub: QuCrypto.toBase64(space.identity.signingPub) };
+  const id = await deriveOwnerNodeId(await sharedListAnchor(listName), sharedListKind.kind);
+  await verifyWritesAcked(space, id, () => pushToSharedList(space, listName, entry));
 }
 
 /** @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space}} params */
@@ -158,10 +214,19 @@ export function wireBlog({ mountEl, doc, space }) {
   const alsoGlobalCheckbox = isPersonal ? form.querySelector('[name="alsoGlobal"]') : null;
   const slugField = form.querySelector('[name="slug"]');
   const submitBtn = form.querySelector('button[type="submit"]');
+  const draftBtn = form.querySelector('[data-qu-draft-btn]'); // see this file's own top doc comment, "ENTWURF/VERÖFFENTLICHEN" - absent on an older/hand-authored form, optional-chained below.
   let activeEdit = null; // see this file's own top doc comment, "INLINE EDIT" - same `cms-actions.js` shape, including its accepted scope cut.
+
+  // Whichever submit button was actually clicked decides `form.dataset.intent` - read once, then
+  // cleared, by the submit handler below. Set on 'click' (fires before 'submit') rather than relying
+  // on the (real-browser-only) `SubmitEvent.submitter`, so this also works for a synthetic
+  // `dispatchEvent(new Event('submit'))` a test issues after its own synthetic button click.
+  submitBtn.addEventListener('click', () => (form.dataset.intent = 'publish'));
+  draftBtn?.addEventListener('click', () => (form.dataset.intent = 'draft'));
 
   function enterCreateMode() {
     delete form.dataset.editingRoute;
+    delete form.dataset.loadedStatus;
     slugField.readOnly = false;
     submitBtn.textContent = 'Veröffentlichen';
     activeEdit?.release();
@@ -173,14 +238,20 @@ export function wireBlog({ mountEl, doc, space }) {
       ? new ContentResolver(space, { appAdminPub: space.identity.signingPub })
       : new ContentResolver(space, { appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
     activeEdit?.release();
-    const { page, release } = await resolver.resolvePage(route, { timeout: 2000, hold: true });
+    // `includeDrafts: true` - see `resolvePage()`'s own doc comment: without this, an already-saved
+    // DRAFT loaded back into this exact form (see this file's own "ENTWURF/VERÖFFENTLICHEN" doc
+    // comment) would resolve as `null`, indistinguishable from "does not exist," even to its own author.
+    const { page, release } = await resolver.resolvePage(route, { timeout: 2000, hold: true, includeDrafts: true });
     activeEdit = { release };
     if (!page) return;
     form.querySelector('[name="title"]').value = page.title ?? '';
     slugField.value = route.split('/').pop() ?? '';
     slugField.readOnly = true;
-    form.querySelector('[name="content"]').value = page.content ?? '';
+    const contentField = form.querySelector('[name="content"]');
+    contentField.value = page.content ?? '';
+    refreshRichText(contentField); // see this file's own top doc comment, "RICH TEXT" - a plain `.value =` assignment doesn't reach a bound rich-text surface on its own.
     form.dataset.editingRoute = route;
+    form.dataset.loadedStatus = page.status === 'draft' ? 'draft' : 'published';
     submitBtn.textContent = 'Aktualisieren';
   }
 
@@ -202,40 +273,79 @@ export function wireBlog({ mountEl, doc, space }) {
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const status = form.querySelector('[data-qu-status]') ?? form.appendChild(doc.createElement('p'));
-    status.setAttribute('data-qu-status', '');
-    status.textContent = '';
+    setFormStatus(form, '');
+    // See this file's own top doc comment, "ENTWURF/VERÖFFENTLICHEN" - whichever button's own
+    // 'click' listener (above) ran last decides this; absent (a plain `dispatchEvent('submit')` with
+    // no preceding button click, e.g. most of this file's own PRE-EXISTING tests) defaults to
+    // 'publish' - the unchanged, original behavior.
+    const intent = form.dataset.intent === 'draft' ? 'draft' : 'publish';
+    delete form.dataset.intent;
+    const pageStatus = intent === 'draft' ? 'draft' : 'published';
     try {
       const title = form.querySelector('[name="title"]').value.trim();
       const slug = form.querySelector('[name="slug"]').value.trim();
       const content = form.querySelector('[name="content"]').value;
       const editingRoute = form.dataset.editingRoute;
       const route = editingRoute ?? resolvePlaceholders(routeTemplate, { space, fields: { slug } });
+      // Was this SAME route, moments ago, still an unregistered draft (this exact form, still open -
+      // `loadForEdit()`/the draft-save branch below both set this)? Only THEN does going live now
+      // still need `publishRoute()`/`publishGlobalRoute()` - an ordinary edit of an already-published
+      // post (the pre-existing, tested path) must never register a second route entry.
+      const wasDraft = form.dataset.loadedStatus === 'draft';
 
       if (isPersonal) {
         if (editingRoute) {
-          await editPage(space, { route, title, content });
+          await editPage(space, { route, title, content, status: pageStatus });
+          if (intent === 'publish' && wasDraft) {
+            await publishRoute(space, { route, title, excerpt: excerptFromHtml(content) });
+            await pushAggregateIndexEntry(space, prefix, { personalRoute: route, title });
+          }
+        } else if (intent === 'draft') {
+          await createPage(space, { route, title, content, status: 'draft' });
         } else {
           const id = await deriveContentNodeId(space.identity.signingPub, pageKind.kind, route);
           await verifyWritesAcked(space, id, async () => {
-            await createPage(space, { route, title, content });
-            await publishRoute(space, { route, title });
+            await createPage(space, { route, title, content, status: 'published' });
+            await publishRoute(space, { route, title, excerpt: excerptFromHtml(content) });
           });
+          // Indexes this NEW post into the aggregate feed - see `pushAggregateIndexEntry()`'s own
+          // doc comment. AFTER the post itself is durably acked, never before - a stale index entry
+          // pointing at a not-yet-synced post would be worse than a brief delay before it appears
+          // here (the post is already live at its own route regardless, just not indexed yet).
+          await pushAggregateIndexEntry(space, prefix, { personalRoute: route, title });
           if (alsoGlobalCheckbox?.checked) {
             const globalRoute = resolvePlaceholders(toGlobalRouteTemplate(routeTemplate, prefix), { space, fields: { slug } });
             await publishGlobalPost(space, prefix, { route: globalRoute, title, content });
           }
         }
       } else if (editingRoute) {
-        await editGlobalPage(space, prefix, { route, title, content });
+        await editGlobalPage(space, prefix, { route, title, content, status: pageStatus });
+        if (intent === 'publish' && wasDraft) {
+          await publishGlobalRoute(space, prefix, { route, title, excerpt: excerptFromHtml(content) });
+        }
+      } else if (intent === 'draft') {
+        await createGlobalPage(space, prefix, { route, title, content, status: 'draft' });
       } else {
         await publishGlobalPost(space, prefix, { route, title, content });
       }
-      form.reset();
-      enterCreateMode();
-      status.textContent = 'Veröffentlicht und vom Relay bestätigt.';
+
+      if (intent === 'draft') {
+        // Stay in place, editing THIS SAME draft - see this file's own top doc comment: no
+        // drafts-LIST UI exists yet, so the only way back to an unpublished draft, right now, is
+        // this still-open form (never reset, unlike a completed publish below).
+        slugField.readOnly = true;
+        form.dataset.editingRoute = route;
+        form.dataset.loadedStatus = 'draft';
+        submitBtn.textContent = 'Veröffentlichen'; // already live-appropriate wording, e.g. after loadForEdit() had set 'Aktualisieren'.
+        setFormStatus(form, 'Als Entwurf gespeichert (noch nicht veröffentlicht).');
+      } else {
+        form.reset();
+        refreshRichText(form.querySelector('[name="content"]')); // form.reset() clears the textarea's own .value - see this file's own top doc comment, "RICH TEXT."
+        enterCreateMode();
+        setFormStatus(form, 'Veröffentlicht und vom Relay bestätigt.');
+      }
     } catch (err) {
-      status.textContent = `Fehler: ${err.message}`;
+      setFormStatus(form, `Fehler: ${err.message}`);
     }
   });
 }

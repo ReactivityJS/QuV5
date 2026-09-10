@@ -127,6 +127,36 @@ test('list field: remove() deletes exactly the entry at the given index, shiftin
   assert.deepEqual(await node.field('names').toArray(), ['a', 'c']);
 });
 
+test('list field: slice() reads a window in the SAME order toArray() returns, negative indices count from the end (Array.prototype.slice semantics)', async () => {
+  const kind = defineKind('archive', { fields: { entries: { shape: 'list' } } });
+  const author = await actor();
+  const doc = createDoc(kind, author.signingPub);
+  const node = new SpaceNode({ id: 'arc1', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
+
+  for (let i = 0; i < 10; i++) await node.field('entries').push(`item-${i}`);
+
+  assert.deepEqual(await node.field('entries').slice(0, 3), ['item-0', 'item-1', 'item-2']);
+  assert.deepEqual(await node.field('entries').slice(-3), ['item-7', 'item-8', 'item-9'], 'the most recently pushed N, via a negative start index');
+  assert.deepEqual(await node.field('entries').slice(), await node.field('entries').toArray(), 'no args reads the whole list, same as toArray()');
+});
+
+test('list field: slice() on an \'encrypted\'-visibility list decrypts only the requested window, and every recipient sees the same plaintext window', async () => {
+  const kind = defineKind('inbox', { fields: { messages: { shape: 'list' } } }); // default visibility: 'encrypted'.
+  const author = await actor();
+  const reader = await actor();
+  const doc = createDoc(kind, author.signingPub);
+  const node = new SpaceNode({ id: 'inbox1', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [reader.xPublicKey] });
+
+  for (let i = 0; i < 5; i++) await node.field('messages').push(`secret-${i}`);
+
+  const readerNode = new SpaceNode({ id: 'inbox1', kindSchema: kind, doc, identity: reader, recipientXPubKeys: () => [] });
+  assert.deepEqual(await readerNode.field('messages').slice(-2), ['secret-3', 'secret-4']);
+  // The raw Yjs value is never the plaintext, regardless of window size - same guarantee toArray() already
+  // has. A 'list' field's own Y.Array lives at the TOP LEVEL of the doc (doc.getArray(name)), not inside
+  // the 'content' Y.Map atomic/text fields use (field.js's own createField() doc comment).
+  assert.equal(JSON.stringify(doc.getArray('messages').toArray()).includes('secret-'), false);
+});
+
 test('list field: a concurrent remove() and push() from two peers both survive - CRDT-merged, not last-write-wins over the whole array', async () => {
   const kind = defineKind('registry', { fields: { names: { shape: 'list' } } });
   const author = await actor();

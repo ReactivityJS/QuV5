@@ -54,6 +54,7 @@ import { pushToSharedList, sharedListAnchor, sharedListKind, createPage, publish
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { verifyWritesAcked } from './verify-writes.js';
 import { resolvePlaceholders } from './qu-placeholders.js';
+import { setFormStatus } from './form-status.js';
 
 /** Every NAMED, non-button form control's own current value, keyed by `name` - the raw material both `resolvePlaceholders()`'s own `fields` and a shared-list entry's own stored shape are built from. */
 function collectFields(form) {
@@ -72,9 +73,7 @@ export function wireGenericWrite({ mountEl, doc, space }) {
 
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
-      const status = form.querySelector('[data-qu-status]') ?? form.appendChild(doc.createElement('p'));
-      status.setAttribute('data-qu-status', '');
-      status.textContent = '';
+      setFormStatus(form, '');
       try {
         const fields = collectFields(form);
         if (target === 'shared-list') {
@@ -108,9 +107,9 @@ export function wireGenericWrite({ mountEl, doc, space }) {
           throw new Error(`data-qu-target="${target}" unbekannt - erwartet "shared-list" oder "page"`);
         }
         form.reset();
-        status.textContent = 'Gespeichert und vom Relay bestätigt.';
+        setFormStatus(form, 'Gespeichert und vom Relay bestätigt.');
       } catch (err) {
-        status.textContent = `Fehler: ${err.message}`;
+        setFormStatus(form, `Fehler: ${err.message}`);
       }
     });
   }

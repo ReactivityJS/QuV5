@@ -264,7 +264,53 @@ test('Blog: an ordinary visitor edits their OWN personal post inline via the "Be
   }
 });
 
-test('Admin console: mode buttons are disabled for a mode that would silently break the app - "Multi-User" for Blog/Guestbook, "Personal" only for Blog', async () => {
+test('Blog: the post form\'s own content textarea is a real rich-text surface - typing/formatting through it publishes the resulting HTML', async () => {
+  const relay = await bootRelay();
+  try {
+    const adminSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl: adminMountEl, router: adminRouter } = mountAdmin(adminSpace);
+    await installViaForm(adminMountEl, 'blog', 'blog');
+    adminRouter.stop();
+
+    const authorSpace = await relay.connect(relay.relayAdmin);
+    const { window, mountEl, router } = mountAt(authorSpace, '/blog/');
+    await waitUntil(() => mountEl.querySelector('form[data-qu-action="blog-post-form"]'));
+    const form = mountEl.querySelector('form[data-qu-action="blog-post-form"]');
+    const contentField = form.querySelector('[name="content"]');
+    // wireRichText() runs right after wireViews() resolves (boot.js's own render sequence) -
+    // slightly LATER than the form's own markup landing in the DOM, so wait for it specifically
+    // rather than assuming it's already done the instant the form itself is found.
+    await waitUntil(() => contentField.hidden === true, { timeout: 2000 });
+    const editor = mountEl.querySelector('.qu-richtext-editor');
+    assert.ok(editor, 'a contenteditable rich-text surface is rendered in its place');
+
+    editor.innerHTML = 'wichtiger Satz';
+    const textNode = editor.firstChild;
+    const range = window.document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, 7); // "wichtig"
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    mountEl.querySelector('.qu-richtext-btn-b').dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
+    assert.equal(editor.innerHTML, '<strong>wichtig</strong>er Satz');
+    assert.equal(contentField.value, editor.innerHTML, 'the toolbar click already mirrored into the underlying textarea, exactly what the submit handler reads');
+
+    form.querySelector('[name="title"]').value = 'Formatierter Post';
+    form.querySelector('[name="slug"]').value = 'formatiert';
+    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await waitUntil(() => /bestätigt/.test(form.querySelector('[data-qu-status]')?.textContent ?? ''), { timeout: 6000 });
+
+    router.navigate('/blog/post/formatiert');
+    await waitUntil(() => mountEl.innerHTML.includes('<strong>wichtig</strong>er Satz'), { timeout: 8000 });
+
+    router.stop();
+  } finally {
+    await relay.close();
+  }
+});
+
+test('Admin console: "Multi-User" is disabled for Blog/Guestbook (own personalBundle); "Personal" is enabled for both now that Blog also builds an aggregate feed', async () => {
   const relay = await bootRelay();
   try {
     const adminSpace = await relay.connect(relay.relayAdmin);
@@ -286,7 +332,7 @@ test('Admin console: mode buttons are disabled for a mode that would silently br
     assert.equal(modeBtn('book', 'Nur Persönlich').disabled, false, 'Guestbook already builds an aggregate feed - Personal works');
 
     assert.equal(modeBtn('blog', 'Multi-User').disabled, true, 'Blog has its own personalBundle - Multi-User would ignore it');
-    assert.equal(modeBtn('blog', 'Nur Persönlich').disabled, true, 'Blog builds no aggregate feed yet - Personal would render permanently empty');
+    assert.equal(modeBtn('blog', 'Nur Persönlich').disabled, false, 'Blog now builds an aggregate feed too - Personal works (blog-aggregate-feed.test.js proves it end to end)');
 
     assert.equal(modeBtn('forum', 'Multi-User').disabled, false, 'Forum has no personalBundle at all - Multi-User behaves exactly as documented');
 

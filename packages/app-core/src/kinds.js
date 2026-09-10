@@ -101,7 +101,7 @@ export const appManifestKind = defineKind('qu-app', {
  */
 export const routeRegistryKind = defineKind('qu-route-registry', {
   fields: {
-    /** `Array<{route: string, title: string}>` - see resolver.js's `resolveRoutes()`. */
+    /** `Array<{route: string, title: string, excerpt?: string}>` - see resolver.js's `resolveRoutes()`. `excerpt` (optional, dev.js's `publishRoute()`/`publishGlobalRoute()`) is a plaintext snippet of the page's own content, captured at PUBLISH time only (never updated on a later edit - see `dev.js`'s own doc comment) - what `view-sources.js`'s `'pages'` source surfaces as `item.excerpt`, the thing that makes `openLiveView()`'s `setQuery()` full-text search actually search page CONTENT, not just titles. */
     routes: { shape: 'list', visibility: 'public' },
   },
   acl: { write: 'named' },
@@ -419,6 +419,25 @@ export const pageKind = publicMeta(
        * unchanged - fully backward compatible.
        */
       style: { shape: 'atomic', visibility: 'public' },
+      /**
+       * `'draft'` | `'published'` | `null`/unset (treated as `'published'` -
+       * every page written before this field existed keeps working exactly
+       * as before, no migration). See `resolver.js`'s `resolvePage()` own
+       * doc comment: the app's OWN rendering path (ordinary navigation, a
+       * `'pages'` View source) never resolves a `'draft'` page unless the
+       * caller explicitly opts in with `includeDrafts: true` (the editor's
+       * own "load this draft back into the form" case) - a draft looks
+       * exactly like "never published" to everyone else, the SAME 404-style
+       * `null` an unpublished route already produces. NOT a confidentiality
+       * mechanism - this field, like every other on this Kind, is
+       * `visibility: 'public'`: content-addressed id derivation still works
+       * for anyone who already knows/guesses the route (this Kind's own doc
+       * comment, `routeRegistryKind`'s own "not a query" reasoning) - only
+       * the app's own resolver path honors `status`, not the underlying
+       * Node. Genuine confidentiality needs `visibility: 'encrypted'`
+       * (`privatePageKind`), a different, narrower-audience Kind entirely.
+       */
+      status: { shape: 'atomic', visibility: 'public' },
     },
     acl: { write: 'content' },
   })
@@ -718,6 +737,8 @@ export const adminPageKind = publicMeta(
       data: { shape: 'atomic', visibility: 'public' },
       /** Global-app counterpart to `pageKind.style` - see that field's own doc comment (identical reasoning: resolves against `createGlobalStyle()`'s own `adminStyleKind` instead of the self-owned one). */
       style: { shape: 'atomic', visibility: 'public' },
+      /** Global-app counterpart to `pageKind.status` - identical reasoning/scope. */
+      status: { shape: 'atomic', visibility: 'public' },
     },
     acl: { write: 'relay-admins' },
   })

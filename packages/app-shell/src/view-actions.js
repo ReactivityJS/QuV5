@@ -42,6 +42,22 @@
  * tear anything down themselves, the same "correct no-op, just call it
  * again" ergonomic `wireCms()` already has, extended to cover this file's
  * own extra state.
+ *
+ * UPDATE - SEARCH BOXES: an `<input data-qu-search-for="<view-name>">`
+ * anywhere in `mountEl` (not necessarily a sibling of the View's own
+ * `[data-qu-view]` element - a search box above a feed further down the
+ * page is a perfectly normal layout) is wired to that View's own
+ * `setQuery()` (`view-sources.js`'s own doc comment) on every `'input'`
+ * event - plain text content authors never write JS, this is the SAME
+ * "framework code wires an inert element a content author declared by
+ * attribute" posture this whole file already uses for `[data-qu-view]`
+ * itself. Deliberately NOT debounced: `setQuery()` filters data THIS
+ * client already has locally (no relay round-trip per keystroke - see
+ * `openLiveView()`'s own doc comment on why the search itself is
+ * client-side), so there is no real cost to pay down. A `data-qu-search-for`
+ * naming a View this page has no `[data-qu-view]` element for (a typo, or
+ * a search box for a View rendered on a DIFFERENT page) is a correct
+ * no-op - it simply never finds a matching View to wire to.
  */
 import { ContentResolver, openLiveView } from '@qu/app-core';
 import { sanitizeHtml, resolveSlots } from '@qu/app-renderer';
@@ -125,6 +141,14 @@ export async function wireViews({ mountEl, doc, space, appAdminPub, kinds, route
         render: (item) => renderItem(item, config.itemTemplate, doc, { routeNamespace, userRef }),
       });
       closers.push(stopBinding);
+
+      // See this file's own "UPDATE - SEARCH BOXES" doc comment.
+      const searchInput = mountEl.querySelector(`[data-qu-search-for="${name}"]`);
+      if (searchInput) {
+        const onInput = () => view.setQuery(searchInput.value);
+        searchInput.addEventListener('input', onInput);
+        closers.push(() => searchInput.removeEventListener('input', onInput));
+      }
     })
   );
 

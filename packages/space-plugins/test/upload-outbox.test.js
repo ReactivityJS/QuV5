@@ -8,7 +8,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuCrypto } from '@qu/core';
 import { Space, deriveOwnerNodeId } from '@qu/space-core';
+import { createMemoryStore } from '@qu/space-storage';
+import { createInProcessHub, InProcessTransport, createRelayForwarder } from '@qu/space-transport';
+import { EventBus } from '@qu/events';
 import { UploadOutbox, uploadOutboxKind } from '../src/upload-outbox.js';
+import { markFileReceived, watchFileReceipts } from '../src/delivery-status.js';
 
 async function actor() {
   const kp = await QuCrypto.generateKeypair();
@@ -146,4 +150,55 @@ test('upload status is visible to a fellow Space member who subscribes to the up
     const records = (await bobView.field('records').get()) ?? {};
     return Object.values(records).some((r) => r.name === 'shared.png' && r.status === 'done');
   });
+});
+
+test('a "done" record advances to "synced" once a real relay ack\'s the metadata write, when the outbox is given a bus', async () => {
+  const alice = await actor();
+  const members = [{ pub: alice.signingPub, xPub: alice.xPublicKey }];
+  const hub = createInProcessHub();
+  createRelayForwarder({ hub, members, resolveKindSchema: () => uploadOutboxKind, storage: createMemoryStore() });
+
+  const transport = new InProcessTransport(hub, 'alice');
+  await transport.connect();
+  const bus = new EventBus();
+  const space = new Space({ identity: alice, members, transport, bus });
+
+  const outbox = new UploadOutbox(space, memoryLocalStore(), async () => {}, bus);
+  const id = await outbox.enqueue({ name: 'relay-checked.png', size: 5, mimeType: 'image/png' }, 'bytes');
+
+  const seen = [];
+  await outbox.watch(id, (record) => seen.push(record?.status));
+  await waitUntil(async () => (await outbox.statusOf(id))?.status === 'synced');
+  assert.deepEqual(seen.slice(0, 3), ['pending', 'uploading', 'done']); // 'synced' arrives strictly after 'done', not instead of it.
+});
+
+test('without a bus, a "done" record stays "done" (never advances to "synced")', async () => {
+  const alice = await actor();
+  const space = new Space({ identity: alice, members: [], transport: silentTransport() });
+  const outbox = new UploadOutbox(space, memoryLocalStore(), async () => {}); // no bus passed
+  const id = await outbox.enqueue({ name: 'no-bus.png', size: 5, mimeType: 'image/png' }, 'bytes');
+  await waitUntil(async () => (await outbox.statusOf(id))?.status === 'done');
+  await new Promise((resolve) => setTimeout(resolve, 30)); // give a hypothetical stray transition a chance to (wrongly) happen.
+  assert.equal((await outbox.statusOf(id)).status, 'done');
+});
+
+test('markFileReceived()/watchFileReceipts() let a recipient confirm receipt of a specific uploaded file', async () => {
+  const alice = await actor(); // uploader
+  const bob = await actor(); // recipient
+  const [aliceTransport, bobTransport] = pairTransports();
+  const aliceSpace = new Space({ identity: alice, members: [], transport: aliceTransport });
+  // readReceiptKind's `marks` field is 'encrypted' (see delivery-status.js) - bob (the one WRITING
+  // his own receipt) must have alice as a member so his encrypted write actually decrypts for her.
+  const bobSpace = new Space({ identity: bob, members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }], transport: bobTransport });
+
+  const outbox = new UploadOutbox(aliceSpace, memoryLocalStore(), async () => {});
+  const fileId = await outbox.enqueue({ name: 'for-bob.png', size: 3, mimeType: 'image/png' }, 'x');
+  await waitUntil(async () => (await outbox.statusOf(fileId))?.status === 'done');
+
+  // bob watches BEFORE marking - no relay/storage catch-up in this bare peer-to-peer harness.
+  await watchFileReceipts(aliceSpace, bob.signingPub); // alice pre-subscribes so her later read below isn't the FIRST subscribe.
+  await markFileReceived(bobSpace, fileId);
+  await waitUntil(async () => (await watchFileReceipts(aliceSpace, bob.signingPub)).marks[fileId] !== undefined);
+  const { marks } = await watchFileReceipts(aliceSpace, bob.signingPub);
+  assert.ok(marks[fileId].at > 0);
 });

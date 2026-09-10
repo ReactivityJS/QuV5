@@ -56,6 +56,7 @@ export const adminConsoleBundle = {
       template: 'main',
       content: `<h1>Relay-Admin</h1>
 <h2>Installierte Apps</h2>
+<p data-qu-empty-apps hidden>(noch keine App registriert)</p>
 <ul data-qu-bind="platform-apps-list"></ul>
 <h2>Beispiel-App installieren</h2>
 <p>Erstellt eine fertig eingerichtete App unter dem gewählten Pfad-Präfix (in diesem, dem Relay-Admin eigenen Space) und registriert sie sofort - kein separates <code>installAppBundle()</code> nötig.</p>

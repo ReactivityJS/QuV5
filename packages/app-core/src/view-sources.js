@@ -82,7 +82,7 @@ export const VIEW_SOURCE_ADAPTERS = {
         (await field.toArray())
           .filter(Boolean)
           .filter((r) => !params?.prefix || r.route.startsWith(params.prefix))
-          .map((r) => normalize({ title: r.title, route: r.route, raw: r }));
+          .map((r) => normalize({ title: r.title, excerpt: r.excerpt ?? '', route: r.route, raw: r }));
       return { id, read, observe: (cb) => field.observe(cb), release };
     },
   },
@@ -171,12 +171,31 @@ function compareBy(sortBy, sortOrder) {
  * ONLY interface `@qu/space-ui`'s `bindList()` needs from whatever it
  * binds to - so a caller (`@qu/app-shell`'s `view-actions.js`) can hand
  * this straight to `bindList()` with ZERO adapter code of its own, exactly
- * as if it were a single ordinary list Field.
+ * as if it were a single ordinary list Field. It also carries a `setQuery()`
+ * for CLIENT-SIDE full-text search - see this function's own "UPDATE" note.
  * @param {import('@qu/space-core').Space} space
- * @param {{appAdminPub: Uint8Array, kinds?: object, sources: Array<{type: string, [k: string]: *}>, sortBy?: string|null, sortOrder?: 'asc'|'desc', limit?: number|null, syncTimeout?: number}} config - `config` is a resolved View's own field values (`resolveView()`'s return shape), NOT the View's Node id - callers read the View first, then open it. `syncTimeout` (default 3000ms) bounds how long the FIRST `recompute()` waits for every source's initial relay sync before running with whatever arrived - see `waitUntilSynced()`'s own doc comment.
- * @returns {Promise<{toArray: () => Promise<Array<object>>, observe: (cb: () => void) => (() => void), close: () => void}>}
+ * @param {{appAdminPub: Uint8Array, kinds?: object, sources: Array<{type: string, [k: string]: *}>, sortBy?: string|null, sortOrder?: 'asc'|'desc', limit?: number|null, syncTimeout?: number, searchFields?: string[]}} config - `config` is a resolved View's own field values (`resolveView()`'s return shape), NOT the View's Node id - callers read the View first, then open it. `syncTimeout` (default 3000ms) bounds how long the FIRST `recompute()` waits for every source's initial relay sync before running with whatever arrived - see `waitUntilSynced()`'s own doc comment. `searchFields` (default `['title', 'excerpt']`) names which of a normalized item's OWN fields `setQuery()` matches against.
+ * @returns {Promise<{toArray: () => Promise<Array<object>>, observe: (cb: () => void) => (() => void), setQuery: (text: string) => Promise<void>, close: () => void}>}
+ *
+ * UPDATE - `setQuery()`: A live, case-insensitive SUBSTRING filter applied
+ * to every merged item BEFORE `sortBy`/`limit` (so a search narrows what
+ * gets ranked/capped, rather than searching only within an already-capped
+ * top-N) - deliberately client-side, over whatever this View's sources
+ * have ALREADY synced locally: no relay-side search index/query exists
+ * (a relay only ever forwards signed envelopes, see `@qu/space-transport`'s
+ * relay.js - the same reason a `'pages'` source's routing Node, not a
+ * relay query, is what enumerates routes at all). Only as good as what a
+ * client has synced, same honest limitation `ListField.slice()`'s own doc
+ * comment already accepts for "reduces LOCAL cost only." A `'pages'`
+ * source's `item.excerpt` (routeRegistryKind's own doc comment) is what
+ * makes this search page/post CONTENT, not just titles - captured once at
+ * publish time (`dev.js`'s `publishRoute()`/`publishGlobalRoute()`), not
+ * kept in sync on a later edit, same scope cut as the aggregate index's
+ * own cached title. Reactive like everything else here: `setQuery()`
+ * re-runs `recompute()` and notifies observers, same as a source changing
+ * on its own; an empty/whitespace-only query clears the filter entirely.
  */
-export async function openLiveView(space, { appAdminPub, kinds, sources, sortBy = null, sortOrder = 'desc', limit = null, syncTimeout = 3000 }) {
+export async function openLiveView(space, { appAdminPub, kinds, sources, sortBy = null, sortOrder = 'desc', limit = null, syncTimeout = 3000, searchFields = ['title', 'excerpt'] }) {
   const opened = await Promise.all(
     sources.map((source) => {
       const adapter = VIEW_SOURCE_ADAPTERS[source.type];
@@ -190,13 +209,15 @@ export async function openLiveView(space, { appAdminPub, kinds, sources, sortBy 
   await Promise.all(opened.map((o) => waitUntilSynced(space, o.id, syncTimeout)));
 
   let current = [];
+  let query = '';
   const listeners = new Set();
   const compare = compareBy(sortBy, sortOrder);
 
   async function recompute() {
     const all = (await Promise.all(opened.map((o) => o.read()))).flat();
-    if (compare) all.sort(compare);
-    current = limit != null ? all.slice(0, limit) : all;
+    const matched = query ? all.filter((item) => searchFields.some((f) => String(item[f] ?? '').toLowerCase().includes(query))) : all;
+    if (compare) matched.sort(compare);
+    current = limit != null ? matched.slice(0, limit) : matched;
     for (const cb of listeners) cb();
   }
 
@@ -209,6 +230,13 @@ export async function openLiveView(space, { appAdminPub, kinds, sources, sortBy 
     observe(cb) {
       listeners.add(cb);
       return () => listeners.delete(cb);
+    },
+    // See this function's own "UPDATE" doc comment. Awaits the recompute so a caller (a search
+    // box's own input handler) can rely on `toArray()` reflecting the new query the moment this
+    // resolves, not just "eventually, once observe() fires."
+    async setQuery(text) {
+      query = (text ?? '').trim().toLowerCase();
+      await recompute();
     },
     // Idempotent - safe to call more than once (a caller's OWN try/finally reaching for close()
     // again after an earlier code path already called it is an easy, realistic mistake, not

@@ -83,6 +83,25 @@ export async function watchReadReceipts(space, pub) {
   return { marks, release };
 }
 
+/**
+ * File-scoped aliases of `markRead()`/`watchReadReceipts()` - see this
+ * file's own doc comment: `contentNodeId` is caller-defined, so an
+ * `UploadOutbox` file id works exactly the same way a chat message id
+ * does. No new Kind/state - `@qu/space-plugins`'s `upload-outbox.js` uses
+ * these for "received, confirmed by the recipient peer" rather than
+ * re-implementing the same durable-per-reader-receipt shape a second time.
+ */
+
+/** @param {import('@qu/space-core').Space} space @param {string} fileId - an `UploadOutbox` file id. @returns {Promise<import('@qu/space-core').SpaceNode>} */
+export function markFileReceived(space, fileId) {
+  return markRead(space, fileId, { at: Date.now() });
+}
+
+/** @param {import('@qu/space-core').Space} space @param {Uint8Array|string} pub - the RECIPIENT's pubkey. @returns {Promise<{marks: Record<string, {upTo: *, at: number}>, release: () => void}>} */
+export function watchFileReceipts(space, pub) {
+  return watchReadReceipts(space, pub);
+}
+
 /** A live, multi-reader read-receipt CACHE - same reactive-watcher shape as `@qu/space-core`'s `presence.js` `PresenceWatcher`. */
 export class ReadReceiptWatcher {
   /** @param {import('@qu/space-core').Space} space @param {import('@qu/events').EventBus} bus - the SAME bus given to `space`'s own constructor. */

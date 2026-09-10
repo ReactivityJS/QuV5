@@ -21,6 +21,14 @@
  *     is enough, nothing to author inside it. `edit-icon="hover"`
  *     (default) shows the pencil only on hover/focus-within;
  *     `edit-icon="always"` keeps it visible.
+ *
+ * UPDATE: `editable="inline"` now works on a `'text'`-shape field too (a
+ * Blog post's own `content`, e.g.), not just `'atomic'` - `makeInlineEditable()`'s
+ * own doc comment on `@qu/space-core`'s `setFieldValue()` and the "discrete
+ * commit, not live collaborative merge" tradeoff that makes this a good fit
+ * for THIS component specifically. Plain (non-`editable`) two-way binding
+ * stays 'atomic'-only, unchanged - `bind.js`'s own doc comment on why a
+ * per-keystroke whole-field replace is the wrong shape for live text.
  */
 import { bindField, bindCheckbox, makeInlineEditable } from '@qu/space-ui';
 import { resolveTarget, assertSafeAttrMode } from './context.js';

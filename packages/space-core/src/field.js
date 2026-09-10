@@ -235,6 +235,34 @@ class ListField {
   }
 
   /**
+   * A WINDOW of this list, `Array.prototype.slice(start, end)` semantics
+   * (negative indices count from the end, e.g. `slice(-20)` = "the last 20
+   * pushed" - `Y.Array.slice()`'s own native support, not reimplemented
+   * here) - same insertion order `toArray()` returns, just a sub-range of
+   * it. For an `'encrypted'`-visibility list, this decrypts ONLY the items
+   * actually in the requested window, not the whole array first - real
+   * savings for a large list (a Guestbook with thousands of entries)
+   * rendering only its most recent page.
+   *
+   * WHAT THIS DOES NOT DO: reduce SYNC cost. `Y.Array` (like every Yjs
+   * shared type) has no partial/windowed sync - the full CRDT structure is
+   * already resident in memory locally once this Node has synced at all,
+   * regardless of whether `slice()` or `toArray()` is ever called
+   * afterward, and regardless of how small a window is requested. The
+   * "replaying every envelope on a fresh subscribe" cost this exists
+   * alongside is `compaction.js`'s own concern (`compactIfNeeded()`),
+   * entirely separate from this - `slice()` only ever narrows LOCAL
+   * decrypt/read work on data already fully synced, never what crosses the
+   * network to get here.
+   * @param {number} [start] @param {number} [end]
+   */
+  async slice(start, end) {
+    const raw = this._yarray.slice(start, end);
+    if (this._visibility === 'public') return raw;
+    return Promise.all(raw.map((envelope) => decryptEnvelopeFor(envelope, this._ctx.identity)));
+  }
+
+  /**
    * Removes `length` entries starting at `index` - Yjs' own
    * `Y.Array.delete()`, CRDT-merged against a concurrent insert/remove
    * exactly like `TextField.delete()` already is for `Y.Text` (this file's
@@ -276,4 +304,40 @@ export function createField(fieldDecl, { contentMap, doc, name, ctx }) {
   if (shape === 'text') return new TextField(contentMap, name, doc, visibility, ctx.kindSchema);
   if (shape === 'list') return new ListField(doc.getArray(name), ctx, doc, visibility);
   throw new Error(`createField: unknown shape "${shape}"`);
+}
+
+/**
+ * Writes a COMPLETE new value to `field`, regardless of its SHAPE - the
+ * one thing an 'atomic' field's own `set()` and a 'text' field's own
+ * `insert()`/`delete()` pair both ultimately mean ("this field's whole
+ * value is now X"), but expose through two INCOMPATIBLE APIs (`TextField`
+ * deliberately has no `set()` - collaborative text editing means Yjs needs
+ * the actual insert/delete OPERATIONS, not a last-write-wins replace, this
+ * file's own top doc comment on `'text'`). A caller that genuinely wants
+ * "replace the whole thing" either way (an inline-edit UI committing a
+ * fully-retyped value, a form's "cancel my draft, reload the real value"
+ * reset) previously had to know which shape it was talking to and branch
+ * itself - `@qu/app-core`'s `dev.js` has its own PRIVATE `replaceText()`
+ * doing the identical "delete everything, then insert" logic for exactly
+ * this reason, left as its own internal helper here rather than migrated
+ * onto this one (13 already-working call sites, zero behavior change
+ * needed there - not worth the churn/regression risk of a pure rename).
+ * `setFieldValue()` exists for NEW/lower-layer consumers that don't
+ * already have their own copy - `@qu/space-ui`'s `bindField()`/
+ * `makeInlineEditable()` are the first, closing a REAL, previously-
+ * unaddressed gap: `<qu-bind editable="inline">` calling a bare
+ * `field.set()` would have thrown outright for ANY 'text'-shape field (a
+ * Blog post's own `content`, e.g.) before this existed.
+ * @param {*} field - whatever `createField()` above returned.
+ * @param {string} value
+ * @param {{recipients?: Array<Uint8Array>}} [options] - see this file's own top doc comment on `recipients` - passed through to whichever underlying write actually runs.
+ */
+export async function setFieldValue(field, value, options) {
+  if (typeof field.set === 'function') {
+    await field.set(value, options);
+    return;
+  }
+  const current = field.get();
+  if (current) field.delete(0, current.length, options);
+  if (value) field.insert(0, value, options);
 }

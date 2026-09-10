@@ -215,7 +215,13 @@ export class ContentResolver {
    *   is loaded, the form is reset, or the edit completes) - `hold: true`
    *   with the returned `release()` never called leaks exactly like any
    *   other un-released `useNode()` handle would.
-   * @returns {Promise<{route, title, template, content, data, style}|null>|Promise<{page: object|null, release: () => void}>}
+   * @param {{timeout?: number, hold?: boolean, includeDrafts?: boolean}} [options] - `includeDrafts`
+   *   (default `false`) - see kinds.js's `pageKind.status` own doc comment: a `'draft'` page resolves
+   *   as `null` (indistinguishable from "never published," the same 404-style signal an unpublished
+   *   route already produces) unless the caller opts in - the app's own ordinary navigation/View
+   *   rendering NEVER passes this, only an editor's own "load this draft back into the form" call site
+   *   (e.g. `@qu/app-shell`'s `blog-actions.js`'s `loadForEdit()`) does.
+   * @returns {Promise<{route, title, template, content, data, style, status}|null>|Promise<{page: object|null, release: () => void}>}
    *   Bare `page` (`null` if this route has no published page, or it hasn't
    *   synced within `timeout`) when `hold` is falsy (default); `{page,
    *   release}` when `hold` is true, `page` itself following the exact same
@@ -226,9 +232,11 @@ export class ContentResolver {
    *   `theme`, `runtime.js`'s `AppRuntime.resolveRoute()` own doc comment) -
    *   neither is part of the sync-readiness check below, a page missing
    *   either is a perfectly normal, backward-compatible page, not an
-   *   unsynced one.
+   *   unsynced one. `status` is `'draft'`/`'published'`/`null` (unset, i.e.
+   *   published) as actually stored - a caller that passed `includeDrafts`
+   *   still needs to read it to tell the two apart.
    */
-  async resolvePage(route, { timeout, hold = false } = {}) {
+  async resolvePage(route, { timeout, hold = false, includeDrafts = false } = {}) {
     const pageKind = this._kinds.pageKind;
     const id = await deriveContentNodeId(this._appAdminPub, pageKind.kind, route);
     const { node, release } = await this._space.useNode(id, pageKind);
@@ -251,6 +259,11 @@ export class ContentResolver {
       // synced" tradeoff resolveTemplate()/resolveStyle() below already accept for their own single
       // field - a genuinely empty page body is a rare enough edge case not worth resolving here.
       if (!title || !content) return null;
+      const status = await node.field('status').get();
+      // See kinds.js's own `pageKind.status` doc comment - a draft resolves as if unpublished, unless
+      // this caller explicitly asked to see drafts too. Deliberately the SAME "keep waiting/eventually
+      // give up as null" path `!title || !content` above already takes, not a special case.
+      if (status === 'draft' && !includeDrafts) return null;
       const template = await node.field('template').get();
       const data = await node.field('data').get();
       const style = await node.field('style').get();
@@ -258,7 +271,7 @@ export class ContentResolver {
       // "self"-node doc comment, `@qu/space-components`'s `resolveNodeRef()`) - a Qu-Component
       // declared `self` inside this exact page's own rendered content resolves against these,
       // never needing the content author to know or type this page's own content-addressed id.
-      return { route, title, template, content, data, style, nodeId: id, kindSchema: pageKind };
+      return { route, title, template, content, data, style, status, nodeId: id, kindSchema: pageKind };
     }, { timeout });
     if (hold) return { page, release };
     release();

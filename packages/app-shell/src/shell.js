@@ -37,10 +37,28 @@
  * UNCONFIGURED setup page (`build.mjs`'s `renderIndexHtml()`) load this
  * SAME bundle and offer a working identity-bootstrapping console before
  * any app/platform is even configured. See that file's own doc comment.
+ *
+ * UPDATE - PERSISTENT CLIENT STORAGE: `Space` is now constructed with
+ * `@qu/space-storage`'s `indexeddb-store.js` (when available - see
+ * `isIndexedDbAvailable()`) as its `storage` - previously this Space was
+ * always memory-only, so every reload/tab-open re-synced every Node
+ * touched during that session from scratch over the network, even for a
+ * returning visitor with nothing new to fetch. No change to `Space`/
+ * `Node`/`Field` themselves was needed - `_hydrateFromStorage()` already
+ * reads local storage FIRST, instantly, before ever sending a subscribe
+ * request; this was simply the first real implementation of that param
+ * actually usable in a browser (the relay side already had one,
+ * `file-store.js`).
  */
 import { QuCrypto } from '@qu/core';
 import { EventBus } from '@qu/events';
 import { Space } from '@qu/space-core';
+// Direct subpath import, NOT the package's own barrel `.` export - the barrel also re-exports
+// `file-store.js` (real `node:fs/promises` I/O, relay-only), which esbuild cannot resolve for a
+// browser bundle at all, module graph or not - same "browser code imports a dedicated subpath,
+// never the barrel" idiom `@qu/space-transport`'s own `./ws-client-transport` export already
+// establishes for the identical Node-vs-browser split (that package's `ws-server-hub.js`/`ws`).
+import { createIndexedDbStore, isIndexedDbAvailable } from '@qu/space-storage/indexeddb-store';
 import { WsClientTransport } from '@qu/space-transport/ws-client-transport';
 import '@qu/space-components/elements'; // registers <qu-view>/<qu-bind>/<qu-list> - see that module's own doc comment. Side-effect only import, deliberately unused otherwise.
 import { loadOrCreateIdentity, joinSpace, fetchRelayAdmins, IDENTITY_STORAGE_KEY } from './identity.js';
@@ -75,7 +93,16 @@ export class QuAppShell extends HTMLElement {
       // reads `space.bus` (Space's own doc comment on that getter) to tell a save the RELAY silently
       // rejected apart from one that genuinely succeeded, both otherwise indistinguishable client-side.
       const bus = new EventBus();
-      const space = new Space({ identity, members, relayAdmins, transport, bus });
+      // The browser's own persistent tier (`@qu/space-storage`'s `indexeddb-store.js`, that file's
+      // own top doc comment on why this was previously entirely memory-only) - `Space.useNode()`
+      // already hydrates from `storage` FIRST, instantly, before ever sending a subscribe request
+      // (`space.js`'s own doc comment), so wiring this in is the whole fix: a returning visitor's
+      // already-seen content renders immediately, resyncing only whatever's actually new in the
+      // background. `isIndexedDbAvailable()` guards environments with no `indexedDB` at all (a
+      // privacy mode that removed it, an embedding context) - falls back to `undefined` (today's
+      // unchanged, memory-only behavior), never throws boot open over this.
+      const storage = isIndexedDbAvailable() ? createIndexedDbStore() : undefined;
+      const space = new Space({ identity, members, relayAdmins, transport, bus, storage });
 
       if (isPlatformMode) {
         // The admin app lives in this SAME main Space now (kinds.js's own "THE ADMIN APP" doc

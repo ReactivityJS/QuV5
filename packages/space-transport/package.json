@@ -18,5 +18,8 @@
     "@qu/space-storage": "^0.1.0",
     "ws": "^8.18.0"
   },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0"
+  },
   "license": "MIT"
 }

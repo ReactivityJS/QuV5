@@ -36,6 +36,7 @@
 import { pushToSharedList, sharedListAnchor, sharedListKind } from '@qu/app-core';
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { verifyWritesAcked } from './verify-writes.js';
+import { setFormStatus } from './form-status.js';
 
 /** @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space}} params */
 export function wireGuestbook({ mountEl, doc, space }) {
@@ -46,9 +47,7 @@ export function wireGuestbook({ mountEl, doc, space }) {
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const status = form.querySelector('[data-qu-status]') ?? form.appendChild(doc.createElement('p'));
-    status.setAttribute('data-qu-status', '');
-    status.textContent = '';
+    setFormStatus(form, '');
     try {
       const name = form.querySelector('[name="name"]').value.trim();
       const message = form.querySelector('[name="message"]').value.trim();
@@ -57,9 +56,9 @@ export function wireGuestbook({ mountEl, doc, space }) {
       if (ownerPub) entry.ownerPub = ownerPub;
       await verifyWritesAcked(space, id, () => pushToSharedList(space, listName, entry));
       form.reset();
-      status.textContent = 'Eingetragen und vom Relay bestätigt.';
+      setFormStatus(form, 'Eingetragen und vom Relay bestätigt.');
     } catch (err) {
-      status.textContent = `Fehler: ${err.message}`;
+      setFormStatus(form, `Fehler: ${err.message}`);
     }
   });
 }

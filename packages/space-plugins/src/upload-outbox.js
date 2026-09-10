@@ -27,8 +27,41 @@
  * subscribes) is exactly how "Alice is uploading a file" / a remote-sync
  * status icon (see the framework's own UI layer) gets its data, live, with
  * zero relay-side awareness of "uploads" as a concept.
+ *
+ * UPDATE - "SYNCED" (relay-confirmed metadata) + PEER RECEIPTS. This is
+ * the SAME split as always: the metadata record already travels over the
+ * ordinary Node/Field CRDT sync path (nothing new there - `_patch()` is
+ * just a `field.set()`), it is only the BLOB that structurally cannot (a
+ * relay only mirrors envelopes, and Yjs's CRDT update history has no
+ * notion of "replace/discard the old bytes" - fine for small structured
+ * state, unbounded growth for a large binary). Two additions on top of
+ * that existing metadata sync:
+ *
+ *   - `'synced'` status: when the constructor is given `bus` (the SAME
+ *     bus passed to `space`'s own constructor), a record that reaches
+ *     `'done'` (the caller's `upload()` resolved) is advanced to
+ *     `'synced'` once the RELAY has ack'd the metadata write that set it -
+ *     i.e. not just "my own upload() call finished" but "a fellow member
+ *     who reloads/reconnects will already see this as done too" (see
+ *     `delivery-status.js`'s `awaitRelayAck()`). Omitting `bus` keeps the
+ *     old behaviour (`'done'` is terminal) - e.g. bare peer-to-peer tests
+ *     with no relay in the loop at all.
+ *     Correctness note: `uploadOutboxKind`'s Node holds MANY files' records
+ *     in ONE atomic field, so concurrent `enqueue()`s race writes to the
+ *     SAME Node - `awaitRelayAck()`'s own "next ack, not a per-write id"
+ *     correlation still holds here because a Space flushes its own writes
+ *     to one Node in order: ANY ack that lands after our `set()` call
+ *     proves our write was already durably received, whether or not it
+ *     happens to be the specific envelope that caused that ack.
+ *   - "received by a specific peer" has no bespoke mechanism here at all -
+ *     `delivery-status.js`'s existing `readReceiptKind` already IS a
+ *     generic "reader confirms receipt of contentId" primitive (its
+ *     `contentNodeId` key is caller-defined, not required to be an actual
+ *     Node id). `markFileReceived()`/`watchFileReceipts()` below are thin,
+ *     file-scoped aliases of it - no new Kind, no duplicated state.
  */
 import { defineKind, deriveOwnerNodeId } from '@qu/space-core';
+import { awaitRelayAck } from './delivery-status.js';
 
 /**
  * One per uploader: `records` is a `{ [fileId]: {name, size, mimeType,
@@ -58,11 +91,13 @@ export class UploadOutbox {
    * @param {import('@qu/space-core').Space} space
    * @param {{save(id: string, blob: *): Promise<void>, load(id: string): Promise<*>, remove(id: string): Promise<void>}} localStore
    * @param {(record: object, blob: *) => Promise<void>} upload
+   * @param {import('@qu/events').EventBus} [bus] - the SAME bus given to `space`'s own constructor. When supplied, `'done'` records advance to `'synced'` once the relay ack for that metadata write lands - see this file's own "UPDATE" doc comment. Omit for the old `'done'`-is-terminal behaviour.
    */
-  constructor(space, localStore, upload) {
+  constructor(space, localStore, upload, bus) {
     this._space = space;
     this._localStore = localStore;
     this._upload = upload;
+    this._bus = bus;
     this._node = null;
   }
 
@@ -91,7 +126,9 @@ export class UploadOutbox {
    * serialize them one at a time instead of actually queueing. Track
    * progress via `watch()`/`statusOf()`, not this method's own return
    * value. A failure leaves the record `'failed'` for a later `retry()` -
-   * it is never dropped from the queue on its own.
+   * it is never dropped from the queue on its own. Status lifecycle:
+   * `'pending'` -> `'uploading'` -> `'done'` (-> `'synced'` if the
+   * constructor was given `bus`) | `'failed'`.
    * @param {{id?: string, name: string, size: number, mimeType: string}} meta
    * @param {*} blob - whatever `localStore` expects (a `Blob`/`File` in a browser, a `Buffer` in Node, ...).
    * @returns {Promise<string>} the file id (generated if `meta.id` was omitted) - resolves once locally saved and queued, NOT once uploaded.
@@ -127,6 +164,11 @@ export class UploadOutbox {
       await this._upload(record, blob);
       await this._patch(id, { status: 'done', error: null });
       await this._localStore.remove(id); // "nach relay sync abhaken" - once durably uploaded, the local copy no longer needs to be kept around for a retry.
+      if (this._bus) {
+        const node = await this._ensureNode();
+        await awaitRelayAck(this._bus, node.id); // see this file's own "UPDATE" doc comment on why "next ack" is safe here even under concurrent writes to the same shared outbox Node.
+        await this._patch(id, { status: 'synced' });
+      }
     } catch (err) {
       await this._patch(id, { status: 'failed', error: String(err?.message ?? err) });
     }

@@ -15,7 +15,7 @@
  * granteePub, {path})` - not something this file wraps, since it is
  * already exactly one call.
  */
-import { deriveOwnerNodeId, stampMeta } from '@qu/space-core';
+import { deriveOwnerNodeId, stampMeta, compactIfNeeded } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
 import { deriveContentNodeId } from './content-id.js';
 import {
@@ -255,8 +255,8 @@ export async function createStyle(space, { name, css }) {
 }
 
 /** Creates a page at content-addressed id `deriveContentNodeId(space.identity.signingPub, 'qu-page', route)` - see `createTemplate()`'s own doc comment. `template` is a template NAME (resolved via content-id.js at render time), not a Node id. `data` is optional STRUCTURED content beyond the single `content` blob - see kinds.js's `pageKind` own doc comment on its `data` field (an arbitrary JSON object, one extra named `<qu-slot>` filled per top-level key). `style` (optional) is a `qu-style` NAME to load for THIS page instead of the app Manifest's own single `theme` - `kinds.js`'s `pageKind` own doc comment, `runtime.js`'s `AppRuntime.resolveRoute()` for how it's auto-loaded. Does NOT auto-register into `routeRegistryKind` (unlike `createTemplate()`/`createStyle()`'s own registries) - call `publishRoute()` separately, unchanged pre-existing behavior. */
-export async function createPage(space, { route, title, template = null, content = '', data = null, style = null }) {
-  return space.createNode(pageKind, { route, title, template, content, data, style }, { path: route });
+export async function createPage(space, { route, title, template = null, content = '', data = null, style = null, status = null }) {
+  return space.createNode(pageKind, { route, title, template, content, data, style, status }, { path: route });
 }
 
 /**
@@ -356,8 +356,8 @@ export async function deleteStyle(space, { name, timeout } = {}) {
   }
 }
 
-/** Page counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). Only fields actually passed are updated; omit `title`/`template`/`content`/`data`/`style` to leave them unchanged. `title`/`template`/`data`/`style` are `'atomic'`-shape (`field.set()`); `content` is `'text'`-shape, see `replaceText()`'s own doc comment. `data` is kinds.js's `pageKind` own structured-data field (see its doc comment) - passing it REPLACES the whole object (an `'atomic'` field is one opaque last-write-wins value, not merged key-by-key). `style` - see `createPage()`'s own doc comment; pass `null` explicitly to revert to the app Manifest's own `theme`. */
-export async function editPage(space, { route, title, template, content, data, style, ownerPub = space.identity.signingPub, timeout } = {}) {
+/** Page counterpart to `editTemplate()` - see its own doc comment (including `ownerPub`). Only fields actually passed are updated; omit `title`/`template`/`content`/`data`/`style`/`status` to leave them unchanged. `title`/`template`/`data`/`style`/`status` are `'atomic'`-shape (`field.set()`); `content` is `'text'`-shape, see `replaceText()`'s own doc comment. `data` is kinds.js's `pageKind` own structured-data field (see its doc comment) - passing it REPLACES the whole object (an `'atomic'` field is one opaque last-write-wins value, not merged key-by-key). `style` - see `createPage()`'s own doc comment; pass `null` explicitly to revert to the app Manifest's own `theme`. `status` - see `kinds.js`'s `pageKind.status` own doc comment; pass `'published'` to promote an existing draft (the caller is still responsible for a matching `publishRoute()`/`publishGlobalRoute()` call if this route was never registered while it was a draft - see `@qu/app-shell`'s `blog-actions.js`'s own draft/publish submit-handler branch for the reference sequencing). */
+export async function editPage(space, { route, title, template, content, data, style, status, ownerPub = space.identity.signingPub, timeout } = {}) {
   const id = await deriveContentNodeId(ownerPub, pageKind.kind, route);
   const { node, release } = await space.useNode(id, pageKind);
   // Wait for BOTH title AND content (separate envelopes - see resolver.js's own resolvePage() doc
@@ -377,6 +377,7 @@ export async function editPage(space, { route, title, template, content, data, s
   if (content !== undefined) replaceText(node.field('content'), content);
   if (data !== undefined) await node.field('data').set(data);
   if (style !== undefined) await node.field('style').set(style);
+  if (status !== undefined) await node.field('status').set(status);
   release();
   return node;
 }
@@ -573,14 +574,30 @@ export async function editPrivatePage(space, { route, title, template, content, 
  * `entry` is caller-defined (a guestbook might use `{name, message, ts}`) -
  * this Kind imposes no shape on it, same as `groupKind.members`/
  * `platformAppsKind.apps`.
+ * `compactThreshold` (optional, OPT-IN - `@qu/space-core`'s `compaction.js`
+ * own top doc comment on why this can only ever be opt-in, never automatic
+ * background scheduling) - once given, checks after THIS push whether the
+ * list's own stored envelope count has grown past it and, if so, compacts
+ * the Node (`Space.compactNode()`) down to one snapshot. Omitted (the
+ * default): zero behavior change, exactly as before this param existed -
+ * every EXISTING caller (a Guestbook/Forum entry form) never pays the
+ * extra `envelopeCount()` check unless it explicitly asks to. A caller
+ * writing at high frequency should pick a threshold well above ordinary
+ * traffic (compaction's own O(n) cost, `compaction.js`'s own doc comment)
+ * rather than compacting on every single push.
  * @param {import('@qu/space-core').Space} space
  * @param {string} name - which named list (e.g. `'guestbook'`) - see `sharedListAnchor()`.
  * @param {object} entry
+ * @param {{compactThreshold?: number}} [options]
  */
-export async function pushToSharedList(space, name, entry) {
+export async function pushToSharedList(space, name, entry, { compactThreshold } = {}) {
   const anchor = await sharedListAnchor(name);
   const node = await getOrSyncRegistryNode(space, sharedListKind, anchor);
   await node.field('entries').push(entry);
+  if (compactThreshold != null) {
+    const id = await deriveOwnerNodeId(anchor, sharedListKind.kind);
+    await compactIfNeeded(space, id, { threshold: compactThreshold });
+  }
   return node;
 }
 
@@ -766,6 +783,22 @@ export async function grantContentWriter(space, { kind, path, granteePub }) {
 }
 
 /**
+ * Strips tags from `html` (a page/post's own raw content, e.g. `'<p>Hallo
+ * <b>Welt</b></p>'`), collapses whitespace, and truncates to `maxLen`
+ * characters (`'…'` appended if it was actually cut) - the plaintext
+ * snippet `publishRoute()`/`publishGlobalRoute()` store as `excerpt` for
+ * `view-sources.js`'s full-text search to match against. Not an HTML
+ * parser - a bare regex tag-strip - good enough for a SNIPPET (never
+ * re-rendered as markup) from content this same Space's own author wrote,
+ * not third-party/adversarial input.
+ * @param {string} html @param {number} [maxLen] @returns {string}
+ */
+export function excerptFromHtml(html, maxLen = 200) {
+  const text = (html ?? '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  return text.length > maxLen ? `${text.slice(0, maxLen).trimEnd()}…` : text;
+}
+
+/**
  * Adds one entry to this Space identity's Route Registry (creating it on
  * first call - see kinds.js's `routeRegistryKind` and this file's own
  * `getOrSyncRegistryNode()` doc comment on why that's never a blind
@@ -776,10 +809,19 @@ export async function grantContentWriter(space, { kind, path, granteePub }) {
  * never registered here. Unlike `registerContentName()`, never deduplicates
  * by `route` - unchanged, pre-existing behavior (calling this twice for the
  * same route adds two entries).
+ *
+ * `excerpt` (optional) - a plaintext snippet of the page's own content,
+ * captured HERE, at publish time, because this Node (not the page's own)
+ * is what `view-sources.js`'s `'pages'` source actually reads to build a
+ * feed - see `routeRegistryKind`'s own doc comment. NOT kept in sync on a
+ * later edit (a caller that re-publishes on edit gets a fresh excerpt for
+ * free; one that doesn't keeps the original) - same accepted scope cut as
+ * the aggregate index's own cached title (`blog-actions.js`'s
+ * `pushAggregateIndexEntry()`).
  */
-export async function publishRoute(space, { route, title }) {
+export async function publishRoute(space, { route, title, excerpt }) {
   const node = await getOrSyncRegistryNode(space, routeRegistryKind);
-  await node.field('routes').push({ route, title });
+  await node.field('routes').push(excerpt ? { route, title, excerpt } : { route, title });
   return node;
 }
 
@@ -1166,10 +1208,10 @@ export async function createGlobalStyle(space, prefix, { name, css }) {
 }
 
 /** Global-app counterpart to `createPage()` - see `createGlobalApp()`'s own doc comment on `prefix`, and `createPage()`'s own on `style`. */
-export async function createGlobalPage(space, prefix, { route, title, template = null, content = '', style = null }) {
+export async function createGlobalPage(space, prefix, { route, title, template = null, content = '', style = null, status = null }) {
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
-  return space.createNode(adminPageKind, { route, title, template, content, style }, { id });
+  return space.createNode(adminPageKind, { route, title, template, content, style, status }, { id });
 }
 
 /** Global-app counterpart to `installAppBundle()` - see that function's own doc comment; identical shape, writes the `qu-admin-*` Kinds via the four functions just above, all anchored on `prefix` (see `createGlobalApp()`'s own doc comment). No `routes`/route-registry counterpart yet - not needed for the built-in admin console's one page (see this package's own README on the reference bundle). */
@@ -1220,7 +1262,7 @@ export async function editGlobalStyle(space, prefix, { name, css, timeout } = {}
 }
 
 /** Global-app counterpart to `editPage()` - see `editGlobalTemplate()`'s own doc comment, and `editPage()`'s own on the per-field update semantics (only fields actually passed are updated). */
-export async function editGlobalPage(space, prefix, { route, title, template, content, data, style, timeout } = {}) {
+export async function editGlobalPage(space, prefix, { route, title, template, content, data, style, status, timeout } = {}) {
   const anchor = await cachedGlobalAppAnchor(prefix);
   const id = await deriveContentNodeId(anchor, adminPageKind.kind, route);
   const { node, release } = await space.useNode(id, adminPageKind);
@@ -1237,6 +1279,7 @@ export async function editGlobalPage(space, prefix, { route, title, template, co
   if (content !== undefined) replaceText(node.field('content'), content);
   if (data !== undefined) await node.field('data').set(data);
   if (style !== undefined) await node.field('style').set(style);
+  if (status !== undefined) await node.field('status').set(status);
   release();
   return node;
 }
@@ -1295,11 +1338,11 @@ export async function nullGlobalAppContent(space, prefix) {
  * call for the same route is always a harmless no-op, never a meaningful
  * "second announcement" the way it might be for an independently-owned app.
  */
-export async function publishGlobalRoute(space, prefix, { route, title }) {
+export async function publishGlobalRoute(space, prefix, { route, title, excerpt }) {
   const anchor = await cachedGlobalAppAnchor(prefix);
   const node = await getOrSyncRegistryNode(space, adminRouteRegistryKind, anchor);
   const existing = await node.field('routes').toArray();
-  if (!existing.some((entry) => entry?.route === route)) await node.field('routes').push({ route, title });
+  if (!existing.some((entry) => entry?.route === route)) await node.field('routes').push(excerpt ? { route, title, excerpt } : { route, title });
   return node;
 }
 

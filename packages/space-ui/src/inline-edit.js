@@ -15,13 +15,33 @@
  * wins, same as any other 'atomic' field), cancel() reverts to whatever
  * the field's value was at that moment (including a remote change that
  * arrived mid-edit, now surfaced).
+ *
+ * WORKS WITH A 'text'-SHAPE FIELD TOO, via `@qu/space-core`'s
+ * `setFieldValue()` (that module's own doc comment) - NOT `field.set()`
+ * directly, which a `TextField` has no such method for at all. This is
+ * still a coarse, discrete "delete everything, then insert the final
+ * text" replace on save (matching exactly how `@qu/app-core`'s
+ * `editPage()` already treats a page's own `content` field from a form),
+ * NOT genuine character-level collaborative merging - deliberately fine
+ * for THIS component's own explicit "edit session, then commit" shape
+ * (one save per Enter/blur, not one write per keystroke), but the wrong
+ * tool for two people live-typing in the SAME field at once (point a real
+ * editor - ProseMirror/Quill - straight at `field.ytext` for that, exactly
+ * as `bind.js`'s own doc comment already recommends; `bindField()`'s
+ * per-keystroke `'input'`-event writes stay 'atomic'-only, unchanged, for
+ * the identical reason - a whole-field replace on every keystroke would be
+ * both wasteful and a worse fit than `bindField()` already warns against).
  */
+import { setFieldValue } from '@qu/space-core';
 
 /**
  * @param {HTMLElement} el - must have `contentEditable = 'true'` (this
  *   function does not set it itself - a caller styling the element
  *   differently while read-only vs. editable needs that control anyway).
- * @param {{get(): Promise<*>, set(value: *): Promise<void>, observe(cb: () => void): () => void}} field
+ * @param {{get(): Promise<*>|string, set?(value: *): Promise<void>, insert?(index: number, text: string): void, delete?(index: number, length: number): void, observe(cb: () => void): () => void}} field
+ *   an 'atomic' field (`get`/`set`/`observe`) OR a 'text' field (`get`/`insert`/`delete`/`observe`,
+ *   no `set`) - `setFieldValue()` (see this file's own top doc comment) dispatches on which shape
+ *   it actually got.
  * @param {{onSave?: (value: string) => void, onCancel?: (value: string) => void}} [options]
  * @returns {(() => void) & {save: () => Promise<void>, cancel: () => void}} Stops the binding when called; `.save`/`.cancel` also let a caller trigger the same save/cancel an external UI control (e.g. an icon button) can drive without itself listening for Enter/Escape/blur.
  */
@@ -50,7 +70,7 @@ export function makeInlineEditable(el, field, { onSave, onCancel } = {}) {
   const save = async () => {
     editing = false;
     const value = el.textContent;
-    await field.set(value);
+    await setFieldValue(field, value);
     lastKnownValue = value;
     onSave?.(value);
   };
