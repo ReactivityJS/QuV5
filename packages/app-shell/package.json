@@ -28,7 +28,8 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "jsdom": "^25.0.1"
+    "jsdom": "^25.0.1",
+    "@qu/space-editor-prosemirror": "^0.1.0"
   },
   "license": "MIT"
 }

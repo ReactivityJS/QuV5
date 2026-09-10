@@ -306,7 +306,7 @@ async function ensureSelfProvisioned(space, ownerPub) {
  * name) - reading stays side-effect-free regardless of what's actually
  * there.
  */
-async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ref, userSubPath, routeNamespace = '', personalBundle, config }) {
+async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ref, userSubPath, routeNamespace = '', personalBundle, config, richTextBind }) {
   const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
   const ownerPub = resolveUserRef(ref, space);
   if (!ownerPub) {
@@ -338,7 +338,7 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   // additive `/u/<ref>/` case) - `view-actions.js`'s own `wireViews()` doc comment on why
   // mode:'multiuser''s own bare-prefix case (`routeNamespace: ''`) deliberately opts out unchanged.
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: ownerPub, routeNamespace, userRef: ref });
-  wireRichText({ mountEl });
+  wireRichText({ mountEl, bind: richTextBind });
   // Only ever for `ref === 'me'` (`updateAvailable` stays `false` otherwise) - `installed-apps-
   // actions.js`'s own `wirePersonalUpdateBanner()` doc comment on why an update button on someone
   // ELSE's own personal instance would be actively wrong, not just pointless.
@@ -360,7 +360,7 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
  * URL and a lookup in `platform.resolveApps()` confirming it is actually a
  * currently-registered `realm: 'global'` app.
  */
-async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix, subPath }) {
+async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix, subPath, richTextBind }) {
   const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
   const runtime = new AppRuntime(space, { appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
   const plan = await runtime.resolveRoute(subPath, timeoutOpt);
@@ -371,7 +371,7 @@ async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeo
   await wireInstalledApps({ mountEl, doc: window.document, space });
   await wireCms({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), global: true, prefix });
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
-  wireRichText({ mountEl });
+  wireRichText({ mountEl, bind: richTextBind });
 }
 
 /**
@@ -407,7 +407,7 @@ async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeo
  * `subPath` simply renders the same feed, same as any unmatched sub-route
  * elsewhere falling back to its parent.
  */
-async function renderAggregateShell({ space, mountEl, window, styleId, prefix }) {
+async function renderAggregateShell({ space, mountEl, window, styleId, prefix, richTextBind }) {
   mountEl.quSpace = space;
   const page = { title: prefix, content: `<div data-qu-view="${prefix}-aggregate-feed"></div>` };
   renderPage({ mountEl, doc: window.document, templateHtml: null, page, css: '', styleId });
@@ -417,15 +417,16 @@ async function renderAggregateShell({ space, mountEl, window, styleId, prefix })
   mountEl.quSelfNodeId = null;
   mountEl.quSelfKind = null;
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
-  wireRichText({ mountEl });
+  wireRichText({ mountEl, bind: richTextBind });
 }
 
 /**
- * @param {{space: import('@qu/space-core').Space, appAdminPub: Uint8Array, mountEl: Element, window: {location: object, document: Document, addEventListener: Function, removeEventListener: Function}, styleId?: string, resolveTimeout?: number}} params
+ * @param {{space: import('@qu/space-core').Space, appAdminPub: Uint8Array, mountEl: Element, window: {location: object, document: Document, addEventListener: Function, removeEventListener: Function}, styleId?: string, resolveTimeout?: number, richTextBind?: (textarea: HTMLTextAreaElement) => {refresh: () => void, stop: () => void}}} params
  *   `resolveTimeout` - how long to wait for a route's content to sync before giving up and rendering the "not found" fallback (see @qu/app-core's `ContentResolver`'s own `timeout` param); defaults to that resolver's own default.
+ *   `richTextBind` (optional) - `rich-text-actions.js`'s own top doc comment: threaded down to every `wireRichText()` call this function's own render path makes. Omit for the built-in editor (unchanged) - pass e.g. `@qu/space-editor-prosemirror`'s `bindLocalRichText` to opt every `[data-qu-richtext]` textarea on EVERY route this instance renders into the enhanced editor.
  * @returns {{runtime: AppRuntime, router: HashRouter}} - `router.stop()` tears down the hashchange listener; nothing else here needs explicit cleanup.
  */
-export function startApp({ space, appAdminPub, mountEl, window, styleId, resolveTimeout }) {
+export function startApp({ space, appAdminPub, mountEl, window, styleId, resolveTimeout, richTextBind }) {
   const runtime = new AppRuntime(space, { appAdminPub });
   // Exposed for @qu/space-components' <qu-view>/<qu-bind>/<qu-list> - see that package's
   // context.js's own doc comment: any Component rendered inside `mountEl` (every page/template's
@@ -463,7 +464,7 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
       await wireInstalledApps({ mountEl, doc: window.document, space });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub });
       await wireViews({ mountEl, doc: window.document, space, appAdminPub });
-      wireRichText({ mountEl });
+      wireRichText({ mountEl, bind: richTextBind });
     },
   });
   router.start();
@@ -543,7 +544,8 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  * either way). Never triggered for a REGISTERED `realm: 'main'` alias, even
  * one pointing at this same identity - see the inline comment at that
  * check for why.
- * @param {{space: import('@qu/space-core').Space, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number}} params
+ * @param {{space: import('@qu/space-core').Space, mountEl: Element, window: object, styleId?: string, resolveTimeout?: number, richTextBind?: (textarea: HTMLTextAreaElement) => {refresh: () => void, stop: () => void}}} params
+ *   `richTextBind` - see `startApp()`'s own doc comment on the identical param.
  *   `space` - MUST have been constructed with a `relayAdmins` list (see
  *   `Space`'s own constructor doc comment) matching the relay's own
  *   `QU_RELAY_ADMINS` config, or BOTH `qu-platform-apps` AND any global
@@ -556,7 +558,7 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
  *   generate or import.
  * @returns {{platform: PlatformRuntime, router: HashRouter}}
  */
-export function startPlatform({ space, mountEl, window, styleId, resolveTimeout }) {
+export function startPlatform({ space, mountEl, window, styleId, resolveTimeout, richTextBind }) {
   const platform = new PlatformRuntime(space);
   const timeoutOpt = resolveTimeout ? { timeout: resolveTimeout } : undefined;
 
@@ -583,7 +585,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
           const apps = await platform.resolveApps(timeoutOpt);
           const target = apps.find((a) => a.prefix === delegated.appPrefix && (a.realm ?? 'main') === 'global');
           if (target) {
-            await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: target.prefix, subPath: delegated.appSubPath });
+            await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: target.prefix, subPath: delegated.appSubPath, richTextBind });
             return;
           }
         }
@@ -596,7 +598,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
         await wireInstalledApps({ mountEl, doc: window.document, space });
         wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
         await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor('admin'), kinds: GLOBAL_KINDS });
-        wireRichText({ mountEl });
+        wireRichText({ mountEl, bind: richTextBind });
         return;
       }
 
@@ -606,7 +608,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
         // comment on why the default flipped. `/u/<ref>/...` remains available to address "me"
         // explicitly or another identity's space on purpose.
         const userRoute = parseMultiUserSubPath(match.subPath) ?? { ref: 'me', userSubPath: match.subPath };
-        await renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ...userRoute });
+        await renderMultiUserRoute({ space, mountEl, window, styleId, resolveTimeout, ...userRoute, richTextBind });
         return;
       }
 
@@ -629,14 +631,15 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
             routeNamespace: `/${match.prefix}`,
             personalBundle: match.personalBundle,
             config: match.config,
+            richTextBind,
           });
           return;
         }
         if (match.mode === 'personal') {
-          await renderAggregateShell({ space, mountEl, window, styleId, prefix: match.prefix });
+          await renderAggregateShell({ space, mountEl, window, styleId, prefix: match.prefix, richTextBind });
           return;
         }
-        await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: match.prefix, subPath: match.subPath });
+        await renderGlobalShell({ space, mountEl, window, styleId, resolveTimeout, prefix: match.prefix, subPath: match.subPath, richTextBind });
         return;
       }
 
@@ -666,7 +669,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout 
       await wireInstalledApps({ mountEl, doc: window.document, space });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
       await wireViews({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
-      wireRichText({ mountEl });
+      wireRichText({ mountEl, bind: richTextBind });
     },
   });
   router.start();

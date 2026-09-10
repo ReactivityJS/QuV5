@@ -83,6 +83,81 @@ test('text field: observe() delivers Yjs\' own insert/delete delta, not a full-v
   assert.deepEqual(lastDelta, [{ retain: 5 }, { insert: '!' }]);
 });
 
+test('richtext field: .yxml is a direct, pre-created Y.XmlFragment handle - bind ProseMirror/y-prosemirror straight to it', async () => {
+  const kind = defineKind('doc', { fields: { body: { shape: 'richtext' } } });
+  const author = await actor();
+  const doc = createDoc(kind, author.signingPub);
+  const node = new SpaceNode({ id: 'r1', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
+
+  assert.ok(node.field('body').yxml instanceof Y.XmlFragment);
+  // Pre-created at Node-creation time (node.js's stampMeta()) - the SAME Y.XmlFragment INSTANCE
+  // every call returns, not a fresh one each time (would silently orphan any prior edits).
+  assert.equal(node.field('body').yxml, node.field('body').yxml);
+});
+
+test('richtext field: concurrent structural edits from two peers (via raw Yjs XML ops) converge to the same document', async () => {
+  const kind = defineKind('doc', { fields: { body: { shape: 'richtext' } } });
+  const author = await actor();
+
+  const docA = createDoc(kind, author.signingPub);
+  const docB = new Y.Doc();
+  Y.applyUpdate(docB, Y.encodeStateAsUpdate(docA));
+  mirror(docA, docB);
+  mirror(docB, docA);
+
+  const nodeA = new SpaceNode({ id: 'r2', kindSchema: kind, doc: docA, identity: author, recipientXPubKeys: () => [] });
+  const nodeB = new SpaceNode({ id: 'r2', kindSchema: kind, doc: docB, identity: author, recipientXPubKeys: () => [] });
+
+  // Raw Yjs XML ops here (not through a ProseMirror binding - see @qu/space-editor-prosemirror's
+  // own tests for that layer) - proves the underlying CRDT convergence this field's whole point is,
+  // independent of whatever editor eventually sits on top of it.
+  docA.transact(() => {
+    const p = new Y.XmlElement('paragraph');
+    p.insert(0, [new Y.XmlText('Hello')]);
+    nodeA.field('body').yxml.insert(0, [p]);
+  });
+  docB.transact(() => {
+    const p = new Y.XmlElement('paragraph');
+    p.insert(0, [new Y.XmlText('Bonjour')]);
+    nodeB.field('body').yxml.insert(0, [p]);
+  });
+
+  assert.equal(nodeA.field('body').yxml.toString(), nodeB.field('body').yxml.toString());
+  assert.ok(nodeA.field('body').yxml.toString().includes('Hello'));
+  assert.ok(nodeA.field('body').yxml.toString().includes('Bonjour'));
+});
+
+test('richtext field: get() returns a plain-text snapshot with every tag stripped', async () => {
+  const kind = defineKind('doc', { fields: { body: { shape: 'richtext' } } });
+  const author = await actor();
+  const doc = createDoc(kind, author.signingPub);
+  const node = new SpaceNode({ id: 'r3', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
+
+  assert.equal(node.field('body').get(), '', 'empty fragment - empty snapshot, not an error');
+
+  doc.transact(() => {
+    const p = new Y.XmlElement('paragraph');
+    p.insert(0, [new Y.XmlText('Hallo Welt')]);
+    node.field('body').yxml.insert(0, [p]);
+  });
+  assert.equal(node.field('body').get(), 'Hallo Welt');
+});
+
+test('richtext field: observe() fires on a structural change, with Yjs\' own delta', async () => {
+  const kind = defineKind('doc', { fields: { body: { shape: 'richtext' } } });
+  const author = await actor();
+  const doc = createDoc(kind, author.signingPub);
+  const node = new SpaceNode({ id: 'r4', kindSchema: kind, doc, identity: author, recipientXPubKeys: () => [] });
+
+  let fired = 0;
+  node.field('body').observe(() => fired++);
+  doc.transact(() => {
+    const p = new Y.XmlElement('paragraph');
+    node.field('body').yxml.insert(0, [p]);
+  });
+  assert.equal(fired, 1);
+});
+
 test('list field: concurrent pushes from two peers converge on the same, deterministically-ordered array - no cursor/pagination logic needed', async () => {
   const kind = defineKind('channel', { fields: { messages: { shape: 'list' } } });
   const author = await actor();

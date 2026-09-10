@@ -43,6 +43,7 @@ import { dirname, join } from 'node:path';
 import * as esbuild from 'esbuild';
 import { QuCrypto } from '@qu/core';
 import { generateAppsRegistry } from './apps-registry.mjs';
+import { BASE_STYLE_CSS } from './base-style.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const APPS_DIR = join(here, '..', '..', 'apps');
@@ -144,6 +145,7 @@ export function renderIndexHtml({ appAdminPub = null, platformMode = false } = {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Qu</title>
+    <style>${BASE_STYLE_CSS}</style>
   </head>
   <body>
     <qu-app-shell ${rootAttr}></qu-app-shell>

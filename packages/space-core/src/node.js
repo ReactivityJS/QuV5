@@ -96,18 +96,20 @@ export function stampMeta(doc, kindSchema, ownerPub, { recipients } = {}) {
       meta.set('ownerPub', ownerPub);
       meta.set('ts', Date.now());
 
-      // Pre-create every 'text' field's underlying Y.Text HERE, as part of
-      // Node creation, so the CREATOR is always the one who originates that
-      // Y.Map key - never a later reader. field.js's TextField deliberately
-      // never auto-creates on access: if a subscribing peer read a
-      // not-yet-synced text field before this arrived and created its OWN
-      // competing Y.Text for the same key, Yjs' per-key conflict resolution
-      // would silently orphan one of the two instances, and a field handle
-      // that had already cached the orphaned one would keep reading/writing
-      // a detached object forever - a real bug hit while building this PoC.
+      // Pre-create every 'text'/'richtext' field's underlying Y.Text/
+      // Y.XmlFragment HERE, as part of Node creation, so the CREATOR is
+      // always the one who originates that Y.Map key - never a later
+      // reader. field.js's TextField/RichTextField deliberately never
+      // auto-create on access: if a subscribing peer read a not-yet-synced
+      // field before this arrived and created its OWN competing shared
+      // type for the same key, Yjs' per-key conflict resolution would
+      // silently orphan one of the two instances, and a field handle that
+      // had already cached the orphaned one would keep reading/writing a
+      // detached object forever - a real bug hit while building this PoC.
       const content = doc.getMap('content');
       for (const [name, decl] of Object.entries(kindSchema.fields)) {
         if (decl.shape === 'text') content.set(name, new Y.Text());
+        if (decl.shape === 'richtext') content.set(name, new Y.XmlFragment());
       }
     },
     { visibility: kindSchema.metaVisibility, recipients }
