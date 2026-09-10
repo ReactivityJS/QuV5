@@ -59,10 +59,21 @@ export function bindRichText(textareaEl, { doc = textareaEl.ownerDocument, promp
     return editor.contains(range.commonAncestorContainer) ? range : null;
   }
 
-  /** Wraps the current (non-collapsed) selection in a new `<tagName>` element - used for bold/italic/link. */
+  /**
+   * Wraps the current (non-collapsed) selection in a new `<tagName>`
+   * element - used for bold/italic/link. Refuses (no-op) when the
+   * selection SPANS more than one block ancestor (e.g. across two `<p>`s) -
+   * a real, found bug this guards against: `range.extractContents()` then
+   * returns a fragment containing PARTIAL block elements, and wrapping
+   * that in an inline tag produces invalid nesting (`<strong><p>...</p>
+   * <p>...</p></strong>`) that a later HTML re-parse (saving, then
+   * reloading the post for editing) silently reshuffles/corrupts - safer
+   * to do nothing than to produce broken markup a user can't see coming.
+   */
   function wrapSelection(tagName, configure) {
     const range = activeRange();
     if (!range || range.collapsed) return;
+    if (closestBlock(range.startContainer) !== closestBlock(range.endContainer)) return;
     const wrapper = doc.createElement(tagName);
     configure?.(wrapper);
     wrapper.appendChild(range.extractContents());

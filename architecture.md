@@ -1414,6 +1414,40 @@ nicht sichtbar." Two changes address this:
      `<textarea>`) - this flag only decides which BINDING an already-
      marked field gets, never adds the capability to a field that never
      asked for it ("nicht jedes Eingabefeld braucht einen WYSIWYG-Editor").
+6. **Two follow-up fixes from real usage feedback**, after the round above
+   shipped:
+   - **A real bug in the OLD built-in editor's Bold/Italic/Link**
+     (`@qu/space-ui`'s `rich-text.js`, `wrapSelection()`): a selection
+     spanning MORE than one block element (e.g. dragging across two `<p>`s)
+     produced invalid nesting - `<strong>` wrapping whole `<p>` elements -
+     which a later HTML re-parse (saving, then reloading the post for
+     editing) silently reshuffles. Found via real-browser reproduction
+     (Playwright against the actual pre-installed Chromium, not just
+     jsdom - a wide sweep of realistic scenarios: typed text, existing
+     multi-paragraph content, real mouse drag-select, triple-click,
+     collapsed cursor, double-bold-toggle, keyboard `Ctrl+B` - only the
+     cross-block case ever produced broken output in either the OLD or the
+     NEW editor). Fixed by refusing (a no-op) when the selection's start
+     and end sit in DIFFERENT block ancestors, the same posture the
+     existing collapsed-selection guard already has - safer to do nothing
+     than produce markup a user can't see is broken. A genuinely DIFFERENT,
+     NOT-a-bug behavior worth knowing about: selecting ALL of a field's
+     text (`Ctrl+A`, or a triple-click on a single-paragraph field) and
+     then TYPING replaces the entire selection with whatever is typed -
+     ordinary browser text-editing behavior in any editor, not specific to
+     this one, but easy to mistake for "the field got cleared" if the
+     selection wasn't visually obvious.
+   - **The admin console's per-app row was "wild und unverständlich"**
+     (reported directly): every link/CMS-editor/visibility/danger-zone
+     control used to sit in one flat, unbroken run with no visual grouping,
+     and the "neue shared-list (optional)" input had no explanation
+     anywhere in the UI of what it does. `admin-actions.js`'s new
+     `appRowGroup()` helper puts each control cluster on its own line (a
+     `.qu-app-row-group` `<div>`, `base-style.js`'s own new rule) with a
+     short muted hint line above it where one is useful (what "shared-list"
+     is for, that "Sichtbarkeit" is the mode-toggle group) - purely
+     structural, every existing class/placeholder/button text a test or
+     caller depends on is unchanged.
 
 **UPDATE - ADMIN CONSOLE EATS ITS OWN DOG FOOD (`admin-actions.js`'s
 installed-apps list).** The app list used to be its own bespoke "clear
