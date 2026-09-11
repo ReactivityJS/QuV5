@@ -36,7 +36,7 @@
  * helpers below keep the actual markup/View config in exactly ONE place
  * regardless.
  */
-import { createGlobalPage, publishGlobalRoute, createGlobalView, createPage, publishRoute, createView } from '@qu/app-core';
+import { publishGlobalRoute, createPage, publishRoute, createView } from '@qu/app-core';
 import { QuCrypto } from '@qu/core';
 import { upsertGlobalPage, upsertGlobalView, upsertPage, upsertView } from './bundle-upsert.js';
 
@@ -87,16 +87,34 @@ function aggregateFeedViewFields(prefix) {
   return { name: `${prefix}-aggregate-feed`, sources: [{ type: 'shared-list', name: `${prefix}:personal` }], sortBy: 'timestamp', sortOrder: 'desc', itemTemplate: GLOBAL_ITEM_TEMPLATE };
 }
 
-/** @param {import('@qu/space-core').Space} space @param {{prefix: string}} params */
+/**
+ * @param {import('@qu/space-core').Space} space @param {{prefix: string}} params
+ *
+ * UPSERT, NOT A BLIND `create*()` - a real, found bug this fixes: "Deinstallieren"
+ * (`@qu/app-core`'s `unregisterApp()`/`nullGlobalAppContent()`) never actually frees the
+ * underlying page/View Node ids - it only retracts the REGISTRY entry and NULLS the page's own
+ * `title`/`content` fields (`nullGlobalAppContent()`'s own doc comment: "not a genuine deletion").
+ * Re-installing the SAME prefix afterward used to call `createGlobalPage()`/`createGlobalView()`
+ * again for those SAME, already-existing ids - a SECOND `createNode()` for a Node that already has
+ * real (if nulled) content on the relay, which `bundle-upsert.js`'s own top doc comment already
+ * warns produces a "competing local Y.Doc" - two independently-stamped Y.Docs merging via CRDT
+ * clock/clientID tie-breaking rather than "the newer write wins," observed to leave the page with
+ * an empty `content`/unset `template` even though the reinstall's OWN write set them - a real,
+ * reported "Blog 404s after Deinstallieren + reinstall" bug. `upsertGlobalPage()`/`upsertGlobalView()`
+ * (the SAME safe edit-first, create-as-fallback helpers `updateGuestbook()` below already uses) fix
+ * this for BOTH cases at once: a genuinely fresh prefix still hits the create() fallback (edit()
+ * correctly reports "does not exist" first), while a re-install over previously-nulled content now
+ * safely EDITS in place instead of racing a second creation.
+ */
 export async function installGuestbook(space, { prefix }) {
   // Route published BEFORE the page is created - `@qu/app-shell`'s `live-app-resolver.js` only
   // classifies a global app's page write correctly once it has observed the route in
   // `adminRouteRegistryKind` (`createGlobalView()`'s own doc comment has the full reasoning).
   await publishGlobalRoute(space, prefix, { route: '/', title: 'Gästebuch' });
   await new Promise((resolve) => setTimeout(resolve, 400));
-  await createGlobalPage(space, prefix, globalPageFields(prefix));
-  await createGlobalView(space, prefix, globalFeedViewFields(prefix));
-  await createGlobalView(space, prefix, aggregateFeedViewFields(prefix));
+  await upsertGlobalPage(space, prefix, globalPageFields(prefix));
+  await upsertGlobalView(space, prefix, globalFeedViewFields(prefix));
+  await upsertGlobalView(space, prefix, aggregateFeedViewFields(prefix));
 }
 
 /**

@@ -36,13 +36,11 @@
  * router/resolver, which does not exist today and is a substantially
  * bigger feature than this reference app warrants on its own.
  */
-import { createGlobalPage, publishGlobalRoute, createGlobalView } from '@qu/app-core';
+import { publishGlobalRoute } from '@qu/app-core';
+import { upsertGlobalPage, upsertGlobalView } from './bundle-upsert.js';
 
-/** @param {import('@qu/space-core').Space} space @param {{prefix: string}} params */
-export async function installForum(space, { prefix }) {
-  await publishGlobalRoute(space, prefix, { route: '/', title: 'Forum' });
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  await createGlobalPage(space, prefix, {
+function globalPageFields(prefix) {
+  return {
     route: '/',
     title: 'Forum',
     content: `<h1>Forum</h1>
@@ -73,12 +71,28 @@ export async function installForum(space, { prefix }) {
   <h2>Themen</h2>
   <div data-qu-view="${prefix}-topics"></div>
 </div>`,
-  });
-  await createGlobalView(space, prefix, {
+  };
+}
+
+function topicsViewFields(prefix) {
+  return {
     name: `${prefix}-topics`,
     sources: [{ type: 'shared-list', name: `${prefix}:topics` }],
     sortBy: 'timestamp',
     sortOrder: 'desc',
     itemTemplate: '<p><a href="#" data-qu-view-link><qu-slot name="title"></qu-slot></a> — <qu-slot name="excerpt"></qu-slot></p>',
-  });
+  };
+}
+
+/**
+ * @param {import('@qu/space-core').Space} space @param {{prefix: string}} params
+ *
+ * UPSERT, NOT A BLIND `create*()` - see `guestbook-bundle.js`'s `installGuestbook()` own doc
+ * comment for the full "Deinstallieren + reinstall" bug this fixes (identical reasoning here).
+ */
+export async function installForum(space, { prefix }) {
+  await publishGlobalRoute(space, prefix, { route: '/', title: 'Forum' });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  await upsertGlobalPage(space, prefix, globalPageFields(prefix));
+  await upsertGlobalView(space, prefix, topicsViewFields(prefix));
 }

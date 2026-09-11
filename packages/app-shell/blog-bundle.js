@@ -109,7 +109,7 @@
  * `blog-actions.js`'s own `wireBlog()` doc comment for how a form actually
  * resolves this at submit time.
  */
-import { createGlobalPage, publishGlobalRoute, createGlobalView, createPage, publishRoute, createView } from '@qu/app-core';
+import { publishGlobalRoute, createPage, publishRoute, createView } from '@qu/app-core';
 import { upsertGlobalPage, upsertGlobalView, upsertPage, upsertView } from './bundle-upsert.js';
 import { ROUTE_SCHEMES } from './src/qu-placeholders.js';
 
@@ -166,13 +166,20 @@ function aggregateFeedViewFields(prefix) {
   return { name: `${prefix}-aggregate-feed`, sources: [{ type: 'shared-list', name: `${prefix}:personal` }], sortBy: 'timestamp', sortOrder: 'desc', itemTemplate: AGGREGATE_ITEM_TEMPLATE };
 }
 
-/** @param {import('@qu/space-core').Space} space @param {{prefix: string, routeScheme?: 'flat'|'yyyy'|'yyyy/mm'|'yyyy/mm/dd'}} params */
+/**
+ * @param {import('@qu/space-core').Space} space @param {{prefix: string, routeScheme?: 'flat'|'yyyy'|'yyyy/mm'|'yyyy/mm/dd'}} params
+ *
+ * UPSERT, NOT A BLIND `create*()` - see `guestbook-bundle.js`'s `installGuestbook()` own doc
+ * comment for the full "Deinstallieren + reinstall" bug this fixes (identical reasoning here): a
+ * real, reported failure where Blog's own feed/post pages 404ed after "Deinstallieren" followed by
+ * reinstalling the SAME prefix, because the underlying page/View ids were never actually freed.
+ */
 export async function installBlog(space, { prefix, routeScheme }) {
   await publishGlobalRoute(space, prefix, { route: '/', title: 'Blog' });
   await new Promise((resolve) => setTimeout(resolve, 400));
-  await createGlobalPage(space, prefix, globalPageFields(prefix, routeScheme));
-  await createGlobalView(space, prefix, globalIndexViewFields(prefix));
-  await createGlobalView(space, prefix, aggregateFeedViewFields(prefix));
+  await upsertGlobalPage(space, prefix, globalPageFields(prefix, routeScheme));
+  await upsertGlobalView(space, prefix, globalIndexViewFields(prefix));
+  await upsertGlobalView(space, prefix, aggregateFeedViewFields(prefix));
 }
 
 /**
