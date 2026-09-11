@@ -611,6 +611,63 @@ test('Guestbook: the admin console\'s "Update verfügbar" button re-applies the 
   }
 });
 
+test('Admin console: once registered with appType:"admin-console" (the one-time backfill), its OWN "Update verfügbar" button re-applies admin-console-bundle.js\'s current content in place', async () => {
+  const relay = await bootRelay();
+  try {
+    const adminSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl, router, platform } = mountAdmin(adminSpace);
+    // `mountAdmin()`'s own `startPlatform()` already fires ONE initial onChange for its own JSDOM
+    // URL ("#/admin") the moment `router.start()` runs, un-awaited. Letting it fully settle BEFORE
+    // doing anything else matters - firing a second navigate() while it's still in flight races it:
+    // whichever onChange's own async tail work (wireInstalledApps() et al) finishes LAST wins the
+    // final render, regardless of which was triggered later - a real, once-hit bug in an earlier
+    // draft of this test (the Update button never appeared at all, because the STALE initial render,
+    // from before the backfill write below, kept winning the race).
+    await waitUntil(() => mountEl.querySelector('[data-qu-bind="platform-apps-list"] li'));
+
+    // The one-time backfill every ALREADY-deployed relay needs (`bin/install-admin-console.mjs`'s
+    // own doc comment) - `bootRelay()`'s own fixture registers "admin" the OLD way (no appType), so
+    // this re-registration simulates exactly that CLI re-run, `bundleVersion: 0` simulating "never
+    // updated since" (the only state that actually shows the button, same as the Guestbook test
+    // above).
+    await registerApp(adminSpace, { prefix: 'admin', name: 'Relay-Admin', realm: 'global', appType: 'admin-console', bundleVersion: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // A genuinely different hash ("#/admin" -> "#/admin/") forces a real hashchange/onChange, now
+    // safe to fire since the FIRST one has already fully settled above.
+    router.navigate('/admin/');
+    await waitUntil(() => mountEl.querySelector('[data-qu-bind="platform-apps-list"] li'));
+
+    function adminListItem() {
+      return [...mountEl.querySelectorAll('[data-qu-bind="platform-apps-list"] li')].find((li) => li.textContent.includes('#/admin'));
+    }
+    await waitUntil(() => [...(adminListItem()?.querySelectorAll('button') ?? [])].some((b) => b.textContent === 'Update verfügbar'));
+    const updateBtn = [...adminListItem().querySelectorAll('button')].find((b) => b.textContent === 'Update verfügbar');
+    updateBtn.dispatchEvent(new mountEl.ownerDocument.defaultView.Event('click', { bubbles: true, cancelable: true }));
+
+    await waitUntil(() => ![...(adminListItem()?.querySelectorAll('button') ?? [])].some((b) => b.textContent === 'Update verfügbar'), { timeout: 4000 });
+    assert.ok(!adminListItem()?.querySelector('[data-qu-status]')?.textContent, 'no error surfaced - the update actually succeeded');
+
+    const apps = await platform.resolveApps({ timeout: 1000 });
+    const admin = apps.find((a) => a.prefix === 'admin');
+    assert.equal(admin.bundleVersion, 1, 'setAppBundleVersion() recorded ADMIN_CONSOLE_VERSION after the update');
+
+    // The re-applied content is actually LIVE (not just bookkeeping), from a BRAND-NEW connection/
+    // visit - same "check a fresh outsider, not the already-open session's own view" posture the
+    // "Deinstallieren" test below uses. `mountEl` itself is NOT re-checked here: nothing re-renders
+    // the CURRENTLY mounted page's own HTML on an Update click (only the app list re-renders,
+    // renderList() - a real page refresh, same as any other CRDT content edit, is what shows it).
+    const freshSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl: freshMountEl, router: freshRouter } = mountAdmin(freshSpace);
+    await waitUntil(() => freshMountEl.querySelector('form[data-qu-action="set-platform-config"]'));
+    freshRouter.stop();
+
+    router.stop();
+  } finally {
+    await relay.close();
+  }
+});
+
 test('Guestbook: "Deinstallieren" retracts the registration and clears the global content, making the prefix unreachable again', async () => {
   const relay = await bootRelay();
   try {

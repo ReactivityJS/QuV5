@@ -75,6 +75,21 @@ test('a collapsed (empty) selection is a no-op for Bold - nothing to wrap', () =
   assert.equal(editor.innerHTML, 'hello');
 });
 
+test('a selection spanning TWO block elements is a no-op for Bold - refuses to produce invalid <strong><p>...</p></strong> nesting', () => {
+  const { window, document, textarea } = setup('<p>Erster Absatz.</p><p>Zweiter Absatz.</p>');
+  bindRichText(textarea);
+  const editor = document.querySelector('.qu-richtext-editor');
+  const [firstP, secondP] = editor.querySelectorAll('p');
+  const range = document.createRange();
+  range.setStart(firstP.firstChild, 3);
+  range.setEnd(secondP.firstChild, 6);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  click(document.querySelector('.qu-richtext-btn-b'));
+  assert.equal(editor.innerHTML, '<p>Erster Absatz.</p><p>Zweiter Absatz.</p>', 'unchanged - a cross-block selection is refused, not wrapped into broken markup');
+});
+
 test('the Link button wraps the selection in <a href="..."> using the injected prompt() for the URL', () => {
   const { window, document, textarea } = setup('click here');
   const urls = [];

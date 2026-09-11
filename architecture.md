@@ -1414,6 +1414,77 @@ nicht sichtbar." Two changes address this:
      `<textarea>`) - this flag only decides which BINDING an already-
      marked field gets, never adds the capability to a field that never
      asked for it ("nicht jedes Eingabefeld braucht einen WYSIWYG-Editor").
+6. **Two follow-up fixes from real usage feedback**, after the round above
+   shipped:
+   - **A real bug in the OLD built-in editor's Bold/Italic/Link**
+     (`@qu/space-ui`'s `rich-text.js`, `wrapSelection()`): a selection
+     spanning MORE than one block element (e.g. dragging across two `<p>`s)
+     produced invalid nesting - `<strong>` wrapping whole `<p>` elements -
+     which a later HTML re-parse (saving, then reloading the post for
+     editing) silently reshuffles. Found via real-browser reproduction
+     (Playwright against the actual pre-installed Chromium, not just
+     jsdom - a wide sweep of realistic scenarios: typed text, existing
+     multi-paragraph content, real mouse drag-select, triple-click,
+     collapsed cursor, double-bold-toggle, keyboard `Ctrl+B` - only the
+     cross-block case ever produced broken output in either the OLD or the
+     NEW editor). Fixed by refusing (a no-op) when the selection's start
+     and end sit in DIFFERENT block ancestors, the same posture the
+     existing collapsed-selection guard already has - safer to do nothing
+     than produce markup a user can't see is broken. A genuinely DIFFERENT,
+     NOT-a-bug behavior worth knowing about: selecting ALL of a field's
+     text (`Ctrl+A`, or a triple-click on a single-paragraph field) and
+     then TYPING replaces the entire selection with whatever is typed -
+     ordinary browser text-editing behavior in any editor, not specific to
+     this one, but easy to mistake for "the field got cleared" if the
+     selection wasn't visually obvious.
+   - **The admin console's per-app row was "wild und unverständlich"**
+     (reported directly): every link/CMS-editor/visibility/danger-zone
+     control used to sit in one flat, unbroken run with no visual grouping,
+     and the "neue shared-list (optional)" input had no explanation
+     anywhere in the UI of what it does. `admin-actions.js`'s new
+     `appRowGroup()` helper puts each control cluster on its own line (a
+     `.qu-app-row-group` `<div>`, `base-style.js`'s own new rule) with a
+     short muted hint line above it where one is useful (what "shared-list"
+     is for, that "Sichtbarkeit" is the mode-toggle group) - purely
+     structural, every existing class/placeholder/button text a test or
+     caller depends on is unchanged.
+7. **The admin console itself now offers its own "Update verfügbar"
+   button** - closes a real gap: a relay-admin previously had no way to
+   pick up a NEW `admin-console-bundle.js` (this round's own "Editor-
+   Einstellungen" checkbox included) short of re-running `bin/install-
+   admin-console.mjs` from a terminal. Now it's the exact same in-app
+   affordance Guestbook/Blog/Forum already have:
+   - `admin-console-bundle.js` gains `ADMIN_CONSOLE_VERSION` and
+     `updateAdminConsole(space, {prefix})`, which re-applies this file's
+     own `templates`/`pages` IN PLACE via two new `bundle-upsert.js`
+     helpers (`upsertGlobalTemplate`, alongside the existing
+     `upsertGlobalPage`) - edit-first, create-as-fallback, the SAME safe
+     pattern Guestbook/Blog's own `updateX()` already use, never a raw
+     `createGlobalTemplate()`/`createGlobalPage()` re-call against a Node
+     that already exists.
+   - `admin-actions.js`'s `APP_INSTALLERS['admin-console']` entry (no
+     `install` - the admin console is never seeded through the generic
+     "install-app" form) wires this into the SAME generic "Update
+     verfügbar" button logic every reference app's row already renders -
+     no per-row special-casing needed.
+   - **The gap this doesn't close on its own**: an ALREADY-deployed
+     relay's `admin` registry entry (registered before this existed) has
+     no `appType` yet, so the button won't show for it. `bin/install-
+     admin-console.mjs` and `bin/bootstrap-platform.mjs` now both pass
+     `appType: 'admin-console', bundleVersion: ADMIN_CONSOLE_VERSION` to
+     their own `registerApp()` calls - one re-run of `install-admin-
+     console.mjs` (already the documented, safe-to-repeat way to push
+     updated content) backfills both fields once; every update after that
+     needs only the button.
+   - Verified end to end (`installed-apps.test.js`): register with
+     `appType: 'admin-console'`/`bundleVersion: 0`, click "Update
+     verfügbar", confirm `bundleVersion` becomes `ADMIN_CONSOLE_VERSION`
+     and a FRESH visitor sees the newly upserted content. Caught (and
+     documented in the test itself) a real test-authoring race along the
+     way: firing a SECOND `router.navigate()` before the FIRST onChange's
+     own async tail work had settled let the stale first render win,
+     overwriting the real page - fixed by awaiting the initial render
+     before touching the registry at all, not a bug in the feature itself.
 
 **UPDATE - ADMIN CONSOLE EATS ITS OWN DOG FOOD (`admin-actions.js`'s
 installed-apps list).** The app list used to be its own bespoke "clear

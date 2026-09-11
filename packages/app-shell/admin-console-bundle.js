@@ -48,6 +48,8 @@
  * requires editing this STORED content again just because a new file-based
  * app was added to the repo.
  */
+import { upsertGlobalTemplate, upsertGlobalPage } from './bundle-upsert.js';
+
 export const adminConsoleBundle = {
   manifest: { name: 'Relay-Admin', rootTemplate: 'main', defaultRoute: '/' },
   templates: [
@@ -109,3 +111,37 @@ export const adminConsoleBundle = {
     },
   ],
 };
+
+/**
+ * Bumped whenever this file's own `templates`/`pages` content changes in a
+ * way a relay-admin should be offered to pick up (the exact same "Update
+ * verfügbar" convention `guestbook-bundle.js`/`blog-bundle.js`'s own
+ * `GUESTBOOK_VERSION`/`BLOG_VERSION` already use, see those files' own doc
+ * comments) - `admin-actions.js`'s `APP_INSTALLERS['admin-console']` entry
+ * compares this against the registered `admin` prefix's own `bundleVersion`
+ * to decide whether to show the button at all.
+ */
+export const ADMIN_CONSOLE_VERSION = 1;
+
+/**
+ * Re-applies this bundle's own template/page content IN PLACE - the admin
+ * console's own "Update verfügbar" button calls this for the ALREADY-
+ * installed `admin` prefix, via `bundle-upsert.js`'s edit-with-create-
+ * fallback helpers (this file's own doc comment above on why never a raw
+ * `createGlobalTemplate()`/`createGlobalPage()` call - see `dev.js`'s
+ * `editTemplate()` doc comment on the "never re-`createNode()`" reasoning).
+ * Safe to call on a FRESH install too (falls back to create for whatever
+ * doesn't exist yet) - not how a fresh install actually happens though
+ * (`bin/install-admin-console.mjs` still calls `installGlobalAppBundle()`
+ * directly, the ordinary "create everything, prefix not registered yet"
+ * path). `prefix` is a parameter, not hardcoded to `"admin"`, purely so
+ * this fits `APP_INSTALLERS`' own generic `installer.update(space,
+ * {prefix, ...})` call shape - every real deployment's admin console lives
+ * at `"admin"` by convention (this package's own README), never enforced.
+ * @param {import('@qu/space-core').Space} space
+ * @param {{prefix: string}} params
+ */
+export async function updateAdminConsole(space, { prefix }) {
+  for (const template of adminConsoleBundle.templates) await upsertGlobalTemplate(space, prefix, template);
+  for (const page of adminConsoleBundle.pages) await upsertGlobalPage(space, prefix, page);
+}

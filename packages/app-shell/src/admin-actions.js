@@ -75,6 +75,7 @@ import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbo
 import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
 import { installForum } from '../forum-bundle.js';
 import { installGlobalCms, cmsBundle } from '../cms-bundle.js';
+import { updateAdminConsole, ADMIN_CONSOLE_VERSION } from '../admin-console-bundle.js';
 import { verifyWritesAcked } from './verify-writes.js';
 import { discoveredApps } from '../apps-registry.generated.js';
 import { setFormStatus } from './form-status.js';
@@ -164,6 +165,26 @@ const APP_INSTALLERS = {
     sharedLists: (prefix) => [`${prefix}:topics`, `${prefix}:replies`],
     viewNames: (prefix) => [`${prefix}-topics`],
   },
+  /**
+   * The built-in admin console itself - no `install` (it's never seeded
+   * through the generic "install-app" form, only `bin/install-admin-
+   * console.mjs`/`bin/bootstrap-platform.mjs`, both of which now register
+   * it with `appType: 'admin-console'`/`bundleVersion: ADMIN_CONSOLE_VERSION`
+   * so THIS entry's `update`/`version` apply to it exactly like any
+   * reference app's own "Update verfügbar" button - a relay-admin no
+   * longer needs to know a CLI script even exists to pick up a NEW
+   * `admin-console-bundle.js` (e.g. this round's own "Editor-Einstellungen"
+   * form). A deployment bootstrapped BEFORE this existed has no `appType`
+   * on its already-registered "admin" entry yet - one re-run of
+   * `bin/install-admin-console.mjs` (still safe, see that file's own doc
+   * comment) backfills it; every future update after that needs only this
+   * button.
+   */
+  'admin-console': {
+    label: 'Relay-Admin (Admin-Konsole)',
+    update: updateAdminConsole,
+    version: ADMIN_CONSOLE_VERSION,
+  },
 };
 
 /**
@@ -236,6 +257,31 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
    * "EAT YOUR OWN DOG FOOD" note below) - same content/behavior as before,
    * just no longer torn down and rebuilt for rows that didn't change.
    */
+  /**
+   * ONE labeled group within an app row (a `<div class="qu-app-row-group">`,
+   * optionally preceded by a short muted hint line) - `renderAppRow()`'s own
+   * "sieht noch sehr wild und unverständlich aus" fix: every control used to
+   * sit in one flat run of links/inputs/buttons with no visual separation
+   * and, for the shared-list input, no explanation at all of what it does.
+   * Purely structural (a few `<div>`s + short label text, `base-style.css`'s
+   * own `.qu-app-row-group`/`.qu-app-row-hint` rules already provide the
+   * spacing/muted-text styling - no new per-row CSS needed) - every existing
+   * class/placeholder/button-text a test or a caller depends on is
+   * unchanged.
+   */
+  function appRowGroup(hint, ...children) {
+    const group = doc.createElement('div');
+    group.className = 'qu-app-row-group';
+    if (hint) {
+      const hintEl = doc.createElement('span');
+      hintEl.className = 'qu-app-row-hint';
+      hintEl.textContent = hint;
+      group.appendChild(hintEl);
+    }
+    for (const child of children) group.appendChild(child);
+    return group;
+  }
+
   function renderAppRow(app) {
     const isGlobal = (app.realm ?? 'main') === 'global';
     const li = doc.createElement('li');
@@ -251,14 +297,18 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
     visitLink.href = `#/${app.prefix}/`;
     visitLink.textContent = 'Besuchen';
     visitLink.style.marginRight = '0.5rem';
-    li.appendChild(visitLink);
+
+    const linksGroup = doc.createElement('div');
+    linksGroup.className = 'qu-app-row-group';
+    linksGroup.appendChild(visitLink);
+    li.appendChild(linksGroup);
 
     if (isGlobal) {
       const manageLink = doc.createElement('a');
       manageLink.href = `#/admin/${app.prefix}/`;
       manageLink.textContent = 'Verwalten';
       manageLink.style.marginRight = '0.5rem';
-      li.appendChild(manageLink);
+      linksGroup.appendChild(manageLink);
 
       // `'multiuser'` - the bare prefix ITSELF already means "my own space" (this link is then
       // purely a convenience, identical to just clicking "Besuchen" above). `'personal'` - the
@@ -269,7 +319,7 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
         ownLink.href = `#/${app.prefix}/u/me/`;
         ownLink.textContent = 'Eigener Bereich';
         ownLink.style.marginRight = '0.5rem';
-        li.appendChild(ownLink);
+        linksGroup.appendChild(ownLink);
       }
 
       const status = doc.createElement('span');
@@ -297,7 +347,7 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
       const sharedListInput = doc.createElement('input');
       sharedListInput.placeholder = 'neue shared-list (optional)';
       sharedListInput.style.marginRight = '0.25rem';
-      li.appendChild(sharedListInput);
+      sharedListInput.title = 'Nur ausfüllen, wenn eine NEUE, von mehreren Besuchern gemeinsam beschreibbare Liste angelegt werden soll (z.B. Einträge in einem Gästebuch) - für eine einzelne, von dir selbst verfasste Seite leer lassen.';
 
       const cmsBtn = doc.createElement('button');
       cmsBtn.type = 'button';
@@ -329,8 +379,15 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
           status.textContent = `Fehler: ${err.message}`;
         }
       });
-      li.appendChild(cmsBtn);
+      li.appendChild(
+        appRowGroup(
+          'Seiten/Listen per UI bauen, ganz ohne eigenen Code - "neue shared-list" nur für einen Gästebuch-artigen Feed nötig, den mehrere Besucher gemeinsam füllen:',
+          sharedListInput,
+          cmsBtn
+        )
+      );
 
+      const modeButtonsGroup = appRowGroup('Sichtbarkeit für Besucher:');
       const unsupported = unsupportedModes(app);
       for (const mode of ['off', 'global', 'multiuser', 'personal']) {
         const btn = doc.createElement('button');
@@ -356,8 +413,11 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
             status.textContent = `Fehler: ${err.message}`;
           }
         });
-        li.appendChild(btn);
+        modeButtonsGroup.appendChild(btn);
       }
+      li.appendChild(modeButtonsGroup);
+
+      const actionsGroup = appRowGroup(null);
 
       // "Update verfügbar" - only for a prefix installed FROM this console's own `APP_INSTALLERS`
       // (`app.appType` set at registration time) whose bundle's CURRENT `version` is newer than
@@ -386,7 +446,7 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
             status.textContent = `Fehler: ${err.message}`;
           }
         });
-        li.appendChild(updateBtn);
+        actionsGroup.appendChild(updateBtn);
       }
 
       // "Deinstallieren" - retracts the registration (`unregisterApp()`) AND best-effort clears
@@ -407,7 +467,8 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
           status.textContent = `Fehler: ${err.message}`;
         }
       });
-      li.appendChild(uninstallBtn);
+      actionsGroup.appendChild(uninstallBtn);
+      li.appendChild(actionsGroup);
       li.appendChild(status);
     }
     return li;

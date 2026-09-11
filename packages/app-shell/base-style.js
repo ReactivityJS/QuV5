@@ -44,4 +44,10 @@ export const BASE_STYLE_CSS = `
   .qu-richtext-editor { min-height: 8rem; padding: 0.6rem 0.75rem; border: 1px solid #ccc; border-radius: 4px; background: #fff; box-sizing: border-box; }
   .qu-richtext-editor .ProseMirror { outline: none; min-height: 7rem; }
   .qu-richtext-editor :is(h1, h2, h3) { margin-top: 0; }
+
+  /* Admin console app rows (admin-actions.js's own appRowGroup()) - separates each row's
+     link/CMS/visibility/danger-zone controls onto their own line instead of one flat run, with a
+     short muted hint line explaining what a control does (e.g. the "neue shared-list" input). */
+  .qu-app-row-group { display: block; margin-top: 0.4rem; }
+  .qu-app-row-hint { display: block; font-size: 0.8rem; color: #666; margin-bottom: 0.2rem; }
 `;
