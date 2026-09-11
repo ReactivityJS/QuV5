@@ -67,8 +67,21 @@ export async function buildAppShellBundle({ outDir = join(here, 'dist') } = {}) 
   return { outfile };
 }
 
-/** @param {{appAdminPub?: Uint8Array|null, platformMode?: boolean}} params @returns {string} full `index.html` markup. */
-export function renderIndexHtml({ appAdminPub = null, platformMode = false } = {}) {
+/**
+ * @param {{appAdminPub?: Uint8Array|null, platformMode?: boolean, builtAt?: string}} params
+ *   `builtAt` (default: NOW, at call time) - embedded as `<meta name="qu-build-time">` in the real
+ *   deployment `<head>` below (not the setup page - that one has no bundle to have gone stale
+ *   either way). `relay-server.js` calls this ONCE, fresh, on every process start
+ *   (`buildAppShellBundle()`'s own "always bundles at boot, never pre-baked" doc comment, same
+ *   file) - so this timestamp is a genuine, verifiable "was the running process actually restarted
+ *   with the latest code" signal for whoever operates a deployment: `curl <host>/ | grep qu-build-time`
+ *   (or View Source) after a deploy should show a timestamp from just now, not a stale one from
+ *   hours/days ago - a real, previously-missing way to tell "I pulled the latest code and reinstalled
+ *   an app's own CONTENT" (which does NOT touch this - see `bundle-upsert.js`'s own doc comment on
+ *   content vs. code) apart from "the relay PROCESS itself actually restarted with that code."
+ * @returns {string} full `index.html` markup.
+ */
+export function renderIndexHtml({ appAdminPub = null, platformMode = false, builtAt = new Date().toISOString() } = {}) {
   if (!appAdminPub && !platformMode) {
     return `<!doctype html>
 <html lang="de">
@@ -144,6 +157,7 @@ export function renderIndexHtml({ appAdminPub = null, platformMode = false } = {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="qu-build-time" content="${builtAt}" />
     <title>Qu</title>
     <style>${BASE_STYLE_CSS}</style>
   </head>
