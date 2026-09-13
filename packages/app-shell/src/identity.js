@@ -45,66 +45,29 @@
  * the relay's own unconfigured setup page, `build.mjs`'s `renderIndexHtml()`)
  * calls this SAME function for the SAME key, deliberately - no separate
  * persistence mechanism to keep in sync.
+ *
+ * PROMOTED TO `@qu/bootstrap` - re-exported here UNCHANGED (this is a
+ * plain re-export, the exact same function object, not a reimplementation)
+ * so every existing caller of THIS module keeps working with zero changes.
+ * "Where does a peer's local identity live" turned out to be exactly the
+ * kind of bootstrap-time, adapter-shaped choice `@qu/bootstrap` exists for
+ * (see docs/bootstrap-adapter-registry.md and `@qu/bootstrap`'s own
+ * `identity-stores.js`) - not something specific to a browser App Shell.
+ * Re-exporting rather than duplicating also matters CORRECTNESS-wise, not
+ * just for tidiness: this module's own doc comment above describes
+ * `dev-console.js` and `shell.js` relying on calling the EXACT SAME
+ * function (sharing its module-level in-flight-promise race guard) for
+ * the same key - two independent copies of the same logic would silently
+ * break that guarantee the moment `shell.js` resolved its identity through
+ * a DIFFERENT copy (e.g. via `@qu/bootstrap`'s own `AdapterRegistry`)
+ * than `dev-console.js` still called directly.
  */
 import { QuCrypto } from '@qu/core';
 
+export { loadOrCreateIdentity } from '@qu/bootstrap';
+
 /** The one, central `localStorage` key `shell.js` loads/creates this browser's identity under - see this file's own doc comment on why it's a single fixed key, not per-app. */
 export const IDENTITY_STORAGE_KEY = 'qu-identity';
-
-/**
- * One in-flight promise per `key`, not per call - `storage.getItem()` is
- * synchronous, but generating a FRESH keypair genuinely isn't (Web
- * Crypto), so two callers racing for the same never-yet-created `key` on
- * the SAME page load (e.g. `dev-console.js`'s `window.Qu` and `shell.js`'s
- * own `<qu-app-shell>` boot, now that both can run on one page) would
- * otherwise both see "nothing stored yet," both generate their OWN
- * separate keypair, and both write - the second write silently winning,
- * leaving whichever caller got the first (now-orphaned, unpersisted)
- * keypair permanently out of sync with what's actually in storage. Keying
- * by `key` (not a single global lock) keeps two DIFFERENT identities
- * (different storage keys, e.g. distinct demo scripts) fully independent.
- */
-const inFlight = new Map();
-
-/**
- * @param {{getItem: (key: string) => string|null, setItem: (key: string, value: string) => void}} storage - e.g. `localStorage`.
- * @param {string} key
- * @returns {Promise<{signingKey: Uint8Array, signingPub: Uint8Array, xPrivateKey: Uint8Array, xPublicKey: Uint8Array}>}
- */
-export function loadOrCreateIdentity(storage, key) {
-  const existing = inFlight.get(key);
-  if (existing) return existing;
-  const promise = loadOrCreateIdentityOnce(storage, key).finally(() => {
-    if (inFlight.get(key) === promise) inFlight.delete(key);
-  });
-  inFlight.set(key, promise);
-  return promise;
-}
-
-async function loadOrCreateIdentityOnce(storage, key) {
-  const raw = storage.getItem(key);
-  if (raw) {
-    const obj = JSON.parse(raw);
-    return {
-      signingKey: QuCrypto.fromBase64(obj.signingKey),
-      signingPub: QuCrypto.fromBase64(obj.signingPub),
-      xPrivateKey: QuCrypto.fromBase64(obj.xPrivateKey),
-      xPublicKey: QuCrypto.fromBase64(obj.xPublicKey),
-    };
-  }
-  const kp = await QuCrypto.generateKeypair();
-  const identity = { signingKey: kp.privateKey, signingPub: kp.publicKey, xPrivateKey: kp.xPrivateKey, xPublicKey: kp.xPublicKey };
-  storage.setItem(
-    key,
-    JSON.stringify({
-      signingKey: QuCrypto.toBase64(identity.signingKey),
-      signingPub: QuCrypto.toBase64(identity.signingPub),
-      xPrivateKey: QuCrypto.toBase64(identity.xPrivateKey),
-      xPublicKey: QuCrypto.toBase64(identity.xPublicKey),
-    })
-  );
-  return identity;
-}
 
 /**
  * Registers `identity` as a `'members'`-mode Space member via the relay's

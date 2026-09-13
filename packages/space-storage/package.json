@@ -6,6 +6,7 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./memory-store": "./src/memory-store.js",
     "./indexeddb-store": "./src/indexeddb-store.js"
   },
   "dependencies": {

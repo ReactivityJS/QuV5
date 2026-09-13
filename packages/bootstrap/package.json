@@ -1,0 +1,29 @@
+{
+  "name": "@qu/bootstrap",
+  "version": "0.1.0",
+  "description": "Qu V5: the Mountpoint/Adapter-Registry and bootstrapSpace() - declarative, parameter-driven wiring of a Space's identity/transport/storage/volatileStorage to named, pluggable adapters (see docs/bootstrap-adapter-registry.md), instead of a deployment hardcoding which concrete adapter classes it imports. Depends only on @qu/core/@qu/space-core/@qu/events - never on a specific transport/storage implementation; callers register the adapters they actually want bundled.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./memory": "./src/adapters/memory.js",
+    "./browser": "./src/adapters/browser.js",
+    "./node": "./src/adapters/node.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/events": "^0.1.0",
+    "@qu/space-core": "^0.1.0"
+  },
+  "peerDependencies": {
+    "@qu/space-storage": "^0.1.0",
+    "@qu/space-transport": "^0.1.0",
+    "ws": "^8.18.0"
+  },
+  "peerDependenciesMeta": {
+    "@qu/space-storage": { "optional": true },
+    "@qu/space-transport": { "optional": true },
+    "ws": { "optional": true }
+  },
+  "license": "MIT"
+}

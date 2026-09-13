@@ -89,6 +89,12 @@ standalone or via Docker).
   below) - see `architecture.md` §7 and
   [`docs/app-shell-arbeitsauftrag.md`](./docs/app-shell-arbeitsauftrag.md)
   for the full design.
+- [`packages/bootstrap`](./packages/bootstrap) - `@qu/bootstrap`: the
+  Mountpoint/Adapter-Registry - `AdapterRegistry` + `bootstrapSpace()`,
+  declarative named-adapter wiring of a `Space`'s identity/transport/
+  storage/volatileStorage instead of a hardcoded `import` per deployment -
+  see `architecture.md` §3.7 and
+  [`docs/bootstrap-adapter-registry.md`](./docs/bootstrap-adapter-registry.md).
 
 ## Development
 

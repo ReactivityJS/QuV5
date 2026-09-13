@@ -61,7 +61,8 @@ QuV5/
 │   ├── space-components/@qu/space-components- OPTIONAL declarative Custom Elements over @qu/space-ui: <qu-view>/<qu-bind>/<qu-list> - a CMS-authored template writes these as plain markup, no JS glue
 │   ├── app-core/        @qu/app-core        - App Runtime: Kind-Schemas for app content, content-addressed Node ids, ContentResolver, HashRouter, AppRuntime, Dev API
 │   ├── app-renderer/    @qu/app-renderer    - sanitizer, <qu-slot> resolution, style injection, renderPage() - Template+Page -> DOM
-│   └── app-shell/       @qu/app-shell       - the minimal, application-agnostic bootstrap kernel a Relay serves; also its OWN production relay-server.js/Dockerfile (separate from @qu/space-transport's)
+│   ├── app-shell/       @qu/app-shell       - the minimal, application-agnostic bootstrap kernel a Relay serves; also its OWN production relay-server.js/Dockerfile (separate from @qu/space-transport's)
+│   └── bootstrap/       @qu/bootstrap       - the Mountpoint/Adapter-Registry: AdapterRegistry + bootstrapSpace() - declarative, named-adapter wiring of a Space's identity/transport/storage/volatileStorage (docs/bootstrap-adapter-registry.md)
 ├── demo/                 - runnable proofs: CLI chat, browser client, in-process auto-demo, app-shell-demo
 ├── docs/                 - docs/v5-space-core-guide.md (framework how-to), docs/app-shell-arbeitsauftrag.md (App Shell/Runtime design)
 └── architecture.md       - this file
@@ -333,6 +334,24 @@ former, precisely because it needs ordering and per-contribution identity
 (so a specific contribution can be replaced/removed), which a fire-and-
 forget pub/sub topic does not give you.
 
+### 3.7 Bootstrap: the Mountpoint/Adapter-Registry
+
+`Space`'s constructor was always dependency-injectable (`identity`/
+`transport`/`storage`/`volatileStorage` as already-built instances) — what
+was missing (`docs/quv5-vs-quv3-decision.md`'s Arbeitspaket 2, the QuV3
+`QuMount.resolve(path)` gap) was a declarative way to choose WHICH concrete
+adapter backs each of those slots, by NAME, at boot time, rather than a
+deployment hardcoding an `import`. `@qu/bootstrap`'s `AdapterRegistry`
+(`(slot, name) -> factory`) + `bootstrapSpace()` (resolves a plain
+`{identity, transport, storage?, volatileStorage?}` config — each slot
+either `{adapter: '<name>', ...options}` or an already-built instance —
+into a real `Space`) is that layer. See `docs/bootstrap-adapter-registry.md`
+for the full design, the built-in adapter packs (`@qu/bootstrap/memory`,
+`/browser`, `/node`), and why identity-store registration
+(`'memory'`/`'local-storage'`/`'session-storage'`) is always its own,
+separately-called step. `@qu/app-shell`'s `shell.js` is the reference
+real-deployment caller.
+
 ## 4. File-by-file map
 
 ### `packages/core/` — `@qu/core`
@@ -597,6 +616,18 @@ notice.
 | `createDurableStore(backingStore?)` | Simulated-persistence tier (tests): same contract, plus `._backingStore`. |
 | `createFileStore(dataDir)` | Real on-disk tier: same contract, one `.ndjson` file per Node. |
 
+### Bootstrap / Adapter Registry (`@qu/bootstrap`, see §3.7)
+
+| Export | Purpose |
+|---|---|
+| `new AdapterRegistry()` | `.register(slot, name, factory)` / `.create(slot, name, options?)` / `.has(slot, name)` / `.names(slot)` — the generic `(slot, name) -> factory` map. |
+| `bootstrapSpace({registry?, identity, transport, storage?, volatileStorage?, members?, relayAdmins?, bus?})` | Resolves each slot (an `{adapter, ...options}` ref via `registry`, or an already-built instance) and constructs a `Space`. Calls `transport.connect()`; defaults `bus` to a fresh `EventBus`. |
+| `loadOrCreateIdentity(storage, key)` | The generic "create once, reload on every later call for that key" identity primitive — `@qu/app-shell`'s `identity.js` re-exports this unchanged. |
+| `registerIdentityStoreAdapters(registry, {defaultKey?})` | Registers the `'identity'` slot's `'memory'`/`'local-storage'`/`'session-storage'` adapters. Always called separately from the packs below (see docs/bootstrap-adapter-registry.md). |
+| `registerMemoryAdapters(registry)` (`@qu/bootstrap/memory`) | `storage`/`volatileStorage`: `'memory'`; `transport`: `'in-process'` (needs a shared `hub` — also exports `createSharedInProcessHub`). |
+| `registerBrowserAdapters(registry)` (`@qu/bootstrap/browser`) | `storage`: `'indexeddb'`; `transport`: `'ws-client'`. Browser-safe subpaths only. |
+| `registerNodeAdapters(registry)` (`@qu/bootstrap/node`) | `storage`: `'file'`/`'durable'`; `transport`: `'ws-client'` (Node `ws`). |
+
 ### Delivery status / upload outbox (`@qu/space-plugins`, OPTIONAL)
 
 | Export | Purpose |
@@ -712,10 +743,18 @@ Relay never learns what it's transporting is "a page" or "a template," and
 - **`@qu/app-shell`** (`identity.js`, `boot.js`, `shell.js`) — the ONE
   fixed piece of application JavaScript a Relay would serve (`shell.js`'s
   `<qu-app-shell>` custom element, a DOM mount marker, not a component
-  system). `identity.js` generates/persists a browser identity and joins a
-  relay's Space via its already-existing `POST /join`/`GET /members.json`
+  system). `identity.js` re-exports `loadOrCreateIdentity()` from
+  `@qu/bootstrap` (§3.7 — promoted there, unchanged, so `dev-console.js`'s
+  and `shell.js`'s calls keep sharing its race guard) and joins a relay's
+  Space via its already-existing `POST /join`/`GET /members.json`
   (`@qu/space-transport`'s `relay-app-server.js`) — reused, not a new "public
-  content" mechanism. `boot.js`'s `startApp()` is the DOM-aware half that
+  content" mechanism. `shell.js` itself resolves its `identity`/`transport`/
+  `storage` through an `@qu/bootstrap` `AdapterRegistry`
+  (`registerIdentityStoreAdapters()` + `@qu/bootstrap/browser`'s
+  `registerBrowserAdapters()`) and `bootstrapSpace()`, rather than
+  constructing `WsClientTransport`/`indexeddb-store` directly — see
+  `docs/bootstrap-adapter-registry.md`. `boot.js`'s `startApp()` is the
+  DOM-aware half that
   wires an already-constructed `Space` to `@qu/app-core`/`@qu/app-renderer`;
   kept separate from `shell.js`'s network/`localStorage` glue specifically so
   it stays testable with an in-process `Space` + jsdom, no live relay needed

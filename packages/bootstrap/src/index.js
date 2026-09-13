@@ -1,0 +1,3 @@
+export { AdapterRegistry } from './adapter-registry.js';
+export { bootstrapSpace } from './bootstrap-space.js';
+export { loadOrCreateIdentity, registerIdentityStoreAdapters } from './identity-stores.js';

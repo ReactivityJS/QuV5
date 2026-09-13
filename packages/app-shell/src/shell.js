@@ -38,32 +38,50 @@
  * SAME bundle and offer a working identity-bootstrapping console before
  * any app/platform is even configured. See that file's own doc comment.
  *
- * UPDATE - PERSISTENT CLIENT STORAGE: `Space` is now constructed with
- * `@qu/space-storage`'s `indexeddb-store.js` (when available - see
- * `isIndexedDbAvailable()`) as its `storage` - previously this Space was
- * always memory-only, so every reload/tab-open re-synced every Node
- * touched during that session from scratch over the network, even for a
- * returning visitor with nothing new to fetch. No change to `Space`/
- * `Node`/`Field` themselves was needed - `_hydrateFromStorage()` already
- * reads local storage FIRST, instantly, before ever sending a subscribe
- * request; this was simply the first real implementation of that param
- * actually usable in a browser (the relay side already had one,
- * `file-store.js`).
+ * UPDATE - PERSISTENT CLIENT STORAGE: `Space` is constructed with
+ * `@qu/space-storage`'s `indexeddb-store.js` (when available) as its
+ * `storage` - previously this Space was always memory-only, so every
+ * reload/tab-open re-synced every Node touched during that session from
+ * scratch over the network, even for a returning visitor with nothing new
+ * to fetch. No change to `Space`/`Node`/`Field` themselves was needed -
+ * `_hydrateFromStorage()` already reads local storage FIRST, instantly,
+ * before ever sending a subscribe request; this was simply the first real
+ * implementation of that param actually usable in a browser (the relay
+ * side already had one, `file-store.js`).
+ *
+ * UPDATE - MOUNTPOINT/ADAPTER-REGISTRY: WHICH concrete storage/transport
+ * adapter backs this Space is no longer a hardcoded `import` here - this
+ * file builds an `@qu/bootstrap` `AdapterRegistry` (`./browser.js`'s own
+ * pack: `'indexeddb'` storage, `'ws-client'` transport, the exact same two
+ * classes this file used to construct by hand) and hands `bootstrapSpace()`
+ * a plain config naming them by STRING (`{adapter: 'indexeddb'}`/
+ * `{adapter: 'ws-client', url}`) instead (see docs/bootstrap-adapter-
+ * registry.md) - a deployment that wants a DIFFERENT adapter (a different
+ * persistent-storage backend, a non-WebSocket transport) swaps the config
+ * value, never this file's own code.
  */
 import { QuCrypto } from '@qu/core';
-import { EventBus } from '@qu/events';
-import { Space } from '@qu/space-core';
-// Direct subpath import, NOT the package's own barrel `.` export - the barrel also re-exports
-// `file-store.js` (real `node:fs/promises` I/O, relay-only), which esbuild cannot resolve for a
-// browser bundle at all, module graph or not - same "browser code imports a dedicated subpath,
-// never the barrel" idiom `@qu/space-transport`'s own `./ws-client-transport` export already
-// establishes for the identical Node-vs-browser split (that package's `ws-server-hub.js`/`ws`).
-import { createIndexedDbStore, isIndexedDbAvailable } from '@qu/space-storage/indexeddb-store';
-import { WsClientTransport } from '@qu/space-transport/ws-client-transport';
+import { AdapterRegistry, bootstrapSpace, registerIdentityStoreAdapters } from '@qu/bootstrap';
+import { registerBrowserAdapters } from '@qu/bootstrap/browser';
 import '@qu/space-components/elements'; // registers <qu-view>/<qu-bind>/<qu-list> - see that module's own doc comment. Side-effect only import, deliberately unused otherwise.
-import { loadOrCreateIdentity, joinSpace, fetchRelayAdmins, IDENTITY_STORAGE_KEY } from './identity.js';
+import { joinSpace, fetchRelayAdmins, IDENTITY_STORAGE_KEY } from './identity.js';
 import { initDevConsole } from './dev-console.js';
 import { startApp, startPlatform } from './boot.js';
+
+/**
+ * This Shell's own registry - built once, module-scope (every
+ * `<qu-app-shell>` instance on the SAME page shares it; registering twice
+ * would throw, see `AdapterRegistry.register()`'s own doc comment, and
+ * there is no reason a second element on the same page would want a
+ * DIFFERENT set of adapters anyway). `registerIdentityStoreAdapters()` is
+ * its own call (not part of `registerBrowserAdapters()`) on purpose -
+ * see `@qu/bootstrap`'s `adapters/browser.js` own doc comment on why
+ * identity registration is always a separate step, regardless of which
+ * storage/transport pack(s) a deployment composes alongside it.
+ */
+const registry = new AdapterRegistry();
+registerIdentityStoreAdapters(registry, { defaultKey: IDENTITY_STORAGE_KEY });
+registerBrowserAdapters(registry);
 
 export class QuAppShell extends HTMLElement {
   async connectedCallback() {
@@ -78,7 +96,7 @@ export class QuAppShell extends HTMLElement {
       const relayUrl = this.getAttribute('relay-url') ?? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
       const name = this.getAttribute('display-name') ?? `visitor-${Math.random().toString(36).slice(2, 8)}`;
 
-      const identity = await loadOrCreateIdentity(localStorage, IDENTITY_STORAGE_KEY);
+      const identity = await registry.create('identity', 'local-storage', { key: IDENTITY_STORAGE_KEY });
       // joinSpace()'s own POST-then-GET is a genuine dependency (the member list must already
       // include the just-joined identity) and stays sequential - but fetchRelayAdmins() is a
       // completely independent, unauthenticated read (only fetched in PLATFORM mode - a single-app
@@ -87,22 +105,25 @@ export class QuAppShell extends HTMLElement {
       // CONCURRENTLY with joinSpace() instead of waiting for it to finish first.
       const [members, relayAdmins] = await Promise.all([joinSpace({ name, identity }), isPlatformMode ? fetchRelayAdmins().catch(() => []) : []]);
 
-      const transport = new WsClientTransport(relayUrl);
-      await transport.connect();
-      // A real EventBus, not the framework's own `null` default - `cms-actions.js`'s `wireCms()`
-      // reads `space.bus` (Space's own doc comment on that getter) to tell a save the RELAY silently
-      // rejected apart from one that genuinely succeeded, both otherwise indistinguishable client-side.
-      const bus = new EventBus();
-      // The browser's own persistent tier (`@qu/space-storage`'s `indexeddb-store.js`, that file's
-      // own top doc comment on why this was previously entirely memory-only) - `Space.useNode()`
-      // already hydrates from `storage` FIRST, instantly, before ever sending a subscribe request
-      // (`space.js`'s own doc comment), so wiring this in is the whole fix: a returning visitor's
-      // already-seen content renders immediately, resyncing only whatever's actually new in the
-      // background. `isIndexedDbAvailable()` guards environments with no `indexedDB` at all (a
-      // privacy mode that removed it, an embedding context) - falls back to `undefined` (today's
-      // unchanged, memory-only behavior), never throws boot open over this.
-      const storage = isIndexedDbAvailable() ? createIndexedDbStore() : undefined;
-      const space = new Space({ identity, members, relayAdmins, transport, bus, storage });
+      // `bootstrapSpace()` (`@qu/bootstrap`) resolves `transport`/`storage` through `registry` by
+      // NAME - `'indexeddb'`/`'ws-client'` are exactly the two classes this file used to construct
+      // by hand (see this file's own top doc comment) - calls `transport.connect()` itself, and
+      // defaults `bus` to a fresh `EventBus` (unlike `Space`'s own quieter `null` default) - the
+      // same real bus `cms-actions.js`'s `wireCms()` needs (Space's own `bus` getter doc comment) to
+      // tell a save the RELAY silently rejected apart from one that genuinely succeeded. `storage`
+      // falls back to memory-only (`Space`'s own default, `storage: null`) if this runtime has no
+      // `indexedDB` at all (a privacy mode that removed it, an embedding context) - checked directly
+      // against the global rather than through the registry, since "is this adapter even usable
+      // here" is an environment question, not something resolving the adapter itself should have to
+      // answer by throwing.
+      const { space } = await bootstrapSpace({
+        registry,
+        identity,
+        members,
+        relayAdmins,
+        transport: { adapter: 'ws-client', url: relayUrl },
+        storage: typeof indexedDB !== 'undefined' ? { adapter: 'indexeddb' } : null,
+      });
 
       if (isPlatformMode) {
         // The admin app lives in this SAME main Space now (kinds.js's own "THE ADMIN APP" doc
