@@ -432,6 +432,42 @@ flat-log alternative adapter), the explicit decision being "use Yjs well"
 collaborative rich-text editing over the `'richtext'` field shape, §3.2) —
 not "make sync pluggable."
 
+### 3.10 Routing-Anonymität
+
+`docs/routing-anonymity.md` names exactly what a relay/network observer
+sees per envelope (`envelope.js`) vs. what stays hidden: content is always
+encrypted (`mode: 'encrypted'`), but `envelope.pub` (the real signer) and
+`envelope.to` (every intended recipient's X25519 pubkey) are ALWAYS visible
+— the latter is harmless for an ordinary `'members'`-mode broadcast (the
+member list is already public via `/members.json`) but leaks the exact
+subset for a `{recipients}`-narrowed group write (§3.8's group-encryption
+feature). THREE items, tracked by status:
+  - **Done**: `@qu/bootstrap`'s `bootstrapAliasSpace(realSpace, spaceId,
+    config)` composes `alias.js`'s `publishAlias()` + `bootstrapSpace()` —
+    sender anonymity for any self-certifying (`'owner'`/`'named'`/
+    `'content'`) Kind, zero relay-side setup. The "dead drop" property is
+    `AliasRegistry`'s own pre-existing one: only a fellow Space member who
+    can decrypt the registry entry resolves alias→real, entirely
+    client-side — the relay never can. `'members'`-mode anonymous writing
+    needs an ADDITIONAL deployment-specific step (registering the alias as
+    a member via whatever join mechanism that relay uses) — documented as
+    a recipe, not wrapped generically (join protocols differ per
+    deployment).
+  - **Proposed, not implemented** (would change the Envelope wire format —
+    awaiting explicit sign-off): padding `envelope.to` to the Space's FULL
+    member list (real wrapped keys for actual recipients, indistinguishable
+    random bytes for everyone else) so a `{recipients}`-narrowed write's
+    real audience is no longer visible to the relay.
+  - **Proposed, not implemented** (new protocol behavior — awaiting
+    explicit sign-off): epoch-based alias rotation (`deriveAliasIdentity(identity,
+    spaceId, epoch)`) plus a confidentially-delivered "my successor alias is
+    X" handoff message, so two correspondents' alias identities can change
+    over time while their conversation stays linked — for THEM only, never
+    for an observer. Explicitly does NOT solve connection/timing-level
+    correlation (the same transport connection/IP reused across a rotation
+    is still correlatable) — that needs an actual connection change, future
+    Mesh/WebRTC-transport territory (§3.9), not an identity-layer fix.
+
 ## 4. File-by-file map
 
 ### `packages/core/` — `@qu/core`
@@ -709,6 +745,7 @@ notice.
 | `new AdapterRegistry()` | `.register(slot, name, factory)` / `.create(slot, name, options?)` / `.has(slot, name)` / `.names(slot)` — the generic `(slot, name) -> factory` map. |
 | `bootstrapSpace({registry?, identity, transport, storage?, volatileStorage?, members?, relayAdmins?, bus?})` | Resolves each slot (an `{adapter, ...options}` ref via `registry`, or an already-built instance), validates `transport` (`assertTransportShape()`, below), and constructs a `Space`. Calls `transport.connect()`; defaults `bus` to a fresh `EventBus`. |
 | `assertTransportShape(transport)` / `REQUIRED_TRANSPORT_METHODS` | The Transport contract check (§3.9, `docs/peer-transport-contract.md`) — throws naming any of `connect`/`send`/`onMessage` that's missing. |
+| `bootstrapAliasSpace(realSpace, spaceId, config)` | Composes `@qu/space-core`'s `publishAlias()` + `bootstrapSpace()` — bootstraps a second Space signing as `realSpace`'s per-space alias identity (§3.10, `docs/routing-anonymity.md`). `config.identity` is always ignored (overridden with the derived alias). |
 | `loadOrCreateIdentity(storage, key)` | The generic "create once, reload on every later call for that key" identity primitive — `@qu/app-shell`'s `identity.js` re-exports this unchanged. |
 | `registerIdentityStoreAdapters(registry, {defaultKey?})` | Registers the `'identity'` slot's `'memory'`/`'local-storage'`/`'session-storage'` adapters. Always called separately from the packs below (see docs/bootstrap-adapter-registry.md). |
 | `registerMemoryAdapters(registry)` (`@qu/bootstrap/memory`) | `storage`/`volatileStorage`: `'memory'`; `transport`: `'in-process'` (needs a shared `hub` — also exports `createSharedInProcessHub`). |
