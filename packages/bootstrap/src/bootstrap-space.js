@@ -50,6 +50,11 @@
  * one) - pass `bus: null` explicitly to opt back into `Space`'s own
  * quieter default, or a specific `EventBus` instance to reuse one you
  * already built elsewhere.
+ * `sealStrategy` (optional, default `undefined` - `Space`'s own default,
+ * `sealStrategies.none`, unchanged behavior) follows the SAME
+ * `{adapter: '<name>'}`-or-instance resolution as every other slot - see
+ * `seal-strategies.js`'s `registerSealStrategyAdapters()` and
+ * docs/routing-anonymity.md for what `'none'`/`'pad-to-members'` mean.
  * @param {{
  *   registry?: import('./adapter-registry.js').AdapterRegistry,
  *   identity: object,
@@ -59,8 +64,9 @@
  *   members?: Array<{pub: Uint8Array, xPub: Uint8Array}>,
  *   relayAdmins?: Array<Uint8Array>,
  *   bus?: object|null,
+ *   sealStrategy?: object|null,
  * }} config
- * @returns {Promise<{identity: object, transport: object, storage: object|undefined, volatileStorage: object|undefined, bus: object|null, space: import('@qu/space-core').Space}>}
+ * @returns {Promise<{identity: object, transport: object, storage: object|undefined, volatileStorage: object|undefined, bus: object|null, sealStrategy: Function|undefined, space: import('@qu/space-core').Space}>}
  */
 import { Space } from '@qu/space-core';
 import { EventBus } from '@qu/events';
@@ -78,7 +84,7 @@ async function resolveSlot(registry, slot, value) {
   return registry.create(slot, adapter, options);
 }
 
-export async function bootstrapSpace({ registry, identity, transport, storage = null, volatileStorage = null, members = [], relayAdmins = [], bus } = {}) {
+export async function bootstrapSpace({ registry, identity, transport, storage = null, volatileStorage = null, members = [], relayAdmins = [], bus, sealStrategy = null } = {}) {
   const resolvedIdentity = await resolveSlot(registry, 'identity', identity);
   if (!resolvedIdentity) throw new Error('bootstrapSpace: "identity" is required');
 
@@ -89,6 +95,7 @@ export async function bootstrapSpace({ registry, identity, transport, storage = 
 
   const resolvedStorage = await resolveSlot(registry, 'storage', storage);
   const resolvedVolatileStorage = await resolveSlot(registry, 'volatileStorage', volatileStorage);
+  const resolvedSealStrategy = await resolveSlot(registry, 'sealStrategy', sealStrategy);
   const resolvedBus = bus === undefined ? new EventBus() : bus;
 
   const space = new Space({
@@ -99,7 +106,16 @@ export async function bootstrapSpace({ registry, identity, transport, storage = 
     storage: resolvedStorage,
     bus: resolvedBus,
     ...(resolvedVolatileStorage !== undefined ? { volatileStorage: resolvedVolatileStorage } : {}),
+    ...(resolvedSealStrategy !== undefined ? { sealStrategy: resolvedSealStrategy } : {}),
   });
 
-  return { identity: resolvedIdentity, transport: resolvedTransport, storage: resolvedStorage, volatileStorage: resolvedVolatileStorage, bus: resolvedBus, space };
+  return {
+    identity: resolvedIdentity,
+    transport: resolvedTransport,
+    storage: resolvedStorage,
+    volatileStorage: resolvedVolatileStorage,
+    bus: resolvedBus,
+    sealStrategy: resolvedSealStrategy,
+    space,
+  };
 }

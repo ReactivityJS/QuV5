@@ -453,11 +453,19 @@ feature). THREE items, tracked by status:
     a member via whatever join mechanism that relay uses) — documented as
     a recipe, not wrapped generically (join protocols differ per
     deployment).
-  - **Proposed, not implemented** (would change the Envelope wire format —
-    awaiting explicit sign-off): padding `envelope.to` to the Space's FULL
-    member list (real wrapped keys for actual recipients, indistinguishable
-    random bytes for everyone else) so a `{recipients}`-narrowed write's
-    real audience is no longer visible to the relay.
+  - **Done, as a swappable plugin**: `@qu/core`'s `QuCrypto.encrypt()` gained
+    an optional `paddingXPubKeys` param (byte-identical random entries,
+    `contentKeyRaw.length + 16`, indistinguishable from a real wrapped key
+    without the matching private key); `@qu/space-core`'s `seal-
+    strategies.js` exports `sealStrategies.none` (default, unchanged
+    behavior) and `.padToMembers` (pads `envelope.to` to the Space's FULL
+    current membership); `Space` takes it as a new, optional `sealStrategy`
+    constructor param (same DI pattern as `storage`/`transport`); `@qu/
+    bootstrap` exposes it as the `'sealStrategy'` slot
+    (`registerSealStrategyAdapters()`, `{adapter: 'pad-to-members'}`) so a
+    deployment picks it by name exactly like any other adapter, and a
+    future third strategy is pure addition — never a `Space`/`envelope.js`
+    change.
   - **Proposed, not implemented** (new protocol behavior — awaiting
     explicit sign-off): epoch-based alias rotation (`deriveAliasIdentity(identity,
     spaceId, epoch)`) plus a confidentially-delivered "my successor alias is
@@ -474,7 +482,7 @@ feature). THREE items, tracked by status:
 
 | File | Purpose |
 |---|---|
-| `src/crypto.js` | `QuCrypto` — Ed25519 sign/verify, X25519 ECDH + AES-256-GCM envelope encryption, `keypairFromSeed()` (deterministic derivation, used by `alias.js`), base64/hex helpers, `fingerprint()`. |
+| `src/crypto.js` | `QuCrypto` — Ed25519 sign/verify, X25519 ECDH + AES-256-GCM envelope encryption (`encrypt()` now also takes an optional `paddingXPubKeys` — byte-indistinguishable dummy `to` entries, §3.10), `keypairFromSeed()` (deterministic derivation, used by `alias.js`), base64/hex helpers, `fingerprint()`. |
 | `src/index.js` | Re-exports `QuCrypto`. |
 
 ### `packages/events/` — `@qu/events`
@@ -506,7 +514,8 @@ existed.
 
 | File | Purpose |
 |---|---|
-| `src/envelope.js` | `sealUpdate()`/`sealPublicUpdate()`/`verifyEnvelope()`/`openUpdate()` — the ONE place a Yjs update is ever sealed/opened. Envelope v2 (`mode: 'encrypted'\|'public'`) and the `snapshot` flag (compaction) live here. |
+| `src/envelope.js` | `sealUpdate()`/`sealPublicUpdate()`/`verifyEnvelope()`/`openUpdate()` — the ONE place a Yjs update is ever sealed/opened. Envelope v2 (`mode: 'encrypted'\|'public'`) and the `snapshot` flag (compaction) live here. `sealUpdate()` now also takes an optional `paddingXPubKeys` (§3.10). |
+| `src/seal-strategies.js` | `sealStrategies.none`/`.padToMembers` — `Space`'s pluggable `sealStrategy` (§3.10, `docs/routing-anonymity.md`): which OTHER members get a padding entry in an envelope's `to`. |
 | `src/kind-schema.js` | `defineKind()` (now also `persistence: 'durable'\|'volatile'`, §3.4), `KindRegistry`, `deriveOwnerNodeId()` (self-certifying nodeId derivation for `'owner'`/`'named'` ACL). |
 | `src/grant.js` | `signGrant()`/`verifyGrant()` — the `'named'`-ACL delegated-authority mechanism. |
 | `src/node.js` | `SpaceNode` (one Node = one Y.Doc, `meta` + `content` maps), `stampMeta()`. |
@@ -666,7 +675,7 @@ notice.
 
 | Member | Purpose |
 |---|---|
-| `new Space({identity, members, transport, storage?, volatileStorage?, bus?})` | Construct one peer's live view. Sends a signed `hello` immediately; claims the transport's `onStatusChange()` slot if it has one (§3.4). `volatileStorage` backs any `persistence: 'volatile'` Kind (§3.4) — defaults to a private in-memory store. |
+| `new Space({identity, members, transport, storage?, volatileStorage?, bus?, sealStrategy?})` | Construct one peer's live view. Sends a signed `hello` immediately; claims the transport's `onStatusChange()` slot if it has one (§3.4). `volatileStorage` backs any `persistence: 'volatile'` Kind (§3.4) — defaults to a private in-memory store. `sealStrategy` (default `sealStrategies.none`) decides which other members get a padding entry in an outgoing envelope's `to` (§3.10). |
 | `.identity` | Read-only getter — this Space's own identity object. |
 | `.addMember(member)` | Grows this Space's own view of `'members'`-mode ACL/encryption recipients (idempotent). |
 | `.createNode(kindSchema, initialFields?, {id?})` | Originate a new Node. `id` is IGNORED (self-derived) for `'owner'`/`'named'` Kinds. |
@@ -693,9 +702,10 @@ notice.
 
 | Export | Purpose |
 |---|---|
-| `sealUpdate()` / `sealPublicUpdate()` | Seal a raw Yjs update into a signed (+ encrypted, for the first) envelope. |
+| `sealUpdate()` / `sealPublicUpdate()` | Seal a raw Yjs update into a signed (+ encrypted, for the first) envelope. `sealUpdate()` takes an optional trailing `paddingXPubKeys` (§3.10). |
 | `verifyEnvelope(envelope, isAuthorizedWriter)` | Signature + ACL check, either mode. |
-| `openUpdate(envelope, recipient?)` | Decrypt (encrypted mode) or pass through (public mode). |
+| `openUpdate(envelope, recipient?)` | Decrypt (encrypted mode) or pass through (public mode). Throws the same way for a genuine non-recipient and a padding target (§3.10) — indistinguishable by design. |
+| `sealStrategies.none` / `.padToMembers` | `Space`'s pluggable `sealStrategy` (§3.10) — see `src/seal-strategies.js` above. |
 | `defineKind(kind, {fields, acl?, notifyTopics?, persistence?})` | Declare a Kind-Schema. `persistence: 'durable'\|'volatile'` (default `'durable'`) — see §3.4. |
 | `KindRegistry` | `.register()`/`.get()`/`.list()` static registry. |
 | `deriveOwnerNodeId(ownerPub, kind)` | Self-certifying nodeId for `'owner'`/`'named'` Kinds. |
@@ -743,9 +753,10 @@ notice.
 | Export | Purpose |
 |---|---|
 | `new AdapterRegistry()` | `.register(slot, name, factory)` / `.create(slot, name, options?)` / `.has(slot, name)` / `.names(slot)` — the generic `(slot, name) -> factory` map. |
-| `bootstrapSpace({registry?, identity, transport, storage?, volatileStorage?, members?, relayAdmins?, bus?})` | Resolves each slot (an `{adapter, ...options}` ref via `registry`, or an already-built instance), validates `transport` (`assertTransportShape()`, below), and constructs a `Space`. Calls `transport.connect()`; defaults `bus` to a fresh `EventBus`. |
+| `bootstrapSpace({registry?, identity, transport, storage?, volatileStorage?, members?, relayAdmins?, bus?, sealStrategy?})` | Resolves each slot (an `{adapter, ...options}` ref via `registry`, or an already-built instance), validates `transport` (`assertTransportShape()`, below), and constructs a `Space`. Calls `transport.connect()`; defaults `bus` to a fresh `EventBus`. |
 | `assertTransportShape(transport)` / `REQUIRED_TRANSPORT_METHODS` | The Transport contract check (§3.9, `docs/peer-transport-contract.md`) — throws naming any of `connect`/`send`/`onMessage` that's missing. |
 | `bootstrapAliasSpace(realSpace, spaceId, config)` | Composes `@qu/space-core`'s `publishAlias()` + `bootstrapSpace()` — bootstraps a second Space signing as `realSpace`'s per-space alias identity (§3.10, `docs/routing-anonymity.md`). `config.identity` is always ignored (overridden with the derived alias). |
+| `registerSealStrategyAdapters(registry)` | Registers the `'sealStrategy'` slot's `'none'`/`'pad-to-members'` adapters (§3.10) — `@qu/space-core`'s `sealStrategies`, zero extra dependencies, safe anywhere. |
 | `loadOrCreateIdentity(storage, key)` | The generic "create once, reload on every later call for that key" identity primitive — `@qu/app-shell`'s `identity.js` re-exports this unchanged. |
 | `registerIdentityStoreAdapters(registry, {defaultKey?})` | Registers the `'identity'` slot's `'memory'`/`'local-storage'`/`'session-storage'` adapters. Always called separately from the packs below (see docs/bootstrap-adapter-registry.md). |
 | `registerMemoryAdapters(registry)` (`@qu/bootstrap/memory`) | `storage`/`volatileStorage`: `'memory'`; `transport`: `'in-process'` (needs a shared `hub` — also exports `createSharedInProcessHub`). |

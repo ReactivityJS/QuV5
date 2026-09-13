@@ -79,21 +79,67 @@ NETZWERK-Korrelationsproblem — echte Transport-Unverknüpfbarkeit bräuchte
 unterschiedliche Netzwerkpfade (z. B. über ein künftiges Mesh, `docs/peer-
 transport-contract.md`'s §"Mesh" — nicht etwas, das dieses Dokument löst).
 
-## 2. Empfänger-Anonymität bei 1:n-Gruppen — VORGESCHLAGEN, noch nicht umgesetzt
+## 2. Empfänger-Anonymität bei 1:n-Gruppen — FERTIG, als Plugin/Strategie
 
-**Befund (aus der letzten Runde):** für eine GEWÖHNLICHE `'members'`-Breit-
-seite ist `envelope.to` kein neues Leck (die Mitgliederliste ist über
+**Befund (aus der vorletzten Runde):** für eine GEWÖHNLICHE `'members'`-
+Breitseite ist `envelope.to` kein neues Leck (die Mitgliederliste ist über
 `/members.json` ohnehin öffentlich). Sobald `field.set(value, {recipients})`
 aber auf eine Teilmenge einschränkt (Arbeitspaket 5's Gruppenverschlüsselung),
 verrät `envelope.to` dem Relay GENAU diese Teilmenge — der Inhalt bleibt
 geheim, aber "wer darf das hier lesen" nicht.
 
-**Vorschlag (Design, nicht implementiert):** `envelope.to` immer auf die
-VOLLE Space-Mitgliederliste auffüllen — echte gewrappte Schlüssel für die
-tatsächlichen Empfänger, ununterscheidbare Zufallsbytes gleicher Länge für
-jedes andere Mitglied. Kosten: O(Mitgliederzahl) statt O(Empfängerzahl)
-Bytes pro eingeschränktem Write. Ändert das Envelope-Format in `@qu/core`/
-`envelope.js` — **wartet auf explizite Freigabe**, siehe unten.
+**Umgesetzt, als austauschbares Plugin** (nicht hart verdrahtet — siehe
+"Welche Methode soll es sein" unten):
+
+- `@qu/core`'s `QuCrypto.encrypt()` hat jetzt einen optionalen
+  `paddingXPubKeys`-Parameter: jeder dort genannte Pubkey bekommt einen
+  `to`-Eintrag mit echten ZUFALLSBYTES statt eines echten gewrappten
+  Schlüssels — BYTE-GLEICHE Länge (48 Bytes, `contentKeyRaw.length + 16`
+  GCM-Tag, unabhängig vom Inhalt), also für einen Beobachter ohne den
+  passenden privaten Schlüssel nicht von einem echten Eintrag
+  unterscheidbar. `sealUpdate()` reicht diesen Parameter nur durch.
+- `@qu/space-core`'s `seal-strategies.js`: `sealStrategies.none` (Default,
+  unverändertes Verhalten) und `sealStrategies.padToMembers` (füllt
+  `envelope.to` auf die VOLLE aktuelle Space-Mitgliederliste auf) — pure,
+  synchrone Funktionen, registriert als **Plugin**: `Space`'s neuer
+  Konstruktor-Parameter `sealStrategy` (Default `sealStrategies.none`,
+  also 0 Verhaltensänderung für jeden, der nichts angibt).
+- `@qu/bootstrap`'s `'sealStrategy'`-Slot (`registerSealStrategyAdapters()`)
+  — genau dieselbe `{adapter: 'pad-to-members'}`-Auswahl wie bei
+  `storage`/`transport`, austauschbar ohne `Space`/`envelope.js`
+  anzufassen: eine dritte künftige Strategie (z. B. Padding auf eine FESTE
+  Anzahl statt die volle Mitgliederliste, für sehr große Spaces) ist reine
+  Ergänzung.
+
+```js
+import { bootstrapSpace } from '@qu/bootstrap';
+
+const { space } = await bootstrapSpace({
+  registry, identity, transport, members,
+  sealStrategy: { adapter: 'pad-to-members' }, // austauschbar, s. o.
+});
+await node.field('text').set('nur für Bob', { recipients: [bobXPub] });
+// envelope.to enthält jetzt IMMER alle Space-Mitglieder, nie nur Bob.
+```
+
+**Kosten, ehrlich benannt:** O(Mitgliederzahl) statt O(Empfängerzahl) Bytes
+pro eingeschränktem Write — ein Space mit 500 Mitgliedern zahlt für jede
+1:1-Nachricht das 500-fache an `to`-Einträgen. Für kleine/mittlere Spaces
+vernachlässigbar, für sehr große ein bewusster Tradeoff — genau deshalb als
+Plugin, nicht als einzige Option.
+
+**Warum diese Methode (Padding) statt Alias-Rotation (Abschnitt 3) gewählt
+wurde:** Padding schließt eine EINDEUTIG nachgewiesene, binäre Lücke
+vollständig (danach sieht der Relay IMMER die volle Mitgliederliste, nie
+die echte Teilmenge) und ist technisch lokal/mechanisch (eine Invariante:
+`envelope.to.length` ist nach Anwendung der Strategie immer
+`members.length`). Alias-Rotation (unten) verbessert etwas, das mit dem
+bereits fertigen statischen Alias schon gut gelöst ist, gegen ein eher
+theoretisches Langzeit-Korrelationsszenario — und selbst dann bleibt die
+Verbindungs-/IP-Ebene offen. Datenschutz-Nutzen pro Aufwand: Padding klar
+vorne. Für die ursprüngliche Mindestanforderung (Sender/Empfänger/Inhalt)
+war Padding zudem das letzte fehlende Stück — Alias-Rotation hätte nichts
+ZUSÄTZLICH aus dieser Anforderung gelöst.
 
 ## 3. Alias-Rotation mit erhaltener Korrespondenz-Kette — VORGESCHLAGEN, noch nicht umgesetzt
 
@@ -152,5 +198,5 @@ unterschiebt) durchdacht werden muss, bevor Code entsteht.
 |---|---|---|
 | 1 | Sender-Anonymität (self-certifying Kinds) | **Fertig** — `bootstrapAliasSpace()` |
 | 1b | Sender-Anonymität (`'members'`-Mode) | **Rezept dokumentiert**, Deployment-spezifischer Join-Schritt nötig |
-| 2 | Empfänger-Anonymität bei Gruppen (`envelope.to`-Padding) | **Vorschlag**, wartet auf Freigabe (ändert Envelope-Format) |
+| 2 | Empfänger-Anonymität bei Gruppen (`envelope.to`-Padding) | **Fertig, als Plugin** — `Space`'s `sealStrategy` + `@qu/bootstrap`'s `'sealStrategy'`-Slot (`sealStrategies.padToMembers`) |
 | 3 | Alias-Rotation mit Korrespondenz-Kette | **Vorschlag**, wartet auf Freigabe (neues Protokollverhalten) |
