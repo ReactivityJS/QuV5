@@ -345,12 +345,24 @@ deployment hardcoding an `import`. `@qu/bootstrap`'s `AdapterRegistry`
 (`(slot, name) -> factory`) + `bootstrapSpace()` (resolves a plain
 `{identity, transport, storage?, volatileStorage?}` config — each slot
 either `{adapter: '<name>', ...options}` or an already-built instance —
-into a real `Space`) is that layer. See `docs/bootstrap-adapter-registry.md`
-for the full design, the built-in adapter packs (`@qu/bootstrap/memory`,
-`/browser`, `/node`), and why identity-store registration
-(`'memory'`/`'local-storage'`/`'session-storage'`) is always its own,
-separately-called step. `@qu/app-shell`'s `shell.js` is the reference
-real-deployment caller.
+into a real `Space`) is that layer.
+
+TWO DIFFERENT AXES, not to be confused: the four SLOT names above are the
+one universal Mountpoint a Peer addresses (`Space` itself only ever calls
+`storage.append()`/`transport.send()` — zero awareness of which concrete
+adapter answers). `@qu/bootstrap/memory`/`/browser`/`/node` are NOT a second
+Mountpoint layer — they're pure bundling-boundary groupings, forced by the
+pre-existing "dedicated subpath, never the barrel" rule every adapter-
+providing package already follows (`indexeddb-store.js`/`ws-client-
+transport.js`'s own doc comments): esbuild resolves `node:fs`/`ws`
+STATICALLY, even inside a dead runtime branch, so no single "auto-detect"
+pack can safely exist — the split must stay file-level. A deployment picks
+exactly ONE such pack, once, at its own bundle entry point (`@qu/app-shell`'s
+`shell.js` is the reference caller) — every other call site stays fully
+unaware which adapter is actually running. See
+`docs/bootstrap-adapter-registry.md` for the full design, and why identity-
+store registration (`'memory'`/`'local-storage'`/`'session-storage'`) is
+always its own, separately-called step.
 
 ## 4. File-by-file map
 

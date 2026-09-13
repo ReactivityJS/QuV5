@@ -73,6 +73,43 @@ optional (wie bei `Space` selbst). `transport.connect()` wird automatisch
 aufgerufen. `bus` bekommt standardmäßig einen frischen `EventBus` (anders als
 `Space`s eigener `null`-Default) — `bus: null` schaltet das explizit ab.
 
+## Mountpoint (Slot) vs. Pack — zwei verschiedene Achsen, nicht zu verwechseln
+
+Es gibt genau EINEN universellen Satz an Mountpoints/Slots:
+`identity`/`transport`/`storage`/`volatileStorage`. Das ist die Adresse, die
+ein Peer kennt und anspricht — `Space` selbst ruft nur `storage.append(...)`/
+`storage.load(...)`/`transport.send(...)` auf und hat **keinerlei** Kenntnis
+davon, ob dahinter IndexedDB, eine Datei oder `localStorage` steckt. Dieser
+Vertrag war schon vor `@qu/bootstrap` universell (`Space`'s Konstruktor ist
+seit jeher Dependency-Injection-fähig) — `@qu/bootstrap` fügt nur hinzu,
+DASS der konkrete Adapter hinter einem Slot per Config-Name statt per
+Hardcoded-Import gewählt wird. Peer-seitiger Code fragt also NIE "bin ich im
+Browser?" — er fragt "wie spreche ich `storage` an?", und die Antwort ist
+für jeden Adapter identisch.
+
+`@qu/bootstrap/memory`, `/browser`, `/node` sind dagegen **keine** zweite
+Mountpoint-Ebene, sondern reine Bundling-Gruppierungen — eine Folge einer
+harten, im Repo schon lange vor diesem Paket etablierten Einschränkung:
+esbuild kann `node:fs`/das `ws`-Paket nicht in ein Browser-Bundle auflösen,
+selbst wenn der Code-Pfad zur Laufzeit nie ausgeführt würde (deshalb
+importieren `@qu/space-storage`'s `indexeddb-store.js` und
+`@qu/space-transport`'s `ws-client-transport.js` seit jeher über eigene
+Subpaths, nie über ihr jeweiliges Barrel — siehe deren eigene Doc-Kommentare).
+Ein einziges "erkennt automatisch Browser vs. Node"-Pack ist aus demselben
+Grund NICHT sicher baubar: ein `if (…) await import('./node.js')` würde von
+esbuild trotzdem STATISCH aufgelöst — der "tote" Zweig mit `node:fs` würde
+wieder ins Browser-Bundle gezogen und den Build brechen. Die Trennung muss
+auf Datei-Ebene bleiben, damit der Bundler den ungenutzten Zweig gar nicht
+erst sieht.
+
+**Praktische Konsequenz:** ein Deployment wählt GENAU EINMAL, an seinem
+eigenen Bundle-Einstiegspunkt (so wie `@qu/app-shell`'s `shell.js` es tut),
+welches Pack es registriert — z. B. `registerBrowserAdapters()` im
+Browser-Bundle-Einstieg, `registerNodeAdapters()` in einem Node-Prozess. Ab
+diesem einen Aufruf ist für JEDEN weiteren Codepfad (App-Code, `@qu/app-core`,
+UI-Komponenten) komplett unsichtbar, welcher Adapter tatsächlich läuft — die
+Wahl bleibt vollständig auf den Bootstrap-Einstiegspunkt beschränkt.
+
 ## Mitgelieferte Adapter-Packs
 
 Bewusst NICHT automatisch registriert — jedes Deployment baut sich seine
@@ -85,6 +122,12 @@ eigene Registry aus genau den Packs zusammen, die es tatsächlich bundeln will
 | Memory | `@qu/bootstrap/memory` (`registerMemoryAdapters`) | `storage`/`volatileStorage`: `'memory'`; `transport`: `'in-process'` | Tests, Demos, rein temporäre Peers. |
 | Browser | `@qu/bootstrap/browser` (`registerBrowserAdapters`) | `storage`: `'indexeddb'`; `transport`: `'ws-client'` | Ein echtes Browser-Deployment (`@qu/app-shell`'s `shell.js`). |
 | Node | `@qu/bootstrap/node` (`registerNodeAdapters`) | `storage`: `'file'`/`'durable'`; `transport`: `'ws-client'` | Server/CLI-Peers. |
+
+Dieselben SLOT-NAMEN (`storage`, `transport`) tauchen in mehreren Packs
+wieder auf (nur `volatileStorage`/`identity` sind exklusiv einem Pack
+zugeordnet) — das ist kein Zufall, sondern zeigt genau die obige Trennung:
+`storage: {adapter: 'indexeddb'}` und `storage: {adapter: 'file'}` sind zwei
+NAMEN im selben universellen Slot, nur aus verschiedenen Packs registriert.
 
 **Warum Identity ein eigener Schritt ist:** `registerBrowserAdapters()` und
 `registerMemoryAdapters()` würden sonst beide versuchen, dieselben
