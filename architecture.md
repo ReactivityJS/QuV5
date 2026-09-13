@@ -393,6 +393,45 @@ DIFFERENT, complementary identity concern (unlinkability vs. a public
 profile); an alias identity may or may not have its own `qu-user` Node, a
 choice `user.js` itself never makes for it.
 
+### 3.9 Peer-Rolle & Transport-Vertrag
+
+The Peer role QuV3's symmetric `SyncEngine` had (Arbeitspaket 4) already
+exists in QuV5 — it was just never named as a contract: `@qu/space-transport`'s
+`federation.js` proves it, a relay federating with an upstream relay
+literally becomes an ordinary `Space` client toward it, same signed
+`hello`/`subscribe` messages, same Transport shape. `docs/peer-transport-
+contract.md` documents this explicitly as TWO separate, deliberately small
+contracts — `Transport` (the PEER side, exactly one connection:
+`connect()`/`send()`/`onMessage()` required, `onStatusChange()`/
+`getPeerId()`/`close()` optional — `InProcessTransport`/`WsClientTransport`
+both satisfy it) and `Hub` (the RELAY side, many simultaneous connections:
+`registerRelay()`/`deliverTo()`/`peerIds()` — `createInProcessHub()`/
+`createWsServerHub()`). `@qu/bootstrap`'s `bootstrapSpace()` now validates
+a resolved `transport` against the `Transport` contract
+(`assertTransportShape()`, `transport-contract.js`) BEFORE calling
+`.connect()` on it — a typo'd/incomplete custom adapter fails loudly right
+at the bootstrap call site instead of as a cryptic `TypeError` deep inside
+`Space`.
+
+THIS IS WHERE A FUTURE WEBRTC TRANSPORT AND MESH ROUTING WOULD PLUG IN —
+deliberately not built yet, only the contract they'd target: a
+`RTCDataChannel`-backed transport is pure adapter work (implements the same
+three methods, registers under a name — zero core changes); a true mesh
+node (several simultaneous peer connections routing between each other)
+would need a thin layer ABOVE `Space` managing multiple `Transport`
+instances, the direct generalization of what `federation.js` already does
+for exactly two hops. A WebRTC SIGNALING relay (connection establishment —
+SDP/ICE exchange) is orthogonal to Qu's own content-mirroring Relay
+(`relay.js`) and would run as its own small protocol, never something
+`relay.js` itself needs to know about. None of this needs Yjs to change:
+the sealed Yjs update bytes (`Y.encodeStateAsUpdate()`/`Y.applyUpdate()`)
+are already transport-agnostic — see `docs/quv5-vs-quv3-decision.md`'s
+Status-Update on Arbeitspaket 3: Yjs stays the sole, primary sync basis (no
+flat-log alternative adapter), the explicit decision being "use Yjs well"
+(e.g. `@qu/space-editor-prosemirror`'s already-working real-time
+collaborative rich-text editing over the `'richtext'` field shape, §3.2) —
+not "make sync pluggable."
+
 ## 4. File-by-file map
 
 ### `packages/core/` — `@qu/core`
@@ -663,12 +702,13 @@ notice.
 | `createDurableStore(backingStore?)` | Simulated-persistence tier (tests): same contract, plus `._backingStore`. |
 | `createFileStore(dataDir)` | Real on-disk tier: same contract, one `.ndjson` file per Node. |
 
-### Bootstrap / Adapter Registry (`@qu/bootstrap`, see §3.7)
+### Bootstrap / Adapter Registry (`@qu/bootstrap`, see §3.7, §3.9)
 
 | Export | Purpose |
 |---|---|
 | `new AdapterRegistry()` | `.register(slot, name, factory)` / `.create(slot, name, options?)` / `.has(slot, name)` / `.names(slot)` — the generic `(slot, name) -> factory` map. |
-| `bootstrapSpace({registry?, identity, transport, storage?, volatileStorage?, members?, relayAdmins?, bus?})` | Resolves each slot (an `{adapter, ...options}` ref via `registry`, or an already-built instance) and constructs a `Space`. Calls `transport.connect()`; defaults `bus` to a fresh `EventBus`. |
+| `bootstrapSpace({registry?, identity, transport, storage?, volatileStorage?, members?, relayAdmins?, bus?})` | Resolves each slot (an `{adapter, ...options}` ref via `registry`, or an already-built instance), validates `transport` (`assertTransportShape()`, below), and constructs a `Space`. Calls `transport.connect()`; defaults `bus` to a fresh `EventBus`. |
+| `assertTransportShape(transport)` / `REQUIRED_TRANSPORT_METHODS` | The Transport contract check (§3.9, `docs/peer-transport-contract.md`) — throws naming any of `connect`/`send`/`onMessage` that's missing. |
 | `loadOrCreateIdentity(storage, key)` | The generic "create once, reload on every later call for that key" identity primitive — `@qu/app-shell`'s `identity.js` re-exports this unchanged. |
 | `registerIdentityStoreAdapters(registry, {defaultKey?})` | Registers the `'identity'` slot's `'memory'`/`'local-storage'`/`'session-storage'` adapters. Always called separately from the packs below (see docs/bootstrap-adapter-registry.md). |
 | `registerMemoryAdapters(registry)` (`@qu/bootstrap/memory`) | `storage`/`volatileStorage`: `'memory'`; `transport`: `'in-process'` (needs a shared `hub` — also exports `createSharedInProcessHub`). |

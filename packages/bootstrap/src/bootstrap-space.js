@@ -30,9 +30,15 @@
  *
  * `identity` and `transport` are REQUIRED (a `Space` with neither is
  * meaningless); `storage`/`volatileStorage` stay optional, same as `Space`
- * itself. `transport.connect()` is called automatically if the resolved
- * transport has one (every real transport does; a test double may not) -
- * one less thing every caller previously had to remember to do itself
+ * itself. The resolved `transport` is checked against the Transport
+ * contract (`transport-contract.js`'s `assertTransportShape()`, see
+ * `docs/peer-transport-contract.md` - Arbeitspaket 4) BEFORE anything else
+ * touches it - a typo'd/incomplete custom adapter fails loudly right here,
+ * not as a cryptic `TypeError` deep inside `Space`. `transport.connect()`
+ * is then called automatically (every real transport has one; a test
+ * double may not, `connect` is still required by the contract though - a
+ * test double that's a genuine no-op still defines it as `async () => {}`)
+ * - one less thing every caller previously had to remember to do itself
  * (`@qu/app-shell`'s `shell.js` did this by hand before).
  *
  * `bus` defaults to a FRESH `EventBus` when entirely omitted (unlike
@@ -58,6 +64,7 @@
  */
 import { Space } from '@qu/space-core';
 import { EventBus } from '@qu/events';
+import { assertTransportShape } from './transport-contract.js';
 
 function isAdapterRef(value) {
   return value != null && typeof value === 'object' && typeof value.adapter === 'string';
@@ -77,7 +84,8 @@ export async function bootstrapSpace({ registry, identity, transport, storage = 
 
   const resolvedTransport = await resolveSlot(registry, 'transport', transport);
   if (!resolvedTransport) throw new Error('bootstrapSpace: "transport" is required');
-  await resolvedTransport.connect?.();
+  assertTransportShape(resolvedTransport);
+  await resolvedTransport.connect();
 
   const resolvedStorage = await resolveSlot(registry, 'storage', storage);
   const resolvedVolatileStorage = await resolveSlot(registry, 'volatileStorage', volatileStorage);

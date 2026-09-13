@@ -46,6 +46,13 @@ QuV5 ist architektonisch überwiegend gesund und in Teilen (Events, ACL/Schema-B
 
 Die Arbeitspakete sind unabhängig voneinander beauftragbar. Empfohlene Reihenfolge: 1 → 2 → 3, da 1 den größten sofortigen Nutzen mit geringstem Risiko bringt; 4–6 sind mittelfristig.
 
+## Status-Updates
+
+- **2026-09-13 — Arbeitspaket 2 (Mountpoint/Adapter-Registry) umgesetzt.** Siehe `@qu/bootstrap` (`docs/bootstrap-adapter-registry.md`): `AdapterRegistry` + `bootstrapSpace()`, `@qu/app-shell`'s `shell.js` als reale Bootstrap-Stelle umgestellt.
+- **2026-09-13 — Arbeitspaket 5 (User/alias/pub/epub) umgesetzt.** Siehe `@qu/space-core`'s `user.js` (`docs/peer-user-management.md`): GunDB-artiges User-Node (`qu-user`), `ensureUserProfile()`/`filterListedUsers()`. Die dort ebenfalls adressierte "1:n-Verschlüsselung für Gruppen" brauchte KEINEN neuen Code — `field.set(value, {recipients})` existierte bereits.
+- **2026-09-13 — Arbeitspaket 3 NEU ENTSCHIEDEN: kein Flat-Log-Adapter, Yjs bleibt die alleinige Sync-Basis.** Auf ausdrücklichen Wunsch (Yjs' zusätzliche Features — u. a. echtes Rich-Text-Merging über `@qu/space-editor-prosemirror`'s bereits vorhandene `'richtext'`-Shape/`y-prosemirror`-Integration, siehe `field.js`/`RichTextField` — werden als Vorteil gewertet, nicht als Overhead) wird die oben skizzierte Alternative ("Yjs wird zur austauschbaren Option") NICHT verfolgt. Stattdessen: Yjs bleibt Kernannahme, der Fokus verschiebt sich auf "Yjs sinnvoll und vollständig nutzen" (alle geplanten Features — Mesh/WebRTC-Transport, Multi-Peer-Routing — müssen auf Yjs' Update-Bytes als universellem Payload aufbauen, siehe `docs/peer-transport-contract.md`). Dieser Punkt gilt damit als abgeschlossen in der Frage "Yjs raus oder behalten" — **behalten**, ohne Adapter-Alternative.
+- **2026-09-13 — Arbeitspaket 4 (Peer-Rolle) als Dokumentation begonnen.** Siehe `docs/peer-transport-contract.md`: der Transport-Vertrag ist jetzt explizit spezifiziert (+ `assertTransportShape()`-Validierung in `@qu/bootstrap`), inkl. Mesh-/Signaling-Relay-/WebRTC-Readiness-Überlegungen — bewusst noch ohne WebRTC-Implementierung ("im Hinterkopf" für später).
+
 ## Referenzen
 
 - QuV5-Repo: `ReactivityJS/QuV5` (dieses Repo), insb. `packages/space-core`, `packages/space-transport`, `packages/events`, `packages/extensions`, `packages/app-shell`.

@@ -103,6 +103,14 @@ test('bootstrapSpace(): an {adapter} config without a registry fails fast, namin
   await assert.rejects(() => bootstrapSpace({ identity, transport: { adapter: 'ws-client', url: 'ws://x' } }), /"transport" names an adapter \("ws-client"\) but no "registry" was given/);
 });
 
+test('bootstrapSpace(): an incomplete transport (missing a required method) fails fast via the Transport contract, never reaching Space', async () => {
+  const identity = await actor();
+  await assert.rejects(
+    () => bootstrapSpace({ identity, transport: { connect: async () => {}, send: () => {} /* onMessage missing */ } }),
+    /missing required method\(s\): onMessage/
+  );
+});
+
 test('bootstrapSpace(): bus: null opts out of the default auto-created EventBus', async () => {
   const identity = await actor();
   const { space, bus } = await bootstrapSpace({
