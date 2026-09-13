@@ -364,6 +364,35 @@ unaware which adapter is actually running. See
 store registration (`'memory'`/`'local-storage'`/`'session-storage'`) is
 always its own, separately-called step.
 
+### 3.8 Peer-User-Verwaltung: the User-Node
+
+`@qu/space-core`'s `user.js` (Arbeitspaket 5) is the GunDB-style "User-Node"
+— one self-certifying `acl.write: 'owner'` Kind (`qu-user`: `alias`/`epub`/
+`listed`, all `'public'`-visibility, no new mechanism beyond what §3.2
+already defines) per identity, discoverable by ANY peer who knows only the
+pubkey (no shared Space/membership needed — the same reason `'owner'`-ACL
+already makes a Node's META public). `listed` defaults to `false`
+(privacy-by-default — nothing makes an identity more discoverable than it
+explicitly opted into). `ensureUserProfile(space, {alias?, listed?})`
+creates it on first call and reconciles an existing one on every later call
+— idempotent ACROSS process restarts (briefly checks local storage/a
+subscribed relay before assuming "new"), so calling it once per boot
+(`@qu/app-shell`'s `shell.js` does, right after `bootstrapSpace()`) is what
+makes one locally-persisted identity (§3.7's `'local-storage'` identity
+adapter) double as ONE central user across every app an origin serves, not
+just a bare keypair. `filterListedUsers(space, candidatePubs)` surfaces only
+opted-in identities from a candidate list a deployment already has (no new
+enumeration mechanism — deliberately layers on whatever peer-discovery
+already exists, e.g. `/members.json`). Custom/app-defined profile
+properties (public OR `{recipients}`-scoped group-encrypted) are
+DELIBERATELY not a `qu-user` field — Kind-Schema is static by design; an
+app defines its OWN `'owner'`-ACL Kind anchored to the same identity
+instead (see `docs/peer-user-management.md` for the worked example). This
+is unrelated to `alias.js`'s per-Space pseudonymity (§3.2/§3.6) — a
+DIFFERENT, complementary identity concern (unlinkability vs. a public
+profile); an alias identity may or may not have its own `qu-user` Node, a
+choice `user.js` itself never makes for it.
+
 ## 4. File-by-file map
 
 ### `packages/core/` — `@qu/core`
@@ -410,6 +439,7 @@ existed.
 | `src/space.js` | `Space` — the main class, now also reconnect/resync (`onStatusChange` wiring, §3.4) and per-Kind storage routing (`_storageFor()`). See §5 below for its full method surface. |
 | `src/alias.js` | `deriveAliasIdentity()`, `aliasRegistryKind`/`aliasRegistryNodeId()`, `publishAlias()`, `AliasRegistry` — per-space pseudonymity. |
 | `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes (§3.5). |
+| `src/user.js` | `userKind` (`qu-user`: `alias`/`epub`/`listed`, all public), `userNodeId()`, `resolveAlias()`, `ensureUserProfile()`, `filterListedUsers()` — the GunDB-style User-Node, the Peer-User-Verwaltung base primitive (§3.8). |
 | `src/wire-codec.js` | `encodeForWire()`/`decodeFromWire()` — Uint8Array ↔ base64 for any JSON serialization boundary (WebSocket, on-disk file). |
 | `src/compaction.js` | `compactIfNeeded(space, id, {threshold})` — opt-in compaction policy on top of `Space.compactNode()`/`envelopeCount()` (§3.4 UPDATE). |
 | `src/index.js` | Package's public export surface — the authoritative list of what's public API vs. internal. |
@@ -604,6 +634,11 @@ notice.
 | `publishPresence(space, fields)` / `setStatus(space, status)` / `setTyping(space, nodeId, typing)` | Write this Space's own presence Node. |
 | `watchPresence(space, pub)` | One-shot presence snapshot of another identity (subscribes if needed). |
 | `PresenceWatcher` | Reactive multi-member presence cache off the bus — `.watch(pub)` / `.of(pubB64)`. |
+| `userKind` | Self-certifying `'owner'`-ACL Kind — `alias`/`epub`/`listed` (§3.8, the GunDB-style User-Node). |
+| `userNodeId(pub)` | Deterministic User-Node id for `pub`. |
+| `resolveAlias(alias, pub)` | `alias` if set, else `pub` base64url-encoded — GunDB's "alias defaults to pub". |
+| `ensureUserProfile(space, {alias?, listed?, timeout?})` | Create-or-reconcile this Space's own User-Node — idempotent across restarts; `listed` defaults `false` on first creation. |
+| `filterListedUsers(space, pubs, {timeout?})` | From a candidate pubkey list, the subset that opted into `listed: true`, as `{pub, alias, epub}`. |
 | `encodeForWire()` / `decodeFromWire()` | Uint8Array ↔ base64 for any JSON boundary. |
 
 ### Relay / transport / federation (`@qu/space-transport`)

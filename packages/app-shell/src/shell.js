@@ -61,6 +61,7 @@
  * value, never this file's own code.
  */
 import { QuCrypto } from '@qu/core';
+import { ensureUserProfile } from '@qu/space-core';
 import { AdapterRegistry, bootstrapSpace, registerIdentityStoreAdapters } from '@qu/bootstrap';
 import { registerBrowserAdapters } from '@qu/bootstrap/browser';
 import '@qu/space-components/elements'; // registers <qu-view>/<qu-bind>/<qu-list> - see that module's own doc comment. Side-effect only import, deliberately unused otherwise.
@@ -124,6 +125,16 @@ export class QuAppShell extends HTMLElement {
         transport: { adapter: 'ws-client', url: relayUrl },
         storage: typeof indexedDB !== 'undefined' ? { adapter: 'indexeddb' } : null,
       });
+
+      // This SAME local identity's own User-Node (`@qu/space-core`'s `ensureUserProfile()`,
+      // Arbeitspaket 5's Peer-User-Verwaltung primitive) - idempotent across reloads (storage
+      // hydrates it before this ever has to touch the network, same as everything else `Space`
+      // already local-first's), so this is what makes the local identity loaded above genuinely
+      // double as one central user across every `<qu-app-shell>`-served app on this origin
+      // (this file's own top doc comment on `IDENTITY_STORAGE_KEY` being a single fixed key) -
+      // not just a bare keypair, but a discoverable `alias`/`epub` profile any OTHER peer can
+      // resolve from just this identity's pubkey, with zero relay-admin/app involvement.
+      await ensureUserProfile(space);
 
       if (isPlatformMode) {
         // The admin app lives in this SAME main Space now (kinds.js's own "THE ADMIN APP" doc
