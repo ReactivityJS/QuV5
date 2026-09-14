@@ -61,13 +61,32 @@ await aliasSpace.createNode(myOwnerKind, { ... }); // signiert als Alias, nicht 
 **Deckt ab:** jedes `'owner'`/`'named'`/`'content'`-ACL-Kind — zero
 Relay-seitiges Setup, self-certifying, funktioniert sofort.
 
-**Deckt NICHT automatisch ab:** anonymes Schreiben in ein flaches
-`acl.write: 'members'`-Kind — dafür muss der Alias-Pubkey ERST als
-Space-Mitglied registriert werden (WIE, ist Deployment-spezifisch — bei
+**Auch abgedeckt, über einen Plugin-Hook: anonymes Schreiben in ein flaches
+`acl.write: 'members'`-Kind.** Dafür muss der Alias-Pubkey ERST als
+Space-Mitglied registriert werden — WIE, ist Deployment-spezifisch (bei
 `@qu/app-shell` z. B. `joinSpace({identity: aliasIdentity, ...})`, derselbe
-`POST /join`, den die reale Identität auch nutzt). Das bleibt bewusst
-außerhalb von `@qu/bootstrap`, da der konkrete Join-Mechanismus pro Relay-
-Implementierung unterschiedlich sein kann.
+`POST /join`, den die reale Identität auch nutzt) — deshalb hartcodiert
+`@qu/bootstrap` diesen Mechanismus nicht, sondern nimmt ihn als
+Callback entgegen:
+
+```js
+import { joinSpace } from '@qu/app-shell'; // oder der Join-Mechanismus eines anderen Deployments
+
+const { space: aliasSpace } = await bootstrapAliasSpace(
+  realSpace, 'my-space',
+  { registry, transport: { adapter: 'ws-client', url: relayUrl } },
+  { join: (aliasIdentity) => joinSpace({ name: 'anon', identity: aliasIdentity }) }
+);
+// aliasSpace kann jetzt AUCH gewöhnliche 'members'-ACL-Kinds schreiben - der Relay kennt den
+// Alias-Pubkey jetzt genau wie einen ganz normalen Space-Member.
+await aliasSpace.createNode(chatMessageKind, { text: 'anonym' });
+```
+
+`join` bekommt die abgeleitete Alias-Identität, liefert die aktuelle
+Mitgliederliste zurück (dieselbe Form, die `joinSpace()` ohnehin schon
+liefert) und wird zur `members`-Liste des Alias-Space. Ohne `join` bleibt
+das Verhalten wie vorher — der Alias ist dann auf self-certifying Kinds
+beschränkt.
 
 **Restrisiko, ehrlich benannt:** `bootstrapAliasSpace()` verlangt bewusst
 eine EIGENE Transport-Verbindung (nicht dieselbe wie die reale Identität) —
@@ -197,6 +216,6 @@ unterschiebt) durchdacht werden muss, bevor Code entsteht.
 | # | Thema | Status |
 |---|---|---|
 | 1 | Sender-Anonymität (self-certifying Kinds) | **Fertig** — `bootstrapAliasSpace()` |
-| 1b | Sender-Anonymität (`'members'`-Mode) | **Rezept dokumentiert**, Deployment-spezifischer Join-Schritt nötig |
+| 1b | Sender-Anonymität (`'members'`-Mode) | **Fertig** — `bootstrapAliasSpace()`'s `join`-Hook, Deployment liefert nur den eigenen Join-Mechanismus |
 | 2 | Empfänger-Anonymität bei Gruppen (`envelope.to`-Padding) | **Fertig, als Plugin** — `Space`'s `sealStrategy` + `@qu/bootstrap`'s `'sealStrategy'`-Slot (`sealStrategies.padToMembers`) |
 | 3 | Alias-Rotation mit Korrespondenz-Kette | **Vorschlag**, wartet auf Freigabe (neues Protokollverhalten) |

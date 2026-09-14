@@ -11,6 +11,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuCrypto } from '@qu/core';
 import { defineKind, aliasRegistryKind, aliasRegistryNodeId } from '@qu/space-core';
+import { createRelayForwarder } from '@qu/space-transport';
+import { createMemoryStore } from '@qu/space-storage';
 import { AdapterRegistry } from '../src/adapter-registry.js';
 import { bootstrapSpace } from '../src/bootstrap-space.js';
 import { bootstrapAliasSpace } from '../src/alias-space.js';
@@ -95,4 +97,64 @@ test('bootstrapAliasSpace(): an "identity" passed in config is ignored - the der
   });
 
   assert.notDeepEqual(aliasIdentity.signingPub, impostor.signingPub);
+});
+
+const noteKind = defineKind('alias-space-test-note', {
+  fields: { text: { shape: 'atomic', visibility: 'encrypted' } },
+  acl: { write: 'members' },
+});
+
+test('bootstrapAliasSpace(): the "join" hook lets the alias write an ordinary acl.write: "members" Kind too', async () => {
+  const alice = await actor();
+  const hub = createSharedInProcessHub();
+  const registry = new AdapterRegistry();
+  registerMemoryAdapters(registry);
+
+  const relay = createRelayForwarder({
+    hub,
+    members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }],
+    resolveKindSchema: () => noteKind,
+    storage: createMemoryStore(),
+  });
+
+  const { space: realSpace } = await bootstrapSpace({
+    registry,
+    identity: alice,
+    transport: { adapter: 'in-process', hub, peerId: 'alice-real-4' },
+    members: [{ pub: alice.signingPub, xPub: alice.xPublicKey }],
+  });
+
+  // The "join" hook: whatever a deployment's own relay-membership mechanism is (here, directly
+  // calling the test relay's own addMember() - @qu/app-shell's real deployment would call
+  // joinSpace({name, identity: alias}) against its relay's POST /join instead, see docs/
+  // routing-anonymity.md) - its return value becomes the alias Space's own `members` list.
+  const { space: aliasSpace, identity: aliasIdentity } = await bootstrapAliasSpace(
+    realSpace,
+    'members-mode-space',
+    { registry, transport: { adapter: 'in-process', hub, peerId: 'alice-alias-4' } },
+    {
+      join: async (alias) => {
+        relay.addMember({ pub: alias.signingPub, xPub: alias.xPublicKey });
+        return [
+          { pub: alice.signingPub, xPub: alice.xPublicKey },
+          { pub: alias.signingPub, xPub: alias.xPublicKey },
+        ];
+      },
+    }
+  );
+
+  // The alias, now a real relay-side member, writes an ordinary 'members'-ACL Node - accepted by
+  // the relay (an UNJOINED alias's write would be silently rejected instead) and readable by
+  // alice's REAL identity (also a member) once it syncs - proving both the relay-side and the
+  // encryption-recipient sides of anonymous 'members'-mode writing work end to end.
+  const node = await aliasSpace.createNode(noteKind, { text: 'anon members-mode write' }, { id: 'members-mode-note' });
+  await node.field('text').set('anon members-mode write');
+
+  const deadline = Date.now() + 2000;
+  const { node: realNode } = await realSpace.useNode('members-mode-note', noteKind);
+  while ((await realNode.field('text').get()) !== 'anon members-mode write' && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal(await realNode.field('text').get(), 'anon members-mode write');
+  assert.notDeepEqual(aliasIdentity.signingPub, alice.signingPub);
 });

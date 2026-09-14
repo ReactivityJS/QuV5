@@ -22,17 +22,19 @@
  * exactly the "wird lokal erst klar, welche Identität wirklich dahinter
  * steckt" behavior being asked for.
  *
- * SCOPE: this only covers SELF-CERTIFYING Kinds (`acl.write: 'owner'`/
- * `'named'`/`'content'`) - the alias identity can immediately create/write
- * its own such Nodes with zero relay-side setup, exactly like any other
- * identity (kind-schema.js's own doc comment on why). Writing ANONYMOUSLY
- * to a flat `acl.write: 'members'` Kind additionally requires the alias's
- * own pubkey to be registered as a Space member in the first place - HOW a
- * deployment's relay accepts new members (`@qu/app-shell`'s `joinSpace()`/
- * `POST /join`, or any other self-service join a different deployment
- * might use) is deployment-specific, not something this framework-core
- * package can generically wrap - see `docs/routing-anonymity.md`'s own
- * worked example for the `@qu/app-shell` recipe.
+ * SCOPE: this covers SELF-CERTIFYING Kinds (`acl.write: 'owner'`/`'named'`/
+ * `'content'`) UNCONDITIONALLY - the alias identity can immediately create/
+ * write its own such Nodes with zero relay-side setup, exactly like any
+ * other identity (kind-schema.js's own doc comment on why). Writing
+ * ANONYMOUSLY to a flat `acl.write: 'members'` Kind additionally requires
+ * the alias's own pubkey to be registered as a Space member in the first
+ * place - HOW a deployment's relay accepts new members (`@qu/app-shell`'s
+ * `joinSpace()`/`POST /join`, or any other self-service join a different
+ * deployment might use) is deployment-specific, so this package can't
+ * hardcode it - but it CAN take it as a pluggable hook (the `join` option
+ * below), so a caller supplies its OWN join mechanism without this
+ * function needing to know its shape (an HTTP POST, a different relay
+ * protocol entirely, ...).
  */
 import { publishAlias } from '@qu/space-core';
 import { bootstrapSpace } from './bootstrap-space.js';
@@ -41,9 +43,19 @@ import { bootstrapSpace } from './bootstrap-space.js';
  * @param {import('@qu/space-core').Space} realSpace - This peer's own, already-connected Space - its `identity` is what the alias is derived FROM (never sent anywhere - `deriveAliasIdentity()`'s own doc comment), and it's where the (encrypted, members-only) alias->real registry entry gets published.
  * @param {string} spaceId - Any stable string identifying the Space this alias is scoped to - same real identity + same spaceId always re-derives the SAME alias (stable across reloads, nothing extra to persist); a DIFFERENT spaceId yields a computationally unrelated keypair (see `deriveAliasIdentity()`'s own doc comment on why that's what makes aliases unlinkable ACROSS spaces).
  * @param {object} config - Everything `bootstrapSpace()` itself takes EXCEPT `identity` (always overridden with the derived alias - any `identity` passed here is ignored) - `transport`/`storage`/`members`/`registry`/etc., exactly as that function documents. Typically a SEPARATE transport connection from `realSpace`'s own (a genuinely independent `Space`, not a second identity multiplexed over the same connection).
+ * @param {{join?: (aliasIdentity: object) => Promise<Array<{pub: Uint8Array, xPub: Uint8Array}>>}} [options] -
+ *   `join` (optional) - called with the derived alias identity BEFORE `bootstrapSpace()`, for a
+ *   deployment that wants the alias to be able to write an ordinary `acl.write: 'members'` Kind too
+ *   (self-certifying Kinds never need this - see this file's own top doc comment on why). Whatever
+ *   it resolves to becomes this alias Space's own `members` list (same shape `@qu/app-shell`'s
+ *   `joinSpace()` already returns - the intended, but not the only possible, implementation: e.g.
+ *   `{join: (alias) => joinSpace({name: 'anon', identity: alias})}`) - overrides `config.members`
+ *   when given; omit `join` entirely to keep today's behavior (`config.members` used as-is, or the
+ *   alias limited to self-certifying Kinds).
  * @returns {Promise<{identity: object, transport: object, storage: object|undefined, volatileStorage: object|undefined, bus: object|null, space: import('@qu/space-core').Space}>} Same shape `bootstrapSpace()` itself returns - `identity` here is the ALIAS, not the real one.
  */
-export async function bootstrapAliasSpace(realSpace, spaceId, config = {}) {
+export async function bootstrapAliasSpace(realSpace, spaceId, config = {}, { join } = {}) {
   const alias = await publishAlias(realSpace, spaceId);
-  return bootstrapSpace({ ...config, identity: alias });
+  const members = join ? await join(alias) : config.members;
+  return bootstrapSpace({ ...config, identity: alias, ...(members !== undefined ? { members } : {}) });
 }
