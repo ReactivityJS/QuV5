@@ -623,8 +623,10 @@ Views)" section (`cms-actions.js`'s `wireContent()`, `#/admin/<prefix>/cms/conte
 is one reference editor among possibly several ("editors as plugins"), not
 the only way to author one.
 See architecture.md's own "Shared lists ... and Views" section for the
-full design (including what's deliberately not built yet - a `'collection'`
-source adapter, and watching a View's own definition live) and
+full design - three source adapters ship (`'pages'`, `'shared-list'`,
+`'collection'`); still deliberately not built is watching a View's own
+definition live (an edit to `sources`/`itemTemplate` only takes effect on
+the next resolve) - and
 `packages/app-core/test/{shared-list,views}.test.js` /
 `packages/app-shell/test/{view-actions,view-editor}.test.js` for proof.
 **`docs/example-apps.md`** walks through four full worked examples built

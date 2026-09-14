@@ -2800,13 +2800,65 @@ document's own still-open question on that below).
   `@qu/space-core` calls needed to read + observe it, normalizing EVERY
   source to the same `{title, excerpt, route, timestamp, raw}` shape so
   totally different Kinds (a `qu-route-registry` entry, a `sharedListKind`
-  entry) can be merged into one feed. Two adapters ship for now - `'pages'`
+  entry) can be merged into one feed. Three adapters ship - `'pages'`
   (routes under an optional `prefix` - "a blog is just pages under
-  `/blog/`") and `'shared-list'` (any named `sharedListKind`); a
-  `'collection'` adapter is real, natural, NOT-YET-BUILT future work - a
-  Collection's `itemKind`/`registryKind` are actual Kind-Schema OBJECTS a
-  View's own plain-data `sources` field cannot reference by name alone,
-  needing a caller-supplied lookup table, a separate piece of plumbing.
+  `/blog/`"), `'shared-list'` (any named `sharedListKind`), and
+  `'collection'` (any `defineCollectionKind()` pair, `itemKind`+
+  `registryKind` passed as actual Kind-Schema OBJECTS in the source params
+  - unlike `'pages'`/`'shared-list'`, which resolve a Kind by NAME because
+  their Kind is fixed per-app, a Collection's item Kind is caller-defined,
+  so the View's own plain-data `sources` recipe carries the Schema object
+  itself rather than a name a relay-side lookup table would need to
+  resolve).
+
+  **UPDATE - THE `'collection'` SOURCE (two-level liveness).** Unlike
+  `'pages'`/`'shared-list'`, which each ever watch exactly ONE Node (a
+  registry whose own entries already carry all the normalized data), a
+  Collection's items are SEPARATE Nodes from their registry - the registry
+  only enumerates paths (`acl.write: 'named'`), each item owns its own
+  Node (`acl.write: 'content'`). So `'collection'` opens and keeps live
+  TWO levels at once: the registry (`registryListField.observe()`, same as
+  any other source - new/removed items) AND, per resolved item, that
+  item's own `doc.on('update')` (an existing item's field EDITED, no
+  registry change at all, still recomputes the feed live). Items no longer
+  in the registry's current read are released (`doc.off()` + `Space`
+  release) on the next `read()`, so a feed never accumulates subscriptions
+  for items that left the collection. A freshly-opened item is
+  `waitUntilSynced()`-gated (`itemSyncTimeout`, default 1500ms) before its
+  fields are read, since - unlike a registry entry's own cached fields - a
+  brand-new item Node has nothing to show until ITS OWN initial sync
+  completes; skipping this wait was an early bug (items briefly read back
+  empty on a feed's first open). `titleField`/`excerptField`/`routeField`/
+  `timestampField` name which of the item's OWN fields map to the shared
+  `{title, excerpt, route, timestamp}` shape, `raw` always carries every
+  field the item's Kind declares (not just the mapped ones) so an
+  `itemTemplate` can bind to anything, not only the four normalized ones.
+  `defineCollectionKind()`'s own two Kinds (`itemKind`/`registryKind`, not
+  Views-specific) are the same primitive `docs/example-apps.md`'s
+  Guestbook/Blog examples already use for "many items owned by one
+  identity, each individually resolvable and independently synced."
+
+  **UPDATE - A STALE-RECOMPUTE RACE, FOUND AND FIXED VIA THE ABOVE.**
+  `openLiveView()`'s internal `recompute()` is fire-and-forget from every
+  source's own `onUpdate`/`observe` callback (never awaited by the
+  triggering write) - normally harmless, since a SINGLE recompute's own
+  `await Promise.all(sources.map(read))` always finishes before the next
+  edit even starts. The `'collection'` source's item-level liveness broke
+  that assumption: `TextField.replaceText()` sends an edit as TWO SEPARATE
+  envelopes (delete, then insert), each its own `doc.on('update')`, so two
+  overlapping `recompute()` calls could genuinely be in flight - and,
+  since neither is awaited, complete OUT OF ORDER: a slower/older call
+  finishing AFTER a faster/newer one would silently overwrite the fresh
+  result with stale data, with no source Kind actually doing anything
+  wrong. Fixed with a `generation` counter (`recompute()` stamps its own
+  generation on entry, discards its own result on exit if a NEWER
+  `recompute()` has started meanwhile) - a correctness fix to shared View
+  plumbing, not `'collection'`-specific, verified against the FULL existing
+  `views.test.js`/`collections.test.js` suites (no regression) as well as
+  the new `view-collection-source.test.js` (the race's own regression
+  test - an item-level edit followed immediately by a registry-level
+  create, both racing the same feed).
+
   `view-sources.js`'s `openLiveView(space, config)` is what makes this
   LIVE, not a one-time snapshot (the user's own explicit choice for v1,
   over a simpler snapshot-on-load alternative): it opens every source's
