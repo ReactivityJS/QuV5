@@ -93,8 +93,11 @@ standalone or via Docker).
   Mountpoint/Adapter-Registry - `AdapterRegistry` + `bootstrapSpace()`,
   declarative named-adapter wiring of a `Space`'s identity/transport/
   storage/volatileStorage instead of a hardcoded `import` per deployment -
-  see `architecture.md` §3.7 and
-  [`docs/bootstrap-adapter-registry.md`](./docs/bootstrap-adapter-registry.md).
+  see `architecture.md` §3.7,
+  [`docs/bootstrap-adapter-registry.md`](./docs/bootstrap-adapter-registry.md)
+  (design/motivation) and
+  [`docs/bootstrap-api.md`](./docs/bootstrap-api.md) (full API reference with
+  examples).
 
 ## Development
 

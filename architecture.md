@@ -362,7 +362,10 @@ exactly ONE such pack, once, at its own bundle entry point (`@qu/app-shell`'s
 unaware which adapter is actually running. See
 `docs/bootstrap-adapter-registry.md` for the full design, and why identity-
 store registration (`'memory'`/`'local-storage'`/`'session-storage'`) is
-always its own, separately-called step.
+always its own, separately-called step. `docs/bootstrap-api.md` is the
+compact function-by-function API reference (signatures, options, worked
+examples) for everything in this section - this section stays the WHY, that
+doc is the quick-lookup WHAT/HOW when actually writing code against it.
 
 ### 3.8 Peer-User-Verwaltung: the User-Node
 
