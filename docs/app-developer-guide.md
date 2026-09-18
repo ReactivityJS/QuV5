@@ -1,12 +1,13 @@
 # App-Entwickler-Guide: Eine App mit Qu bauen
 
 Eine praxisnahe, grobe Anleitung: wie eine App das Framework tatsächlich
-nutzt — Bootstrap, Framework-API (inkl. File-Handling), deklarative
-Qu-Components im HTML, und optionales WebRTC. Für das WARUM/die Architektur
-siehe `architecture.md` (Gesamtüberblick), `docs/bootstrap-api.md`
-(vollständige `@qu/bootstrap`-Referenz) und `docs/webrtc.md` (vollständige
-WebRTC-Referenz) — dieses Dokument ist der schnelle praktische Einstieg,
-keine vollständige API-Referenz.
+nutzt — Initialisierung per `createQuApp()` (`@qu/app-kit`), Framework-API
+(inkl. File-Handling), deklarative Qu-Components im HTML, und optionales
+WebRTC. Für das WARUM/die Architektur siehe `architecture.md`
+(Gesamtüberblick), `docs/bootstrap-api.md` (vollständige
+`@qu/bootstrap`-Referenz - was `createQuApp()` unter der Haube nutzt) und
+`docs/webrtc.md` (vollständige WebRTC-Referenz) — dieses Dokument ist der
+schnelle praktische Einstieg, keine vollständige API-Referenz.
 
 **Leitgedanke, der sich durch das ganze Framework zieht:** So viel wie
 möglich passiert deklarativ im HTML (Qu-Components binden sich selbst an
@@ -17,19 +18,77 @@ weitgehend die Qu-Components und den App-Shell/Renderer erledigen.
 ## Inhalt
 
 - [1. Framework-API](#1-framework-api)
-  - [1.6 Dateien: lokal speichern, syncen, teilen](#16-dateien-lokal-speichern-syncen-teilen)
+  - [1.1 Initialisierung — der schnelle Weg: `createQuApp()`](#11-initialisierung--der-schnelle-weg-createquapp)
+  - [1.2 Initialisierung im Detail — `@qu/bootstrap`](#12-initialisierung-im-detail--qubootstrap)
+  - [1.7 Dateien: lokal speichern, syncen, teilen](#17-dateien-lokal-speichern-syncen-teilen)
 - [2. Qu-Components im HTML](#2-qu-components-im-html)
 - [3. WebRTC in einer App nutzen](#3-webrtc-in-einer-app-nutzen)
 - [4. Vollständiges Beispiel](#4-vollständiges-beispiel)
 
 ## 1. Framework-API
 
-### 1.1 Initialisierung — `@qu/bootstrap`
+### 1.1 Initialisierung — der schnelle Weg: `createQuApp()`
 
-Jede App startet mit genau EINER `Space`-Instanz. Die `AdapterRegistry`
-entscheidet, WELCHE konkreten Adapter (Storage/Transport/Identity) benutzt
-werden, per Name statt per hartcodiertem `import` — siehe
-`docs/bootstrap-api.md` für die volle Referenz.
+**Der empfohlene Standardweg für die meisten Apps.** `@qu/app-kit`s
+`createQuApp(options)` fasst genau das zusammen, was Abschnitt 1.2
+(darunter) sonst manuell macht — Registry aufsetzen, Adapter registrieren,
+Identität auflösen, bootstrappen, `.quSpace`/`.quKinds` aufs DOM setzen —
+in EINEM Aufruf mit benannten Optionen:
+
+```js
+import { createQuApp } from '@qu/app-kit';
+import { defineKind } from '@qu/space-core';
+
+const noteKind = defineKind('my-app-note', {
+  fields: { title: { shape: 'atomic', visibility: 'public' } },
+  acl: { write: 'owner' },
+});
+
+const app = await createQuApp({
+  relay: 'wss://your-relay.example.com',   // oder { hub } für In-Process/Memory-Modus (Tests/Demos)
+  identity: 'local-storage',               // Default - 'session-storage'/'memory' oder ein fertiges Identity-Objekt
+  storage: 'indexeddb',                    // optional - weglassen = memory-only
+  members: [{ pub: alicePub, xPub: aliceXPub }],
+  kinds: { note: noteKind },               // landet automatisch auf mount.quKinds
+  mount: '#app',                           // setzt .quSpace/.quKinds auf dieses Element - Qu-Components funktionieren sofort
+  // webrtc: { iceServers: [...] },        // NUR wenn gesetzt: app.webrtc.connect(remotePub) wird verfügbar (docs/webrtc.md)
+});
+
+app.space          // die rohe Space-Instanz - Escape Hatch, immer verfügbar
+app.identity        // die aufgelöste Identität
+app.registry         // die AdapterRegistry - für eigene, zusätzliche Adapter-Registrierungen
+```
+
+**"Die Instanz wächst nur mit dem, was du anforderst":** `app.webrtc`
+existiert NUR, wenn `webrtc` übergeben wurde — eine App, die es nie
+anfordert, hat gar keine solche Property, kein `undefined` als Platzhalter.
+`registerBrowserAdapters()`/`<qu-view>`/`<qu-bind>`/`<qu-list>`-Registrierung
+und (standardmäßig an) `ensureUserProfile(space)` passieren automatisch im
+Hintergrund - `ensureUserProfile: false` schaltet Letzteres ab, falls
+unerwünscht.
+
+**Für einen Node-Kontext** (CLI/Skript, kein Browser) gibt es
+`@qu/app-kit/node` — identische API, registriert `'file'`/`'durable'`-Storage
+statt `'indexeddb'`, `identity` defaultet auf `'memory'` statt
+`'local-storage'`, `mount`/`webrtc` sind dort nicht unterstützt (kein
+DOM/`RTCPeerConnection`) und werfen laut statt still nichts zu tun.
+
+`createQuApp()` ist reine Komposition über die bereits getesteten
+Primitives darunter — **kein Ersatz, sondern eine dünne Convenience-Schicht
+mit Escape Hatches**: `registry`, `transport` (Adapter-Ref oder fertige
+Instanz) und ein bereits gebautes `identity`-Objekt funktionieren jederzeit,
+falls `createQuApp()`s Optionen mal nicht reichen — dann einfach auf
+`@qu/bootstrap` direkt zurückfallen (Abschnitt 1.2).
+
+### 1.2 Initialisierung im Detail — `@qu/bootstrap`
+
+Das, was `createQuApp()` oben unter der Haube tut — für den Fall, dass du
+mehr Kontrolle brauchst, als die Optionen von `createQuApp()` bieten (z. B.
+mehrere Spaces mit unterschiedlichen Adaptern in derselben App). Jede App
+startet mit genau EINER `Space`-Instanz. Die `AdapterRegistry` entscheidet,
+WELCHE konkreten Adapter (Storage/Transport/Identity) benutzt werden, per
+Name statt per hartcodiertem `import` — siehe `docs/bootstrap-api.md` für
+die volle Referenz.
 
 ```js
 import { AdapterRegistry, bootstrapSpace, registerIdentityStoreAdapters } from '@qu/bootstrap';
@@ -54,7 +113,7 @@ und die Qu-Components im HTML sich binden (siehe Abschnitt 2). Für Tests/
 Demos gibt es `@qu/bootstrap/memory` (`registerMemoryAdapters`) — zero
 Netzwerk/Disk, simulierter In-Process-Relay, kein echter Server nötig.
 
-### 1.2 Content-Typen definieren — Kind-Schema
+### 1.3 Content-Typen definieren — Kind-Schema
 
 Jeder Datentyp deiner App ist ein `Kind` — ein Bündel aus Feldern (mit
 eigener `shape`/`visibility`) plus EINEM ACL-Modus, der bestimmt, wer
@@ -107,7 +166,7 @@ const { itemKind, registryKind, registryField } = defineCollectionKind('blog-pos
 });
 ```
 
-### 1.3 Lesen & Schreiben — `Space`/`Node`/`Field`
+### 1.4 Lesen & Schreiben — `Space`/`Node`/`Field`
 
 ```js
 // Erstellen (self-certifying Kinds wie 'owner' brauchen keine id):
@@ -123,7 +182,7 @@ unsubscribe();
 release(); // WICHTIG: jedes useNode() braucht ein passendes release(), sonst bleibt die Subscription offen
 ```
 
-### 1.4 Live, sortierte Feeds über mehrere Quellen — Views
+### 1.5 Live, sortierte Feeds über mehrere Quellen — Views
 
 ```js
 import { createView, openLiveView } from '@qu/app-core';
@@ -144,7 +203,7 @@ view.observe(() => console.log('feed changed'));
 view.setQuery('suchbegriff'); // client-seitige Volltextsuche über title/excerpt
 ```
 
-### 1.5 Eigenes User-Profil (GunDB-artig)
+### 1.6 Eigenes User-Profil (GunDB-artig)
 
 ```js
 import { ensureUserProfile } from '@qu/space-core';
@@ -152,7 +211,7 @@ import { ensureUserProfile } from '@qu/space-core';
 await ensureUserProfile(space); // legt das eigene Profil an, falls es noch nicht existiert - idempotent
 ```
 
-### 1.6 Dateien: lokal speichern, syncen, teilen
+### 1.7 Dateien: lokal speichern, syncen, teilen
 
 **Der zentrale Unterschied: Daten speichern ≠ Datei speichern.** Ein
 gewöhnliches Kind-Schema-Feld (Abschnitt 1.2) lebt IM Yjs-CRDT selbst —
@@ -359,14 +418,13 @@ Bedrohungsmodell, gegen das dieser Trade-off abgewogen wurde.
 
 ## 4. Vollständiges Beispiel
 
-Eine minimale "Notizen"-App, alle Teile zusammen:
+Eine minimale "Notizen"-App, alle Teile zusammen - mit `createQuApp()`
+(Abschnitt 1.1):
 
 ```js
 // app.js
-import { AdapterRegistry, bootstrapSpace, registerIdentityStoreAdapters } from '@qu/bootstrap';
-import { registerBrowserAdapters } from '@qu/bootstrap/browser';
+import { createQuApp } from '@qu/app-kit';
 import { defineKind } from '@qu/space-core';
-import '@qu/space-components/elements';
 
 const noteKind = defineKind('my-app-note', {
   fields: {
@@ -375,6 +433,26 @@ const noteKind = defineKind('my-app-note', {
   },
   acl: { write: 'owner' },
 });
+
+const app = await createQuApp({
+  relay: 'wss://your-relay.example.com',
+  storage: 'indexeddb',
+  kinds: { note: noteKind },
+  mount: '#app', // setzt .quSpace/.quKinds automatisch - kein manueller Schritt mehr nötig
+});
+
+const note = await app.space.createNode(noteKind, { title: 'Meine erste Notiz' });
+document.querySelector('#app').dataset.nodeId = note.id; // für die Attribute unten
+```
+
+Äquivalent, aber Schritt für Schritt über `@qu/bootstrap` direkt
+(Abschnitt 1.2) — Qu-Components-Registrierung und das Setzen von
+`.quSpace`/`.quKinds` dann von Hand:
+
+```js
+import { AdapterRegistry, bootstrapSpace, registerIdentityStoreAdapters } from '@qu/bootstrap';
+import { registerBrowserAdapters } from '@qu/bootstrap/browser';
+import '@qu/space-components/elements';
 
 const registry = new AdapterRegistry();
 registerIdentityStoreAdapters(registry);
@@ -389,11 +467,9 @@ const { space } = await bootstrapSpace({
 });
 
 const note = await space.createNode(noteKind, { title: 'Meine erste Notiz' });
-
-// dem HTML zugänglich machen - ein Vorfahre der Qu-Components:
 document.querySelector('#app').quSpace = space;
 document.querySelector('#app').quKinds = { note: noteKind };
-document.querySelector('#app').dataset.nodeId = note.id; // für die Attribute unten
+document.querySelector('#app').dataset.nodeId = note.id;
 ```
 
 ```html

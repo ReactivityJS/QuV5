@@ -62,7 +62,8 @@ QuV5/
 │   ├── app-core/        @qu/app-core        - App Runtime: Kind-Schemas for app content, content-addressed Node ids, ContentResolver, HashRouter, AppRuntime, Dev API
 │   ├── app-renderer/    @qu/app-renderer    - sanitizer, <qu-slot> resolution, style injection, renderPage() - Template+Page -> DOM
 │   ├── app-shell/       @qu/app-shell       - the minimal, application-agnostic bootstrap kernel a Relay serves; also its OWN production relay-server.js/Dockerfile (separate from @qu/space-transport's)
-│   └── bootstrap/       @qu/bootstrap       - the Mountpoint/Adapter-Registry: AdapterRegistry + bootstrapSpace() - declarative, named-adapter wiring of a Space's identity/transport/storage/volatileStorage (docs/bootstrap-adapter-registry.md)
+│   ├── bootstrap/       @qu/bootstrap       - the Mountpoint/Adapter-Registry: AdapterRegistry + bootstrapSpace() - declarative, named-adapter wiring of a Space's identity/transport/storage/volatileStorage (docs/bootstrap-adapter-registry.md)
+│   └── app-kit/         @qu/app-kit         - createQuApp(): a batteries-included convenience wrapper over @qu/bootstrap (docs/app-developer-guide.md §1.1) - one call, escape hatches back to @qu/bootstrap directly
 ├── demo/                 - runnable proofs: CLI chat, browser client, in-process auto-demo, app-shell-demo
 ├── docs/                 - docs/v5-space-core-guide.md (framework how-to), docs/app-shell-arbeitsauftrag.md (App Shell/Runtime design)
 └── architecture.md       - this file
@@ -366,6 +367,33 @@ always its own, separately-called step. `docs/bootstrap-api.md` is the
 compact function-by-function API reference (signatures, options, worked
 examples) for everything in this section - this section stays the WHY, that
 doc is the quick-lookup WHAT/HOW when actually writing code against it.
+
+**UPDATE - `@qu/app-kit`'s `createQuApp()`: a higher convenience layer ON
+TOP, not an alternative to, any of the above.** Every real caller still
+repeats the SAME several steps (construct a registry, register identity +
+one environment pack, resolve an identity, bootstrap, then hand
+`.quSpace`/`.quKinds` to some DOM element by hand) - `createQuApp(options)`
+collapses that into ONE call, pure composition (`registerIdentityStoreAdapters()`
++ `registerMemoryAdapters()` (always, zero-cost - tests/demos work with no
+extra registration) + one environment pack + `bootstrapSpace()`, nothing
+reimplemented). Two environment entries, the SAME split as `@qu/bootstrap`'s
+own adapter packs (`packages/app-kit/src/browser.js`/`node.js`): the browser
+entry additionally imports `@qu/space-components/elements` unconditionally
+(registers `<qu-view>`/`<qu-bind>`/`<qu-list>` with zero extra caller effort
+- "möglichst viel Qu-Components im HTML" is this package's whole second
+reason to exist, `docs/app-developer-guide.md` §2) and defaults
+`ensureUserProfile: true` (matches `@qu/app-shell`'s own real boot path);
+the Node entry never touches a DOM/`RTCPeerConnection` global at all -
+`mount`/`webrtc` throw loudly there rather than silently no-op'ing.
+`webrtc` (only when given: wraps the resolved transport via
+`wrapWithSignaling()`, §3.11, and returns `app.webrtc.connect(remotePub)`)
+is the one option that changes the RETURNED shape - "the instance grows
+only with what was actually requested," never a property sitting there
+`undefined` as a reminder of an unused feature. Every advanced escape hatch
+still works exactly as `bootstrapSpace()`'s own doc comment already
+promises - a pre-built `registry`/`transport`/`identity` object passed
+straight through, so a caller is never actually blocked by this
+convenience layer, only ever offered a shortcut past it.
 
 ### 3.8 Peer-User-Verwaltung: the User-Node
 

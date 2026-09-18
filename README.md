@@ -104,6 +104,14 @@ standalone or via Docker).
   (design/motivation) and
   [`docs/bootstrap-api.md`](./docs/bootstrap-api.md) (full API reference with
   examples).
+- [`packages/app-kit`](./packages/app-kit) - `@qu/app-kit`: `createQuApp()`,
+  a batteries-included convenience wrapper over `@qu/bootstrap` for the
+  common case - one call, named options (identity/relay/storage by name, an
+  optional Kind-Schema map + DOM `mount` for Qu-Components, an optional
+  WebRTC `connect()` helper) - pure composition over already-tested
+  primitives, always with an escape hatch (`registry`/`transport`/an
+  already-built `identity`) back to `@qu/bootstrap` directly. See
+  `docs/app-developer-guide.md` §1.1.
 
 ## Development
 
