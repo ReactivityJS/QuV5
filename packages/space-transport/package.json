@@ -6,6 +6,7 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./in-process-transport": "./src/in-process-transport.js",
     "./ws-client-transport": "./src/ws-client-transport.js"
   },
   "bin": {

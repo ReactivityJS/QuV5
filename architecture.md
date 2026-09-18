@@ -61,7 +61,8 @@ QuV5/
 │   ├── space-components/@qu/space-components- OPTIONAL declarative Custom Elements over @qu/space-ui: <qu-view>/<qu-bind>/<qu-list> - a CMS-authored template writes these as plain markup, no JS glue
 │   ├── app-core/        @qu/app-core        - App Runtime: Kind-Schemas for app content, content-addressed Node ids, ContentResolver, HashRouter, AppRuntime, Dev API
 │   ├── app-renderer/    @qu/app-renderer    - sanitizer, <qu-slot> resolution, style injection, renderPage() - Template+Page -> DOM
-│   └── app-shell/       @qu/app-shell       - the minimal, application-agnostic bootstrap kernel a Relay serves; also its OWN production relay-server.js/Dockerfile (separate from @qu/space-transport's)
+│   ├── app-shell/       @qu/app-shell       - the minimal, application-agnostic bootstrap kernel a Relay serves; also its OWN production relay-server.js/Dockerfile (separate from @qu/space-transport's)
+│   └── bootstrap/       @qu/bootstrap       - the Mountpoint/Adapter-Registry: AdapterRegistry + bootstrapSpace() - declarative, named-adapter wiring of a Space's identity/transport/storage/volatileStorage (docs/bootstrap-adapter-registry.md)
 ├── demo/                 - runnable proofs: CLI chat, browser client, in-process auto-demo, app-shell-demo
 ├── docs/                 - docs/v5-space-core-guide.md (framework how-to), docs/app-shell-arbeitsauftrag.md (App Shell/Runtime design)
 └── architecture.md       - this file
@@ -333,13 +334,159 @@ former, precisely because it needs ordering and per-contribution identity
 (so a specific contribution can be replaced/removed), which a fire-and-
 forget pub/sub topic does not give you.
 
+### 3.7 Bootstrap: the Mountpoint/Adapter-Registry
+
+`Space`'s constructor was always dependency-injectable (`identity`/
+`transport`/`storage`/`volatileStorage` as already-built instances) — what
+was missing (`docs/quv5-vs-quv3-decision.md`'s Arbeitspaket 2, the QuV3
+`QuMount.resolve(path)` gap) was a declarative way to choose WHICH concrete
+adapter backs each of those slots, by NAME, at boot time, rather than a
+deployment hardcoding an `import`. `@qu/bootstrap`'s `AdapterRegistry`
+(`(slot, name) -> factory`) + `bootstrapSpace()` (resolves a plain
+`{identity, transport, storage?, volatileStorage?}` config — each slot
+either `{adapter: '<name>', ...options}` or an already-built instance —
+into a real `Space`) is that layer.
+
+TWO DIFFERENT AXES, not to be confused: the four SLOT names above are the
+one universal Mountpoint a Peer addresses (`Space` itself only ever calls
+`storage.append()`/`transport.send()` — zero awareness of which concrete
+adapter answers). `@qu/bootstrap/memory`/`/browser`/`/node` are NOT a second
+Mountpoint layer — they're pure bundling-boundary groupings, forced by the
+pre-existing "dedicated subpath, never the barrel" rule every adapter-
+providing package already follows (`indexeddb-store.js`/`ws-client-
+transport.js`'s own doc comments): esbuild resolves `node:fs`/`ws`
+STATICALLY, even inside a dead runtime branch, so no single "auto-detect"
+pack can safely exist — the split must stay file-level. A deployment picks
+exactly ONE such pack, once, at its own bundle entry point (`@qu/app-shell`'s
+`shell.js` is the reference caller) — every other call site stays fully
+unaware which adapter is actually running. See
+`docs/bootstrap-adapter-registry.md` for the full design, and why identity-
+store registration (`'memory'`/`'local-storage'`/`'session-storage'`) is
+always its own, separately-called step. `docs/bootstrap-api.md` is the
+compact function-by-function API reference (signatures, options, worked
+examples) for everything in this section - this section stays the WHY, that
+doc is the quick-lookup WHAT/HOW when actually writing code against it.
+
+### 3.8 Peer-User-Verwaltung: the User-Node
+
+`@qu/space-core`'s `user.js` (Arbeitspaket 5) is the GunDB-style "User-Node"
+— one self-certifying `acl.write: 'owner'` Kind (`qu-user`: `alias`/`epub`/
+`listed`, all `'public'`-visibility, no new mechanism beyond what §3.2
+already defines) per identity, discoverable by ANY peer who knows only the
+pubkey (no shared Space/membership needed — the same reason `'owner'`-ACL
+already makes a Node's META public). `listed` defaults to `false`
+(privacy-by-default — nothing makes an identity more discoverable than it
+explicitly opted into). `ensureUserProfile(space, {alias?, listed?})`
+creates it on first call and reconciles an existing one on every later call
+— idempotent ACROSS process restarts (briefly checks local storage/a
+subscribed relay before assuming "new"), so calling it once per boot
+(`@qu/app-shell`'s `shell.js` does, right after `bootstrapSpace()`) is what
+makes one locally-persisted identity (§3.7's `'local-storage'` identity
+adapter) double as ONE central user across every app an origin serves, not
+just a bare keypair. `filterListedUsers(space, candidatePubs)` surfaces only
+opted-in identities from a candidate list a deployment already has (no new
+enumeration mechanism — deliberately layers on whatever peer-discovery
+already exists, e.g. `/members.json`). Custom/app-defined profile
+properties (public OR `{recipients}`-scoped group-encrypted) are
+DELIBERATELY not a `qu-user` field — Kind-Schema is static by design; an
+app defines its OWN `'owner'`-ACL Kind anchored to the same identity
+instead (see `docs/peer-user-management.md` for the worked example). This
+is unrelated to `alias.js`'s per-Space pseudonymity (§3.2/§3.6) — a
+DIFFERENT, complementary identity concern (unlinkability vs. a public
+profile); an alias identity may or may not have its own `qu-user` Node, a
+choice `user.js` itself never makes for it.
+
+### 3.9 Peer-Rolle & Transport-Vertrag
+
+The Peer role QuV3's symmetric `SyncEngine` had (Arbeitspaket 4) already
+exists in QuV5 — it was just never named as a contract: `@qu/space-transport`'s
+`federation.js` proves it, a relay federating with an upstream relay
+literally becomes an ordinary `Space` client toward it, same signed
+`hello`/`subscribe` messages, same Transport shape. `docs/peer-transport-
+contract.md` documents this explicitly as TWO separate, deliberately small
+contracts — `Transport` (the PEER side, exactly one connection:
+`connect()`/`send()`/`onMessage()` required, `onStatusChange()`/
+`getPeerId()`/`close()` optional — `InProcessTransport`/`WsClientTransport`
+both satisfy it) and `Hub` (the RELAY side, many simultaneous connections:
+`registerRelay()`/`deliverTo()`/`peerIds()` — `createInProcessHub()`/
+`createWsServerHub()`). `@qu/bootstrap`'s `bootstrapSpace()` now validates
+a resolved `transport` against the `Transport` contract
+(`assertTransportShape()`, `transport-contract.js`) BEFORE calling
+`.connect()` on it — a typo'd/incomplete custom adapter fails loudly right
+at the bootstrap call site instead of as a cryptic `TypeError` deep inside
+`Space`.
+
+THIS IS WHERE A FUTURE WEBRTC TRANSPORT AND MESH ROUTING WOULD PLUG IN —
+deliberately not built yet, only the contract they'd target: a
+`RTCDataChannel`-backed transport is pure adapter work (implements the same
+three methods, registers under a name — zero core changes); a true mesh
+node (several simultaneous peer connections routing between each other)
+would need a thin layer ABOVE `Space` managing multiple `Transport`
+instances, the direct generalization of what `federation.js` already does
+for exactly two hops. A WebRTC SIGNALING relay (connection establishment —
+SDP/ICE exchange) is orthogonal to Qu's own content-mirroring Relay
+(`relay.js`) and would run as its own small protocol, never something
+`relay.js` itself needs to know about. None of this needs Yjs to change:
+the sealed Yjs update bytes (`Y.encodeStateAsUpdate()`/`Y.applyUpdate()`)
+are already transport-agnostic — see `docs/quv5-vs-quv3-decision.md`'s
+Status-Update on Arbeitspaket 3: Yjs stays the sole, primary sync basis (no
+flat-log alternative adapter), the explicit decision being "use Yjs well"
+(e.g. `@qu/space-editor-prosemirror`'s already-working real-time
+collaborative rich-text editing over the `'richtext'` field shape, §3.2) —
+not "make sync pluggable."
+
+### 3.10 Routing-Anonymität
+
+`docs/routing-anonymity.md` names exactly what a relay/network observer
+sees per envelope (`envelope.js`) vs. what stays hidden: content is always
+encrypted (`mode: 'encrypted'`), but `envelope.pub` (the real signer) and
+`envelope.to` (every intended recipient's X25519 pubkey) are ALWAYS visible
+— the latter is harmless for an ordinary `'members'`-mode broadcast (the
+member list is already public via `/members.json`) but leaks the exact
+subset for a `{recipients}`-narrowed group write (§3.8's group-encryption
+feature). THREE items, tracked by status:
+  - **Done**: `@qu/bootstrap`'s `bootstrapAliasSpace(realSpace, spaceId,
+    config, {join?})` composes `alias.js`'s `publishAlias()` + `bootstrapSpace()` —
+    sender anonymity for any self-certifying (`'owner'`/`'named'`/
+    `'content'`) Kind, zero relay-side setup. The "dead drop" property is
+    `AliasRegistry`'s own pre-existing one: only a fellow Space member who
+    can decrypt the registry entry resolves alias→real, entirely
+    client-side — the relay never can. `'members'`-mode anonymous writing
+    additionally needs the alias registered as a relay-side member first —
+    the optional `join` callback (called with the derived alias, its
+    resolved value becomes the alias Space's `members`) is how a deployment
+    plugs in its OWN join mechanism (e.g. `@qu/app-shell`'s `joinSpace()`)
+    without this package hardcoding any one protocol.
+  - **Done, as a swappable plugin**: `@qu/core`'s `QuCrypto.encrypt()` gained
+    an optional `paddingXPubKeys` param (byte-identical random entries,
+    `contentKeyRaw.length + 16`, indistinguishable from a real wrapped key
+    without the matching private key); `@qu/space-core`'s `seal-
+    strategies.js` exports `sealStrategies.none` (default, unchanged
+    behavior) and `.padToMembers` (pads `envelope.to` to the Space's FULL
+    current membership); `Space` takes it as a new, optional `sealStrategy`
+    constructor param (same DI pattern as `storage`/`transport`); `@qu/
+    bootstrap` exposes it as the `'sealStrategy'` slot
+    (`registerSealStrategyAdapters()`, `{adapter: 'pad-to-members'}`) so a
+    deployment picks it by name exactly like any other adapter, and a
+    future third strategy is pure addition — never a `Space`/`envelope.js`
+    change.
+  - **Proposed, not implemented** (new protocol behavior — awaiting
+    explicit sign-off): epoch-based alias rotation (`deriveAliasIdentity(identity,
+    spaceId, epoch)`) plus a confidentially-delivered "my successor alias is
+    X" handoff message, so two correspondents' alias identities can change
+    over time while their conversation stays linked — for THEM only, never
+    for an observer. Explicitly does NOT solve connection/timing-level
+    correlation (the same transport connection/IP reused across a rotation
+    is still correlatable) — that needs an actual connection change, future
+    Mesh/WebRTC-transport territory (§3.9), not an identity-layer fix.
+
 ## 4. File-by-file map
 
 ### `packages/core/` — `@qu/core`
 
 | File | Purpose |
 |---|---|
-| `src/crypto.js` | `QuCrypto` — Ed25519 sign/verify, X25519 ECDH + AES-256-GCM envelope encryption, `keypairFromSeed()` (deterministic derivation, used by `alias.js`), base64/hex helpers, `fingerprint()`. |
+| `src/crypto.js` | `QuCrypto` — Ed25519 sign/verify, X25519 ECDH + AES-256-GCM envelope encryption (`encrypt()` now also takes an optional `paddingXPubKeys` — byte-indistinguishable dummy `to` entries, §3.10), `keypairFromSeed()` (deterministic derivation, used by `alias.js`), base64/hex helpers, `fingerprint()`. |
 | `src/index.js` | Re-exports `QuCrypto`. |
 
 ### `packages/events/` — `@qu/events`
@@ -371,7 +518,8 @@ existed.
 
 | File | Purpose |
 |---|---|
-| `src/envelope.js` | `sealUpdate()`/`sealPublicUpdate()`/`verifyEnvelope()`/`openUpdate()` — the ONE place a Yjs update is ever sealed/opened. Envelope v2 (`mode: 'encrypted'\|'public'`) and the `snapshot` flag (compaction) live here. |
+| `src/envelope.js` | `sealUpdate()`/`sealPublicUpdate()`/`verifyEnvelope()`/`openUpdate()` — the ONE place a Yjs update is ever sealed/opened. Envelope v2 (`mode: 'encrypted'\|'public'`) and the `snapshot` flag (compaction) live here. `sealUpdate()` now also takes an optional `paddingXPubKeys` (§3.10). |
+| `src/seal-strategies.js` | `sealStrategies.none`/`.padToMembers` — `Space`'s pluggable `sealStrategy` (§3.10, `docs/routing-anonymity.md`): which OTHER members get a padding entry in an envelope's `to`. |
 | `src/kind-schema.js` | `defineKind()` (now also `persistence: 'durable'\|'volatile'`, §3.4), `KindRegistry`, `deriveOwnerNodeId()` (self-certifying nodeId derivation for `'owner'`/`'named'` ACL). |
 | `src/grant.js` | `signGrant()`/`verifyGrant()` — the `'named'`-ACL delegated-authority mechanism. |
 | `src/node.js` | `SpaceNode` (one Node = one Y.Doc, `meta` + `content` maps), `stampMeta()`. |
@@ -379,6 +527,7 @@ existed.
 | `src/space.js` | `Space` — the main class, now also reconnect/resync (`onStatusChange` wiring, §3.4) and per-Kind storage routing (`_storageFor()`). See §5 below for its full method surface. |
 | `src/alias.js` | `deriveAliasIdentity()`, `aliasRegistryKind`/`aliasRegistryNodeId()`, `publishAlias()`, `AliasRegistry` — per-space pseudonymity. |
 | `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes (§3.5). |
+| `src/user.js` | `userKind` (`qu-user`: `alias`/`epub`/`listed`, all public), `userNodeId()`, `resolveAlias()`, `ensureUserProfile()`, `filterListedUsers()` — the GunDB-style User-Node, the Peer-User-Verwaltung base primitive (§3.8). |
 | `src/wire-codec.js` | `encodeForWire()`/`decodeFromWire()` — Uint8Array ↔ base64 for any JSON serialization boundary (WebSocket, on-disk file). |
 | `src/compaction.js` | `compactIfNeeded(space, id, {threshold})` — opt-in compaction policy on top of `Space.compactNode()`/`envelopeCount()` (§3.4 UPDATE). |
 | `src/index.js` | Package's public export surface — the authoritative list of what's public API vs. internal. |
@@ -530,7 +679,7 @@ notice.
 
 | Member | Purpose |
 |---|---|
-| `new Space({identity, members, transport, storage?, volatileStorage?, bus?})` | Construct one peer's live view. Sends a signed `hello` immediately; claims the transport's `onStatusChange()` slot if it has one (§3.4). `volatileStorage` backs any `persistence: 'volatile'` Kind (§3.4) — defaults to a private in-memory store. |
+| `new Space({identity, members, transport, storage?, volatileStorage?, bus?, sealStrategy?})` | Construct one peer's live view. Sends a signed `hello` immediately; claims the transport's `onStatusChange()` slot if it has one (§3.4). `volatileStorage` backs any `persistence: 'volatile'` Kind (§3.4) — defaults to a private in-memory store. `sealStrategy` (default `sealStrategies.none`) decides which other members get a padding entry in an outgoing envelope's `to` (§3.10). |
 | `.identity` | Read-only getter — this Space's own identity object. |
 | `.addMember(member)` | Grows this Space's own view of `'members'`-mode ACL/encryption recipients (idempotent). |
 | `.createNode(kindSchema, initialFields?, {id?})` | Originate a new Node. `id` is IGNORED (self-derived) for `'owner'`/`'named'` Kinds. |
@@ -557,9 +706,10 @@ notice.
 
 | Export | Purpose |
 |---|---|
-| `sealUpdate()` / `sealPublicUpdate()` | Seal a raw Yjs update into a signed (+ encrypted, for the first) envelope. |
+| `sealUpdate()` / `sealPublicUpdate()` | Seal a raw Yjs update into a signed (+ encrypted, for the first) envelope. `sealUpdate()` takes an optional trailing `paddingXPubKeys` (§3.10). |
 | `verifyEnvelope(envelope, isAuthorizedWriter)` | Signature + ACL check, either mode. |
-| `openUpdate(envelope, recipient?)` | Decrypt (encrypted mode) or pass through (public mode). |
+| `openUpdate(envelope, recipient?)` | Decrypt (encrypted mode) or pass through (public mode). Throws the same way for a genuine non-recipient and a padding target (§3.10) — indistinguishable by design. |
+| `sealStrategies.none` / `.padToMembers` | `Space`'s pluggable `sealStrategy` (§3.10) — see `src/seal-strategies.js` above. |
 | `defineKind(kind, {fields, acl?, notifyTopics?, persistence?})` | Declare a Kind-Schema. `persistence: 'durable'\|'volatile'` (default `'durable'`) — see §3.4. |
 | `KindRegistry` | `.register()`/`.get()`/`.list()` static registry. |
 | `deriveOwnerNodeId(ownerPub, kind)` | Self-certifying nodeId for `'owner'`/`'named'` Kinds. |
@@ -573,6 +723,11 @@ notice.
 | `publishPresence(space, fields)` / `setStatus(space, status)` / `setTyping(space, nodeId, typing)` | Write this Space's own presence Node. |
 | `watchPresence(space, pub)` | One-shot presence snapshot of another identity (subscribes if needed). |
 | `PresenceWatcher` | Reactive multi-member presence cache off the bus — `.watch(pub)` / `.of(pubB64)`. |
+| `userKind` | Self-certifying `'owner'`-ACL Kind — `alias`/`epub`/`listed` (§3.8, the GunDB-style User-Node). |
+| `userNodeId(pub)` | Deterministic User-Node id for `pub`. |
+| `resolveAlias(alias, pub)` | `alias` if set, else `pub` base64url-encoded — GunDB's "alias defaults to pub". |
+| `ensureUserProfile(space, {alias?, listed?, timeout?})` | Create-or-reconcile this Space's own User-Node — idempotent across restarts; `listed` defaults `false` on first creation. |
+| `filterListedUsers(space, pubs, {timeout?})` | From a candidate pubkey list, the subset that opted into `listed: true`, as `{pub, alias, epub}`. |
 | `encodeForWire()` / `decodeFromWire()` | Uint8Array ↔ base64 for any JSON boundary. |
 
 ### Relay / transport / federation (`@qu/space-transport`)
@@ -596,6 +751,21 @@ notice.
 | `createMemoryStore()` | Ephemeral tier: `{append, load, replace}`. |
 | `createDurableStore(backingStore?)` | Simulated-persistence tier (tests): same contract, plus `._backingStore`. |
 | `createFileStore(dataDir)` | Real on-disk tier: same contract, one `.ndjson` file per Node. |
+
+### Bootstrap / Adapter Registry (`@qu/bootstrap`, see §3.7, §3.9)
+
+| Export | Purpose |
+|---|---|
+| `new AdapterRegistry()` | `.register(slot, name, factory)` / `.create(slot, name, options?)` / `.has(slot, name)` / `.names(slot)` — the generic `(slot, name) -> factory` map. |
+| `bootstrapSpace({registry?, identity, transport, storage?, volatileStorage?, members?, relayAdmins?, bus?, sealStrategy?})` | Resolves each slot (an `{adapter, ...options}` ref via `registry`, or an already-built instance), validates `transport` (`assertTransportShape()`, below), and constructs a `Space`. Calls `transport.connect()`; defaults `bus` to a fresh `EventBus`. |
+| `assertTransportShape(transport)` / `REQUIRED_TRANSPORT_METHODS` | The Transport contract check (§3.9, `docs/peer-transport-contract.md`) — throws naming any of `connect`/`send`/`onMessage` that's missing. |
+| `bootstrapAliasSpace(realSpace, spaceId, config, {join?})` | Composes `@qu/space-core`'s `publishAlias()` + `bootstrapSpace()` — bootstraps a second Space signing as `realSpace`'s per-space alias identity (§3.10, `docs/routing-anonymity.md`). `config.identity` is always ignored (overridden with the derived alias). Optional `join(aliasIdentity)` plugs in a deployment's own relay-membership mechanism, so the alias can also write ordinary `acl.write: 'members'` Kinds — its resolved value becomes the alias Space's `members`. |
+| `registerSealStrategyAdapters(registry)` | Registers the `'sealStrategy'` slot's `'none'`/`'pad-to-members'` adapters (§3.10) — `@qu/space-core`'s `sealStrategies`, zero extra dependencies, safe anywhere. |
+| `loadOrCreateIdentity(storage, key)` | The generic "create once, reload on every later call for that key" identity primitive — `@qu/app-shell`'s `identity.js` re-exports this unchanged. |
+| `registerIdentityStoreAdapters(registry, {defaultKey?})` | Registers the `'identity'` slot's `'memory'`/`'local-storage'`/`'session-storage'` adapters. Always called separately from the packs below (see docs/bootstrap-adapter-registry.md). |
+| `registerMemoryAdapters(registry)` (`@qu/bootstrap/memory`) | `storage`/`volatileStorage`: `'memory'`; `transport`: `'in-process'` (needs a shared `hub` — also exports `createSharedInProcessHub`). |
+| `registerBrowserAdapters(registry)` (`@qu/bootstrap/browser`) | `storage`: `'indexeddb'`; `transport`: `'ws-client'`. Browser-safe subpaths only. |
+| `registerNodeAdapters(registry)` (`@qu/bootstrap/node`) | `storage`: `'file'`/`'durable'`; `transport`: `'ws-client'` (Node `ws`). |
 
 ### Delivery status / upload outbox (`@qu/space-plugins`, OPTIONAL)
 
@@ -712,10 +882,18 @@ Relay never learns what it's transporting is "a page" or "a template," and
 - **`@qu/app-shell`** (`identity.js`, `boot.js`, `shell.js`) — the ONE
   fixed piece of application JavaScript a Relay would serve (`shell.js`'s
   `<qu-app-shell>` custom element, a DOM mount marker, not a component
-  system). `identity.js` generates/persists a browser identity and joins a
-  relay's Space via its already-existing `POST /join`/`GET /members.json`
+  system). `identity.js` re-exports `loadOrCreateIdentity()` from
+  `@qu/bootstrap` (§3.7 — promoted there, unchanged, so `dev-console.js`'s
+  and `shell.js`'s calls keep sharing its race guard) and joins a relay's
+  Space via its already-existing `POST /join`/`GET /members.json`
   (`@qu/space-transport`'s `relay-app-server.js`) — reused, not a new "public
-  content" mechanism. `boot.js`'s `startApp()` is the DOM-aware half that
+  content" mechanism. `shell.js` itself resolves its `identity`/`transport`/
+  `storage` through an `@qu/bootstrap` `AdapterRegistry`
+  (`registerIdentityStoreAdapters()` + `@qu/bootstrap/browser`'s
+  `registerBrowserAdapters()`) and `bootstrapSpace()`, rather than
+  constructing `WsClientTransport`/`indexeddb-store` directly — see
+  `docs/bootstrap-adapter-registry.md`. `boot.js`'s `startApp()` is the
+  DOM-aware half that
   wires an already-constructed `Space` to `@qu/app-core`/`@qu/app-renderer`;
   kept separate from `shell.js`'s network/`localStorage` glue specifically so
   it stays testable with an in-process `Space` + jsdom, no live relay needed
@@ -2625,13 +2803,65 @@ document's own still-open question on that below).
   `@qu/space-core` calls needed to read + observe it, normalizing EVERY
   source to the same `{title, excerpt, route, timestamp, raw}` shape so
   totally different Kinds (a `qu-route-registry` entry, a `sharedListKind`
-  entry) can be merged into one feed. Two adapters ship for now - `'pages'`
+  entry) can be merged into one feed. Three adapters ship - `'pages'`
   (routes under an optional `prefix` - "a blog is just pages under
-  `/blog/`") and `'shared-list'` (any named `sharedListKind`); a
-  `'collection'` adapter is real, natural, NOT-YET-BUILT future work - a
-  Collection's `itemKind`/`registryKind` are actual Kind-Schema OBJECTS a
-  View's own plain-data `sources` field cannot reference by name alone,
-  needing a caller-supplied lookup table, a separate piece of plumbing.
+  `/blog/`"), `'shared-list'` (any named `sharedListKind`), and
+  `'collection'` (any `defineCollectionKind()` pair, `itemKind`+
+  `registryKind` passed as actual Kind-Schema OBJECTS in the source params
+  - unlike `'pages'`/`'shared-list'`, which resolve a Kind by NAME because
+  their Kind is fixed per-app, a Collection's item Kind is caller-defined,
+  so the View's own plain-data `sources` recipe carries the Schema object
+  itself rather than a name a relay-side lookup table would need to
+  resolve).
+
+  **UPDATE - THE `'collection'` SOURCE (two-level liveness).** Unlike
+  `'pages'`/`'shared-list'`, which each ever watch exactly ONE Node (a
+  registry whose own entries already carry all the normalized data), a
+  Collection's items are SEPARATE Nodes from their registry - the registry
+  only enumerates paths (`acl.write: 'named'`), each item owns its own
+  Node (`acl.write: 'content'`). So `'collection'` opens and keeps live
+  TWO levels at once: the registry (`registryListField.observe()`, same as
+  any other source - new/removed items) AND, per resolved item, that
+  item's own `doc.on('update')` (an existing item's field EDITED, no
+  registry change at all, still recomputes the feed live). Items no longer
+  in the registry's current read are released (`doc.off()` + `Space`
+  release) on the next `read()`, so a feed never accumulates subscriptions
+  for items that left the collection. A freshly-opened item is
+  `waitUntilSynced()`-gated (`itemSyncTimeout`, default 1500ms) before its
+  fields are read, since - unlike a registry entry's own cached fields - a
+  brand-new item Node has nothing to show until ITS OWN initial sync
+  completes; skipping this wait was an early bug (items briefly read back
+  empty on a feed's first open). `titleField`/`excerptField`/`routeField`/
+  `timestampField` name which of the item's OWN fields map to the shared
+  `{title, excerpt, route, timestamp}` shape, `raw` always carries every
+  field the item's Kind declares (not just the mapped ones) so an
+  `itemTemplate` can bind to anything, not only the four normalized ones.
+  `defineCollectionKind()`'s own two Kinds (`itemKind`/`registryKind`, not
+  Views-specific) are the same primitive `docs/example-apps.md`'s
+  Guestbook/Blog examples already use for "many items owned by one
+  identity, each individually resolvable and independently synced."
+
+  **UPDATE - A STALE-RECOMPUTE RACE, FOUND AND FIXED VIA THE ABOVE.**
+  `openLiveView()`'s internal `recompute()` is fire-and-forget from every
+  source's own `onUpdate`/`observe` callback (never awaited by the
+  triggering write) - normally harmless, since a SINGLE recompute's own
+  `await Promise.all(sources.map(read))` always finishes before the next
+  edit even starts. The `'collection'` source's item-level liveness broke
+  that assumption: `TextField.replaceText()` sends an edit as TWO SEPARATE
+  envelopes (delete, then insert), each its own `doc.on('update')`, so two
+  overlapping `recompute()` calls could genuinely be in flight - and,
+  since neither is awaited, complete OUT OF ORDER: a slower/older call
+  finishing AFTER a faster/newer one would silently overwrite the fresh
+  result with stale data, with no source Kind actually doing anything
+  wrong. Fixed with a `generation` counter (`recompute()` stamps its own
+  generation on entry, discards its own result on exit if a NEWER
+  `recompute()` has started meanwhile) - a correctness fix to shared View
+  plumbing, not `'collection'`-specific, verified against the FULL existing
+  `views.test.js`/`collections.test.js` suites (no regression) as well as
+  the new `view-collection-source.test.js` (the race's own regression
+  test - an item-level edit followed immediately by a registry-level
+  create, both racing the same feed).
+
   `view-sources.js`'s `openLiveView(space, config)` is what makes this
   LIVE, not a one-time snapshot (the user's own explicit choice for v1,
   over a simpler snapshot-on-load alternative): it opens every source's

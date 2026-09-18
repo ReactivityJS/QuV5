@@ -133,9 +133,19 @@ export class QuCrypto {
    * @param {Uint8Array} plaintext
    * @param {Array<Uint8Array>} recipientXPubKeys - Raw X25519 public keys.
    * @param {Uint8Array} senderXPrivKey - PKCS8-encoded X25519 private key.
+   * @param {Array<Uint8Array>} [paddingXPubKeys] - OPTIONAL "dead weight" entries (default none,
+   *   unchanged behavior from before this param existed): X25519 pubkeys that get a `to` entry
+   *   too, but a RANDOM one, not a real wrapped key - see this method's own doc comment on why
+   *   that's enough to make them indistinguishable from a real entry to anyone without the
+   *   matching private key. The caller (`@qu/space-core`'s `sealUpdate()`/`Space`'s pluggable
+   *   `sealStrategy`, see docs/routing-anonymity.md) decides WHICH pubkeys this is - typically a
+   *   Space's OTHER members, to hide a `{recipients}`-narrowed write's real audience from a
+   *   relay/network observer. Passing the SAME pubkey in both lists is a caller error (undefined
+   *   which entry wins) - not guarded against here, since `sealStrategy` implementations are
+   *   expected to already compute disjoint sets (see `padToMembers()`).
    * @returns {Promise<{iv: Uint8Array, ct: Uint8Array, to: Array<{pub: Uint8Array, key: Uint8Array}>}>}
    */
-  static async encrypt(plaintext, recipientXPubKeys, senderXPrivKey) {
+  static async encrypt(plaintext, recipientXPubKeys, senderXPrivKey, paddingXPubKeys = []) {
     const contentKey = await subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
     const contentKeyRaw = new Uint8Array(await subtle.exportKey('raw', contentKey));
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
@@ -159,6 +169,18 @@ export class QuCrypto {
         await subtle.encrypt({ name: 'AES-GCM', iv: new Uint8Array(12) }, shared, contentKeyRaw)
       );
       to.push({ pub, key: wrappedKey });
+    }
+    // PADDING - a real wrapped entry's byte length is ALWAYS `contentKeyRaw.length` (32, fixed by
+    // the AES-256-GCM params above) + 16 (GCM's own fixed authentication tag) = 48 bytes,
+    // regardless of plaintext size or recipient - a random 48-byte blob is therefore structurally
+    // identical in shape to a real one; only actually attempting to decrypt (which needs the
+    // matching private key) tells the two apart. This is what makes `envelope.to` paddable at all
+    // without a format change anyone downstream has to special-case (@qu/space-core's `openUpdate()`
+    // already treats "listed in `to` but this key doesn't decrypt" as an ordinary, expected
+    // "not actually a recipient" outcome - see that function's own doc comment).
+    const wrappedKeyLength = contentKeyRaw.length + 16;
+    for (const pub of paddingXPubKeys) {
+      to.push({ pub, key: globalThis.crypto.getRandomValues(new Uint8Array(wrappedKeyLength)) });
     }
     return { iv, ct, to };
   }

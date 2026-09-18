@@ -92,6 +92,29 @@ test('an envelope with no notify hint is unaffected - same shape and signature v
   assert.equal(await verifyEnvelope(envelope, isAuthorized), true);
 });
 
+test('sealUpdate(..., paddingXPubKeys): pads "to" with an extra entry that still verifies but never opens for the padding target', async () => {
+  const author = await actor();
+  const reader = await actor();
+  const paddingTarget = await actor(); // e.g. another Space member who isn't a real recipient of this write.
+  const envelope = await sealUpdate(new TextEncoder().encode('narrowed write'), author, [reader.xPublicKey], null, false, [paddingTarget.xPublicKey]);
+
+  assert.equal(envelope.to.length, 2);
+  const isAuthorized = (pubB64) => pubB64 === QuCrypto.toBase64(author.signingPub);
+  assert.equal(await verifyEnvelope(envelope, isAuthorized), true); // padding never affects the signature check.
+
+  const opened = await openUpdate(envelope, reader);
+  assert.deepEqual(opened, new TextEncoder().encode('narrowed write'));
+
+  await assert.rejects(() => openUpdate(envelope, paddingTarget)); // same "not actually a recipient" failure as any non-recipient.
+});
+
+test('sealUpdate() omitting paddingXPubKeys is unchanged behavior - "to" has exactly the real recipients', async () => {
+  const author = await actor();
+  const reader = await actor();
+  const envelope = await sealUpdate(new TextEncoder().encode('x'), author, [reader.xPublicKey]);
+  assert.equal(envelope.to.length, 1);
+});
+
 test('sealUpdate() stamps mode: "encrypted"', async () => {
   const author = await actor();
   const reader = await actor();

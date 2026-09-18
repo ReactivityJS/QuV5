@@ -18,7 +18,10 @@ platform code, and no backward-compatibility constraints during this build.
 **Start here:**
 [`architecture.md`](./architecture.md) is the bird's-eye map (repo
 layout, framework concept, file-by-file purpose, full API reference) —
-kept up to date with every architectural change. For the practical
+kept up to date with every architectural change. To actually build an app,
+see [`docs/app-developer-guide.md`](./docs/app-developer-guide.md) (a
+practical, example-driven walkthrough: bootstrap, Kind-Schema, Qu-Components
+in HTML, and how optional features like WebRTC plug in). For the practical
 how-to, see [`docs/v5-space-core-guide.md`](./docs/v5-space-core-guide.md)
 (the `Space`/`Node`/`Field` API, what's actually cryptographically
 enforced, the local-first query API, alias identities, compaction,
@@ -89,6 +92,15 @@ standalone or via Docker).
   below) - see `architecture.md` §7 and
   [`docs/app-shell-arbeitsauftrag.md`](./docs/app-shell-arbeitsauftrag.md)
   for the full design.
+- [`packages/bootstrap`](./packages/bootstrap) - `@qu/bootstrap`: the
+  Mountpoint/Adapter-Registry - `AdapterRegistry` + `bootstrapSpace()`,
+  declarative named-adapter wiring of a `Space`'s identity/transport/
+  storage/volatileStorage instead of a hardcoded `import` per deployment -
+  see `architecture.md` §3.7,
+  [`docs/bootstrap-adapter-registry.md`](./docs/bootstrap-adapter-registry.md)
+  (design/motivation) and
+  [`docs/bootstrap-api.md`](./docs/bootstrap-api.md) (full API reference with
+  examples).
 
 ## Development
 
@@ -617,8 +629,10 @@ Views)" section (`cms-actions.js`'s `wireContent()`, `#/admin/<prefix>/cms/conte
 is one reference editor among possibly several ("editors as plugins"), not
 the only way to author one.
 See architecture.md's own "Shared lists ... and Views" section for the
-full design (including what's deliberately not built yet - a `'collection'`
-source adapter, and watching a View's own definition live) and
+full design - three source adapters ship (`'pages'`, `'shared-list'`,
+`'collection'`); still deliberately not built is watching a View's own
+definition live (an edit to `sources`/`itemTemplate` only takes effect on
+the next resolve) - and
 `packages/app-core/test/{shared-list,views}.test.js` /
 `packages/app-shell/test/{view-actions,view-editor}.test.js` for proof.
 **`docs/example-apps.md`** walks through four full worked examples built

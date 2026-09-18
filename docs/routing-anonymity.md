@@ -1,0 +1,221 @@
+# Routing-Anonymität: was ein Relay/Netzwerk-Beobachter tatsächlich sieht
+
+> Fortsetzung von Arbeitspaket 4 (`docs/quv5-vs-quv3-decision.md`) — die
+> Frage, die den Ausschlag gab: "Ein Message-Versand via Netzwerk soll
+> möglichst wenig über Empfänger, Sender und Inhalt preisgeben." Dieses
+> Dokument trennt bewusst drei Zustände: **gelöst** (Code existiert,
+> getestet), **gelöst, aber nur als Rezept dokumentiert** (kein neuer Code
+> nötig), und **vorgeschlagen, noch nicht umgesetzt** (bewusst erst nach
+> Rückmeldung, da sicherheitsrelevant).
+
+## Der Befund: was heute pro Envelope sichtbar ist
+
+Grundlage: `@qu/space-core`'s `envelope.js`/`@qu/core`'s `crypto.js`. Für
+JEDEN `mode: 'encrypted'`-Envelope (der Normalfall):
+
+| Feld | Sichtbar für Relay/Beobachter? | Warum |
+|---|---|---|
+| Inhalt (`ct`) | **Nein** | AES-GCM, Relay hält nie einen privaten X25519-Key. |
+| `pub` (Signierer) | **Ja, immer** | Der Relay muss die ACL gegen DIESEN Pubkey prüfen (`verifyEnvelope()`). |
+| `senderXPub` | **Ja, immer** | Für ECDH nötig — steht unverschlüsselt neben der Chiffre. |
+| `to` (Empfänger-Pubkeys) | **Ja, immer** | Jeder Empfänger muss seinen eigenen Eintrag finden können. |
+| `nodeId` | **Ja** | Routing-Adresse — steht außerhalb des Envelopes in der Wire-Nachricht. |
+| `ts` | **Ja** | Klartext-Timestamp. |
+
+Für `mode: 'public'` ist ALLES sichtbar — by design, kein Leck (siehe
+kind-schema.js's `'public'`-Visibility-Begründung).
+
+## 1. Sender-Anonymität — GELÖST, jetzt als allgemeines Rezept
+
+**Befund:** `envelope.pub` verrät IMMER den echten Signierer — außer die
+signierende Identität ist selbst schon eine Pseudo-Identität. Das leistet
+`@qu/space-core`'s `alias.js` bereits, bisher aber nur für
+`acl.write: 'owner'`/`'named'`/`'content'`-Kinds dokumentiert.
+
+**Das "toter Briefkasten"-Modell, präzisiert:** Ein Alias ist KEIN von
+beiden Seiten gehaltenes Schlüsselpaar — nur die REALE Identität besitzt
+jemals den privaten Schlüssel des Alias (`deriveAliasIdentity()` leitet ihn
+aus dem eigenen privaten Schlüssel ab; niemand sonst kann das). Ein
+Korrespondent braucht ihn auch nicht — er interagiert mit dem Alias genauso
+wie mit jeder anderen Identität (liest dessen Nodes, empfängt dessen
+signierte Writes). Was den Alias zu einem "Briefkasten mit verstecktem
+Besitzer" macht, ist `AliasRegistry`: ein verschlüsselter Registry-Eintrag
+(`aliasPub -> realPub`), lesbar NUR für aktuelle Space-Mitglieder — **die
+Auflösung "wer steckt wirklich dahinter" passiert ausschließlich lokal,
+client-seitig**, nie beim Relay (der hält nie den Decryption-Key für diesen
+Eintrag).
+
+**Neu:** `@qu/bootstrap`'s `bootstrapAliasSpace(realSpace, spaceId, config)`
+— verpackt `publishAlias()` + `bootstrapSpace()` in einem Aufruf:
+
+```js
+import { bootstrapAliasSpace } from '@qu/bootstrap';
+
+const { space: aliasSpace } = await bootstrapAliasSpace(realSpace, 'my-space', {
+  registry,
+  transport: { adapter: 'in-process', hub, peerId: 'alice-alias' }, // eine EIGENE Verbindung - siehe "Restrisiko" unten.
+});
+await aliasSpace.createNode(myOwnerKind, { ... }); // signiert als Alias, nicht als die reale Identität.
+```
+
+**Deckt ab:** jedes `'owner'`/`'named'`/`'content'`-ACL-Kind — zero
+Relay-seitiges Setup, self-certifying, funktioniert sofort.
+
+**Auch abgedeckt, über einen Plugin-Hook: anonymes Schreiben in ein flaches
+`acl.write: 'members'`-Kind.** Dafür muss der Alias-Pubkey ERST als
+Space-Mitglied registriert werden — WIE, ist Deployment-spezifisch (bei
+`@qu/app-shell` z. B. `joinSpace({identity: aliasIdentity, ...})`, derselbe
+`POST /join`, den die reale Identität auch nutzt) — deshalb hartcodiert
+`@qu/bootstrap` diesen Mechanismus nicht, sondern nimmt ihn als
+Callback entgegen:
+
+```js
+import { joinSpace } from '@qu/app-shell'; // oder der Join-Mechanismus eines anderen Deployments
+
+const { space: aliasSpace } = await bootstrapAliasSpace(
+  realSpace, 'my-space',
+  { registry, transport: { adapter: 'ws-client', url: relayUrl } },
+  { join: (aliasIdentity) => joinSpace({ name: 'anon', identity: aliasIdentity }) }
+);
+// aliasSpace kann jetzt AUCH gewöhnliche 'members'-ACL-Kinds schreiben - der Relay kennt den
+// Alias-Pubkey jetzt genau wie einen ganz normalen Space-Member.
+await aliasSpace.createNode(chatMessageKind, { text: 'anonym' });
+```
+
+`join` bekommt die abgeleitete Alias-Identität, liefert die aktuelle
+Mitgliederliste zurück (dieselbe Form, die `joinSpace()` ohnehin schon
+liefert) und wird zur `members`-Liste des Alias-Space. Ohne `join` bleibt
+das Verhalten wie vorher — der Alias ist dann auf self-certifying Kinds
+beschränkt.
+
+**Restrisiko, ehrlich benannt:** `bootstrapAliasSpace()` verlangt bewusst
+eine EIGENE Transport-Verbindung (nicht dieselbe wie die reale Identität) —
+aber ein Relay, der IP-Adresse/Socket-Timing mitprotokolliert, kann zwei
+Verbindungen von DERSELBEN Quelle trotzdem korrelieren, selbst wenn beide
+unterschiedliche Pubkeys verwenden. Identitäts-Pseudonymität löst das
+KRYPTOGRAFISCHE Verknüpfungsproblem (Inhalt/Signatur), nicht das
+NETZWERK-Korrelationsproblem — echte Transport-Unverknüpfbarkeit bräuchte
+unterschiedliche Netzwerkpfade (z. B. über ein künftiges Mesh, `docs/peer-
+transport-contract.md`'s §"Mesh" — nicht etwas, das dieses Dokument löst).
+
+## 2. Empfänger-Anonymität bei 1:n-Gruppen — FERTIG, als Plugin/Strategie
+
+**Befund (aus der vorletzten Runde):** für eine GEWÖHNLICHE `'members'`-
+Breitseite ist `envelope.to` kein neues Leck (die Mitgliederliste ist über
+`/members.json` ohnehin öffentlich). Sobald `field.set(value, {recipients})`
+aber auf eine Teilmenge einschränkt (Arbeitspaket 5's Gruppenverschlüsselung),
+verrät `envelope.to` dem Relay GENAU diese Teilmenge — der Inhalt bleibt
+geheim, aber "wer darf das hier lesen" nicht.
+
+**Umgesetzt, als austauschbares Plugin** (nicht hart verdrahtet — siehe
+"Welche Methode soll es sein" unten):
+
+- `@qu/core`'s `QuCrypto.encrypt()` hat jetzt einen optionalen
+  `paddingXPubKeys`-Parameter: jeder dort genannte Pubkey bekommt einen
+  `to`-Eintrag mit echten ZUFALLSBYTES statt eines echten gewrappten
+  Schlüssels — BYTE-GLEICHE Länge (48 Bytes, `contentKeyRaw.length + 16`
+  GCM-Tag, unabhängig vom Inhalt), also für einen Beobachter ohne den
+  passenden privaten Schlüssel nicht von einem echten Eintrag
+  unterscheidbar. `sealUpdate()` reicht diesen Parameter nur durch.
+- `@qu/space-core`'s `seal-strategies.js`: `sealStrategies.none` (Default,
+  unverändertes Verhalten) und `sealStrategies.padToMembers` (füllt
+  `envelope.to` auf die VOLLE aktuelle Space-Mitgliederliste auf) — pure,
+  synchrone Funktionen, registriert als **Plugin**: `Space`'s neuer
+  Konstruktor-Parameter `sealStrategy` (Default `sealStrategies.none`,
+  also 0 Verhaltensänderung für jeden, der nichts angibt).
+- `@qu/bootstrap`'s `'sealStrategy'`-Slot (`registerSealStrategyAdapters()`)
+  — genau dieselbe `{adapter: 'pad-to-members'}`-Auswahl wie bei
+  `storage`/`transport`, austauschbar ohne `Space`/`envelope.js`
+  anzufassen: eine dritte künftige Strategie (z. B. Padding auf eine FESTE
+  Anzahl statt die volle Mitgliederliste, für sehr große Spaces) ist reine
+  Ergänzung.
+
+```js
+import { bootstrapSpace } from '@qu/bootstrap';
+
+const { space } = await bootstrapSpace({
+  registry, identity, transport, members,
+  sealStrategy: { adapter: 'pad-to-members' }, // austauschbar, s. o.
+});
+await node.field('text').set('nur für Bob', { recipients: [bobXPub] });
+// envelope.to enthält jetzt IMMER alle Space-Mitglieder, nie nur Bob.
+```
+
+**Kosten, ehrlich benannt:** O(Mitgliederzahl) statt O(Empfängerzahl) Bytes
+pro eingeschränktem Write — ein Space mit 500 Mitgliedern zahlt für jede
+1:1-Nachricht das 500-fache an `to`-Einträgen. Für kleine/mittlere Spaces
+vernachlässigbar, für sehr große ein bewusster Tradeoff — genau deshalb als
+Plugin, nicht als einzige Option.
+
+**Warum diese Methode (Padding) statt Alias-Rotation (Abschnitt 3) gewählt
+wurde:** Padding schließt eine EINDEUTIG nachgewiesene, binäre Lücke
+vollständig (danach sieht der Relay IMMER die volle Mitgliederliste, nie
+die echte Teilmenge) und ist technisch lokal/mechanisch (eine Invariante:
+`envelope.to.length` ist nach Anwendung der Strategie immer
+`members.length`). Alias-Rotation (unten) verbessert etwas, das mit dem
+bereits fertigen statischen Alias schon gut gelöst ist, gegen ein eher
+theoretisches Langzeit-Korrelationsszenario — und selbst dann bleibt die
+Verbindungs-/IP-Ebene offen. Datenschutz-Nutzen pro Aufwand: Padding klar
+vorne. Für die ursprüngliche Mindestanforderung (Sender/Empfänger/Inhalt)
+war Padding zudem das letzte fehlende Stück — Alias-Rotation hätte nichts
+ZUSÄTZLICH aus dieser Anforderung gelöst.
+
+## 3. Alias-Rotation mit erhaltener Korrespondenz-Kette — VORGESCHLAGEN, noch nicht umgesetzt
+
+**Die Frage:** kann `Sender -> SenderAlias -> EmpfängerAlias -> Empfänger`
+gültig bleiben, auch wenn beide Seiten ihre Alias-Identität über die Zeit
+WECHSELN (rotierende Pseudonyme statt eines einzigen festen pro Space)?
+
+**Warum das heute bewusst NICHT geht:** `deriveAliasIdentity(identity,
+spaceId)` ist absichtlich STATISCH — "same real identity + same spaceId
+always yields the same alias" (siehe `alias.js`'s eigener Doc-Kommentar;
+`publishAlias()`'s Kommentar nennt Rotation explizit als "out of scope
+here"). Ein fester Alias ist für EINE Sache gut (Unverknüpfbarkeit
+ÜBER SPACES hinweg), aber schlecht für eine andere (Langzeit-Beobachtung
+INNERHALB eines Space — derselbe Alias-Pubkey über Monate ist selbst ein
+Korrelations-Anker, auch ohne dass der Relay je den echten Pubkey sieht).
+
+**Buildbares Design (Vorschlag):**
+
+1. **Epoch-basierte Re-Derivation.** `deriveAliasIdentity(identity, spaceId,
+   epoch)` — `epoch` fließt zusätzlich in die Domain-Separation ein (z. B.
+   `sha256("qu-space-alias-sign-v1:" + spaceId + ":" + epoch + ":" +
+   signingKey)`). Gleiche reale Identität + gleiche `spaceId` + gleiche
+   `epoch` → immer derselbe Alias (kein Extra-State nötig); ANDERE `epoch`
+   → ein für Dritte computational unverknüpfbarer neuer Alias, genau wie
+   heute schon zwischen unterschiedlichen `spaceId`s.
+2. **Handoff/Rotation-Ankündigung — der Teil, der die Kette erhält.** BEVOR
+   ein Alias "ausläuft", signiert und verschlüsselt er EINE Nachricht NUR
+   für den jeweiligen Korrespondenten (`field.set(..., {recipients:
+   [nurDieserKorrespondent]})` — exakt der bereits existierende
+   Gruppenverschlüsselungs-Mechanismus, zweckentfremdet für genau EINEN
+   Empfänger): "mein Nachfolger für dieses Gespräch ist `epoch+1`s
+   Alias-Pubkey = X." Der Korrespondent entschlüsselt das LOKAL, aktualisiert
+   seine eigene Zuordnung "Gespräch mit Bob läuft jetzt unter Alias X"
+   und schreibt künftig an die neue Adresse weiter.
+3. **Für einen externen Beobachter (Relay inklusive) ist die Rotation
+   UNSICHTBAR** — die Handoff-Nachricht sieht aus wie jeder andere
+   verschlüsselte Write; die Verknüpfung alter↔neuer Alias existiert nur
+   im entschlüsselten Klartext, den nur der eine Korrespondent je sieht.
+
+**Ehrliche Grenze dieses Vorschlags:** das löst Unverknüpfbarkeit auf
+INHALTS-/SIGNATUR-Ebene — es löst NICHT die Korrelation über
+Verbindungs-Metadaten (dieselbe Transport-Verbindung/IP über eine Rotation
+hinweg hinweg bleibt für den Relay korrelierbar, siehe Abschnitt 1's
+"Restrisiko"). Echte Unverknüpfbarkeit bräuchte zusätzlich einen
+Verbindungswechsel pro Rotation — das ist Transport-/Mesh-Arbeit (`docs/
+peer-transport-contract.md`), nicht etwas, das eine Identitäts-Rotation
+allein leisten kann. Dieser Vorschlag wird hier bewusst nur SKIZZIERT, noch
+nicht gebaut — **wartet auf explizite Freigabe**, da er ein neues
+Protokollverhalten (Handoff-Nachrichten-Format) einführt, das sorgfältig
+gegen Fehlnutzung (ein Angreifer, der eine FALSCHE Handoff-Nachricht
+unterschiebt) durchdacht werden muss, bevor Code entsteht.
+
+## Zusammenfassung: was jetzt nutzbar ist, was noch auf Freigabe wartet
+
+| # | Thema | Status |
+|---|---|---|
+| 1 | Sender-Anonymität (self-certifying Kinds) | **Fertig** — `bootstrapAliasSpace()` |
+| 1b | Sender-Anonymität (`'members'`-Mode) | **Fertig** — `bootstrapAliasSpace()`'s `join`-Hook, Deployment liefert nur den eigenen Join-Mechanismus |
+| 2 | Empfänger-Anonymität bei Gruppen (`envelope.to`-Padding) | **Fertig, als Plugin** — `Space`'s `sealStrategy` + `@qu/bootstrap`'s `'sealStrategy'`-Slot (`sealStrategies.padToMembers`) |
+| 3 | Alias-Rotation mit Korrespondenz-Kette | **Vorschlag**, wartet auf Freigabe (neues Protokollverhalten) |

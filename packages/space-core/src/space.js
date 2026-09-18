@@ -139,6 +139,7 @@ import { SpaceNode, stampMeta } from './node.js';
 import { sealUpdate, sealPublicUpdate, verifyEnvelope, openUpdate } from './envelope.js';
 import { deriveOwnerNodeId, deriveContentNodeId } from './kind-schema.js';
 import { signGrant, verifyGrant } from './grant.js';
+import { sealStrategies } from './seal-strategies.js';
 
 const REMOTE_ORIGIN = Symbol('space-core:remote-update');
 
@@ -188,8 +189,23 @@ export class Space {
    *   `storage` = optional; omitting it is the "flüchtig/memory-only" tier (see docs/v5-space-core-guide.md) - a Node still syncs live, nothing survives a reload. Used for every Kind EXCEPT a `persistence: 'volatile'` one (see `_storageFor()` below).
    *   `volatileStorage` = optional; the storage used for a `persistence: 'volatile'` Kind (e.g. `presenceKind`, see `presence.js`) regardless of what `storage` above is - defaults to a private in-memory adapter if omitted. Pass your own (e.g. a `sessionStorage`-backed one in a browser) to control exactly how/where "ephemeral" data lives, same swappable-adapter idea `storage` already offers for durable data.
    *   `bus` = optional - see this file's own doc comment for what gets emitted on it.
+   *   `sealStrategy` = optional, default `sealStrategies.none` (unchanged behavior from before this
+   *     param existed) - a pluggable, pure function deciding which ADDITIONAL member X25519
+   *     pubkeys get a padding (dummy, byte-indistinguishable) entry in an outgoing envelope's `to`
+   *     list, alongside the real recipients - see `seal-strategies.js`'s own doc comment and
+   *     docs/routing-anonymity.md. Pass `sealStrategies.padToMembers` to hide a
+   *     `{recipients}`-narrowed write's real audience from a relay/network observer.
    */
-  constructor({ identity, members, relayAdmins = [], transport, storage = null, volatileStorage = createInMemoryVolatileStore(), bus = null }) {
+  constructor({
+    identity,
+    members,
+    relayAdmins = [],
+    transport,
+    storage = null,
+    volatileStorage = createInMemoryVolatileStore(),
+    bus = null,
+    sealStrategy = sealStrategies.none,
+  }) {
     this._identity = identity;
     this._members = [...members]; // own copy - addMember() (see below) must never mutate the caller's own array out from under them.
     this._relayAdmins = new Set(relayAdmins.map((pub) => QuCrypto.toBase64(pub)));
@@ -197,6 +213,7 @@ export class Space {
     this._storage = storage;
     this._volatileStorage = volatileStorage;
     this._bus = bus;
+    this._sealStrategy = sealStrategy;
     /** @type {Map<string, SpaceNode>} */
     this._nodes = new Map();
     /** @type {Map<string, Set<string>>} nodeId -> Set<base64 Ed25519 pubkey> - 'named'-mode write-ACL state, 100% derived from verified `grant` messages (see grant.js), never invented. */
@@ -602,6 +619,11 @@ export class Space {
     const snapshotBytes = Y.encodeStateAsUpdate(gcDoc);
     gcDoc.destroy();
 
+    // No sealStrategy/padding here (unlike _handleLocalUpdate() above) - a compaction snapshot
+    // always seals for this Space's FULL current membership (this._recipientXPubKeys()), never a
+    // {recipients}-narrowed subset, so there is no "real audience smaller than the member list" to
+    // hide in the first place - sealStrategies.padToMembers would compute an empty padding set here
+    // anyway.
     const envelope =
       visibility === 'public'
         ? await sealPublicUpdate(snapshotBytes, this._identity, null, true)
@@ -807,10 +829,16 @@ export class Space {
     const notify = origin && typeof origin === 'object' ? origin.notify ?? null : null;
     const visibility = origin && typeof origin === 'object' ? origin.visibility ?? 'encrypted' : 'encrypted';
     const recipients = origin && typeof origin === 'object' ? origin.recipients ?? null : null;
+    const effectiveRecipients = this._effectiveRecipients(recipients);
+    // sealStrategy (constructor param, default sealStrategies.none - see seal-strategies.js's own
+    // doc comment) decides which OTHER members get a padding entry alongside the real recipients -
+    // only consulted for 'encrypted' mode: a 'public' write has no `to` list to pad in the first
+    // place (sealPublicUpdate() never takes recipients at all).
+    const paddingXPubKeys = visibility === 'public' ? [] : this._sealStrategy({ recipientXPubKeys: effectiveRecipients, memberXPubKeys: this._recipientXPubKeys() });
     const envelope =
       visibility === 'public'
         ? await sealPublicUpdate(update, this._identity, notify)
-        : await sealUpdate(update, this._identity, this._effectiveRecipients(recipients), notify);
+        : await sealUpdate(update, this._identity, effectiveRecipients, notify, false, paddingXPubKeys);
     await this._storageFor(node.kindSchema)?.append(nodeId, envelope);
     this._transport.send({ nodeId, envelope });
     this._bus?.emit('debug.space.write.local', { nodeId, kind: node.kind, bytes: update.length, notify });

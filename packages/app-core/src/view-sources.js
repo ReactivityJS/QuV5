@@ -19,18 +19,21 @@
  * (or an `itemTemplate`'s `<qu-slot>`) never has to know which source
  * type produced a given item just to read a common field off it.
  *
- * ONLY TWO ADAPTERS FOR NOW - `'pages'` (any `qu-route-registry` entry,
- * optionally filtered to routes starting with a given `prefix` - "a blog
- * is just pages under `/blog/`," this file's own top doc comment) and
- * `'shared-list'` (any `sharedListKind` list, kinds.js's own doc comment -
- * a guestbook). A `'collection'` adapter (`defineCollectionKind()`'s own
- * items) is real, natural future work, deliberately NOT built here yet:
- * unlike the two above, a Collection's `itemKind`/`registryKind` are
- * actual Kind-Schema OBJECTS a View's own plain-data `sources` field
- * cannot reference by name alone - it would need a caller-supplied
- * `{itemKind, registryKind}` LOOKUP TABLE keyed by some string the View
- * config names, a real but separate piece of plumbing, not a blocker for
- * the two sources already asked for.
+ * THREE ADAPTERS - `'pages'` (any `qu-route-registry` entry, optionally
+ * filtered to routes starting with a given `prefix` - "a blog is just
+ * pages under `/blog/`," this file's own top doc comment), `'shared-list'`
+ * (any `sharedListKind` list, kinds.js's own doc comment - a guestbook),
+ * and `'collection'` (any `defineCollectionKind()` collection - a blog's
+ * posts, a contact list, a forum's threads, "Blog-Posts usw." in the
+ * user's own framing - kinds.js's own `defineCollectionKind()` doc
+ * comment). Unlike the other two, a Collection's `itemKind`/`registryKind`
+ * are actual Kind-Schema OBJECTS a View's own plain-data `sources` field
+ * cannot reference by name alone (a View is app-agnostic Space data, it
+ * cannot import an app's own module to get them back) - so a `'collection'`
+ * source's `params` carries them directly (`{itemKind, registryKind,
+ * registryField}`, exactly `defineCollectionKind()`'s own return value,
+ * plus which of the item's own fields map onto the normalized shape - see
+ * that adapter's own doc comment below for the full parameter list).
  *
  * EACH ADAPTER'S `open()` returns `{read, observe, release}`:
  *   - `read()` - `async () => Array<NormalizedItem>` - the source's
@@ -47,7 +50,8 @@
  * change" is the entire point), and recomputes the merged/sorted/limited
  * result whenever ANY ONE of them fires.
  */
-import { deriveOwnerNodeId } from '@qu/space-core';
+import { QuCrypto } from '@qu/core';
+import { deriveOwnerNodeId, deriveContentNodeId } from '@qu/space-core';
 import { routeRegistryKind, sharedListKind, sharedListAnchor, adminRouteRegistryKind, globalAppAnchor } from './kinds.js';
 
 function normalize({ title = '', excerpt = '', route = null, timestamp = null, raw = null }) {
@@ -132,6 +136,116 @@ export const VIEW_SOURCE_ADAPTERS = {
       return { id, read, observe: (cb) => field.observe(cb), release };
     },
   },
+  /**
+   * @param {{itemKind: object, registryKind: object, registryField?: string, ownerPub?: Uint8Array|string, titleField?: string, excerptField?: string, routeField?: string, timestampField?: string}} params -
+   * `itemKind`/`registryKind`/`registryField` come straight from `kinds.js`'s `defineCollectionKind()`
+   * own return value (required - unlike `'pages'`/`'shared-list'`, there is no built-in Kind to fall
+   * back to; a Collection is entirely caller-defined). `ownerPub` (optional) defaults to this View's
+   * own `appAdminPub` - pass a different one to source someone ELSE's collection, same posture
+   * `'pages'`'s own `ownerPrefix` cross-app sourcing takes. `titleField`/`excerptField`/`routeField`/
+   * `timestampField` (all optional) name WHICH of the item's own caller-defined fields map onto the
+   * normalized shape (kinds.js's own doc comment: a Collection's fields are entirely up to the
+   * caller - "a blog post's `{title, author, publishedAt, tags, body}`" - so unlike `'pages'`/
+   * `'shared-list'`, there is no fixed convention this adapter could assume; omitting one simply
+   * leaves that normalized field at its default `''`/`null`). Every item's OWN full field set is
+   * still available via `item.raw` regardless of which of the four are mapped.
+   *
+   * LIVE at TWO levels, not just one (unlike every other source here): the registry's own item list
+   * (`resolver.js`'s `resolveCollectionItems()`'s same `{name: path}` entries) - an item being
+   * added/removed - AND each individual item's OWN Y.Doc (`node.doc`'s raw `'update'` event, not a
+   * single field's `observe()` - a Collection item has several caller-defined fields, and any one of
+   * them changing should recompute the feed, not just whichever one this adapter happens to map).
+   * Item subscriptions are opened lazily (as `read()` encounters them) and kept open, reference-
+   * counted at the `Space` level (`useNode()`), across recomputes - released all at once in
+   * `release()`, along with the registry's own. A brand-new item's OWN first sync is explicitly
+   * waited for (up to `itemSyncTimeout`, default 1500ms) the FIRST time `read()` encounters it -
+   * without this, `read()` would race the item's own subscribe reply exactly the way `openLiveView()`'s
+   * own `waitUntilSynced()` already prevents for a source's `id` itself, just one level deeper (a
+   * Collection item is a SEPARATE Node from its registry, unlike `'pages'`/`'shared-list'`, whose
+   * normalized fields already live inside the registry/list entry with nothing further to sync). A
+   * subsequent, still-unsynced edge case (arriving well past `itemSyncTimeout`) self-corrects the
+   * moment that item's sync actually lands regardless, since that itself is a `doc.on('update')`
+   * firing, triggering exactly one more recompute - same honest "only as good as what's synced
+   * locally, but keeps getting better" posture `setQuery()`'s own doc comment already accepts.
+   */
+  collection: {
+    async open(space, { appAdminPub }, params) {
+      const { itemKind, registryKind, registryField = 'items', ownerPub, titleField, excerptField, routeField, timestampField, itemSyncTimeout = 1500 } = params;
+      if (!itemKind || !registryKind) {
+        throw new Error('view-sources: \'collection\' source requires { itemKind, registryKind } - see defineCollectionKind()');
+      }
+      const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : appAdminPub;
+      const registryId = await deriveOwnerNodeId(owner, registryKind.kind);
+      const { node: registryNode, release: releaseRegistry } = await space.useNode(registryId, registryKind);
+      const registryListField = registryNode.field(registryField);
+
+      let notify = null; // set by observe() below - shared recompute trigger for BOTH the registry and every item.
+      /** @type {Map<string, {node: import('@qu/space-core').SpaceNode, release: () => void, onUpdate: () => void}>} path -> open item subscription. */
+      const itemSubs = new Map();
+
+      async function ensureItemOpen(path) {
+        const existing = itemSubs.get(path);
+        if (existing) return existing.node;
+        const itemId = await deriveContentNodeId(owner, itemKind.kind, path);
+        const { node: itemNode, release: releaseItem } = await space.useNode(itemId, itemKind);
+        const onUpdate = () => notify?.();
+        itemNode.doc.on('update', onUpdate);
+        itemSubs.set(path, { node: itemNode, release: releaseItem, onUpdate });
+        await waitUntilSynced(space, itemId, itemSyncTimeout); // see this adapter's own doc comment on why - only meaningful the FIRST time (a later call finds `existing` above and returns immediately).
+        return itemNode;
+      }
+
+      /** Releases any item subscription for a path no longer in the registry - a Collection item removed since the last read() must not leak its subscription forever. */
+      function releaseRemoved(currentPaths) {
+        for (const [path, sub] of itemSubs) {
+          if (currentPaths.has(path)) continue;
+          sub.node.doc.off('update', sub.onUpdate);
+          sub.release();
+          itemSubs.delete(path);
+        }
+      }
+
+      const read = async () => {
+        const entries = (await registryListField.toArray()).filter(Boolean);
+        releaseRemoved(new Set(entries.map((e) => e.name)));
+        return Promise.all(
+          entries.map(async (entry) => {
+            const itemNode = await ensureItemOpen(entry.name);
+            const raw = { path: entry.name };
+            for (const fieldName of itemNode.fieldNames()) raw[fieldName] = await itemNode.field(fieldName).get();
+            return normalize({
+              title: (titleField ? raw[titleField] : null) ?? '',
+              excerpt: (excerptField ? raw[excerptField] : null) ?? '',
+              route: (routeField ? raw[routeField] : null) ?? null,
+              timestamp: (timestampField ? raw[timestampField] : null) ?? null,
+              raw,
+            });
+          })
+        );
+      };
+
+      return {
+        id: registryId,
+        read,
+        observe(cb) {
+          notify = cb;
+          const unobserveRegistry = registryListField.observe(cb);
+          return () => {
+            unobserveRegistry();
+            notify = null;
+          };
+        },
+        release() {
+          for (const [, sub] of itemSubs) {
+            sub.node.doc.off('update', sub.onUpdate);
+            sub.release();
+          }
+          itemSubs.clear();
+          releaseRegistry();
+        },
+      };
+    },
+  },
 };
 
 /** Polls until `space.isNodeSynced(id)` (a subscribed relay has confirmed everything it currently has for `id` was delivered) or `timeout` elapses - see `Space.isNodeSynced()`'s own doc comment. `openLiveView()`'s own reason for needing this at all: `Space.useNode()` only awaits SENDING its subscribe request, never the relay's reply - reading a source's `read()` immediately after `open()` would otherwise race that reply and see an empty/stale snapshot on the FIRST recompute, indistinguishable from "this source is genuinely empty." */
@@ -213,8 +327,24 @@ export async function openLiveView(space, { appAdminPub, kinds, sources, sortBy 
   const listeners = new Set();
   const compare = compareBy(sortBy, sortOrder);
 
+  // STALE-RESULT GUARD: `recompute()` is called from every source's own `observe(cb)` callback
+  // (below) and is NEVER awaited there (an adapter's own change-notification is fire-and-forget,
+  // same posture `field.js`'s own write path already takes elsewhere in this codebase) - so two
+  // (or more) recompute() calls CAN genuinely overlap, e.g. a single logical Text-field edit
+  // sealing as TWO separate envelopes (delete then insert, `field.js`'s `TextField`), each firing
+  // its own `doc.on('update')` and therefore its own recompute(). Without this guard, whichever
+  // call happens to finish LAST wins - even if it started FIRST and is reading the now-STALE
+  // pre-edit state (a real, reproduced bug: a `'collection'` source's item-level watch surfaced
+  // this exact interleaving - see architecture.md's own Views section, "A STALE-RECOMPUTE RACE").
+  // `generation` makes
+  // "a NEWER recompute already started" detectable: a call whose own `read()` resolves after some
+  // LATER call already began discards its own (now-superseded) result instead of overwriting
+  // `current` with it.
+  let generation = 0;
   async function recompute() {
+    const thisGeneration = ++generation;
     const all = (await Promise.all(opened.map((o) => o.read()))).flat();
+    if (thisGeneration !== generation) return; // a newer recompute() started while this one's read() was in flight - stale, discard.
     const matched = query ? all.filter((item) => searchFields.some((f) => String(item[f] ?? '').toLowerCase().includes(query))) : all;
     if (compare) matched.sort(compare);
     current = limit != null ? matched.slice(0, limit) : matched;

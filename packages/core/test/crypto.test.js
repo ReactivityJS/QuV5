@@ -76,6 +76,40 @@ test('decrypt() fails for a recipient who was not on the original recipient list
   await assert.rejects(() => QuCrypto.decrypt(iv, ct, aliceEntry.key, sender.xPublicKey, eve.xPrivateKey));
 });
 
+test('encrypt(): a paddingXPubKeys entry gets a "to" entry of the SAME length as a real one, but it never decrypts', async () => {
+  const sender = await QuCrypto.generateKeypair();
+  const alice = await QuCrypto.generateKeypair();
+  const bob = await QuCrypto.generateKeypair(); // padding-only - never a real recipient.
+  const plaintext = new TextEncoder().encode('only for alice, bob is padding');
+
+  const { iv, ct, to } = await QuCrypto.encrypt(plaintext, [alice.xPublicKey], sender.xPrivateKey, [bob.xPublicKey]);
+  assert.equal(to.length, 2);
+
+  const aliceEntry = to.find((entry) => arraysEqual(entry.pub, alice.xPublicKey));
+  const bobEntry = to.find((entry) => arraysEqual(entry.pub, bob.xPublicKey));
+  assert.ok(aliceEntry);
+  assert.ok(bobEntry);
+  // Structurally indistinguishable - same byte length (see encrypt()'s own doc comment on why:
+  // a real wrapped key is always contentKeyRaw.length + 16 GCM-tag bytes, so a random blob of
+  // that same length looks identical without the matching private key).
+  assert.equal(bobEntry.key.length, aliceEntry.key.length);
+
+  // The real recipient still decrypts fine.
+  const decrypted = await QuCrypto.decrypt(iv, ct, aliceEntry.key, sender.xPublicKey, alice.xPrivateKey);
+  assert.equal(new TextDecoder().decode(decrypted), 'only for alice, bob is padding');
+
+  // The padding "recipient" can never decrypt it - same failure mode as any other non-recipient
+  // (random bytes fail AES-GCM's own authentication check).
+  await assert.rejects(() => QuCrypto.decrypt(iv, ct, bobEntry.key, sender.xPublicKey, bob.xPrivateKey));
+});
+
+test('encrypt(): omitting paddingXPubKeys is unchanged behavior - "to" has exactly the real recipients', async () => {
+  const sender = await QuCrypto.generateKeypair();
+  const alice = await QuCrypto.generateKeypair();
+  const { to } = await QuCrypto.encrypt(new TextEncoder().encode('x'), [alice.xPublicKey], sender.xPrivateKey);
+  assert.equal(to.length, 1);
+});
+
 test('sha256() matches the well-known NIST test vector for "abc"', async () => {
   const digest = await QuCrypto.sha256(new TextEncoder().encode('abc'));
   assert.equal(QuCrypto.toHex(digest), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');

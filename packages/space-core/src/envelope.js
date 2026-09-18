@@ -114,10 +114,16 @@ import { QuCrypto } from '@qu/core';
  *   itself has no Kind-Schema to check against). `to` (optional) is a list
  *   of base64 Ed25519 pubkeys narrowing which members this concerns (e.g.
  *   the @mentioned ones); omitted/empty means "every other space member."
+ * @param {boolean} [snapshot=false] - see this file's own "SNAPSHOT/COMPACTION" doc comment.
+ * @param {Array<Uint8Array>} [paddingXPubKeys] - OPTIONAL, default none (unchanged behavior):
+ *   passed straight through to `QuCrypto.encrypt()`'s own `paddingXPubKeys` param - see that
+ *   method's own doc comment. `Space`'s pluggable `sealStrategy` (`seal-strategies.js`,
+ *   docs/routing-anonymity.md) is what computes this in practice - this function itself has no
+ *   opinion on WHICH pubkeys get padded, only that it wires the param through.
  * @returns {Promise<object>} A plain, structurally-cloneable envelope - safe to hand to a Transport or a Storage adapter as-is.
  */
-export async function sealUpdate(update, sender, recipientXPubKeys, notify = null, snapshot = false) {
-  const { iv, ct, to } = await QuCrypto.encrypt(update, recipientXPubKeys, sender.xPrivateKey);
+export async function sealUpdate(update, sender, recipientXPubKeys, notify = null, snapshot = false, paddingXPubKeys = []) {
+  const { iv, ct, to } = await QuCrypto.encrypt(update, recipientXPubKeys, sender.xPrivateKey, paddingXPubKeys);
   const notifyBytes = encodeNotify(notify);
   const snapshotBytes = encodeSnapshotFlag(snapshot);
   const sigInput = concatBytes(concatBytes(concatBytes(iv, ct), notifyBytes), snapshotBytes);
@@ -212,7 +218,15 @@ function encodeNotify(notify) {
  *
  * `encrypted` mode: only a peer holding the matching X25519 private key
  * (i.e. an actual space member) can do this - a relay never can, by
- * construction (see verifyEnvelope's doc comment above).
+ * construction (see verifyEnvelope's doc comment above). Throws just as
+ * routinely for a PADDING entry (`@qu/core`'s `QuCrypto.encrypt()`'s own
+ * `paddingXPubKeys` param, `Space`'s `sealStrategy`, docs/routing-
+ * anonymity.md) - a member listed in `to` purely to hide the real
+ * recipient set's size gets a structurally-identical but genuinely random
+ * blob, which fails AES-GCM authentication exactly like any other
+ * undecryptable entry - this function cannot tell "not a real recipient"
+ * apart from "deliberately a padding target," by design: neither should
+ * be distinguishable from the other to whoever's asking.
  * `public` mode: no decryption key needed or checked - `envelope.data` IS
  * the plaintext, for anyone, by design (see this file's own doc comment).
  * @param {object} envelope

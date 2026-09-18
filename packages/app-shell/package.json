@@ -15,6 +15,7 @@
   "dependencies": {
     "@qu/app-core": "^0.1.0",
     "@qu/app-renderer": "^0.1.0",
+    "@qu/bootstrap": "^0.1.0",
     "@qu/core": "^0.1.0",
     "@qu/space-core": "^0.1.0",
     "@qu/space-components": "^0.1.0",
