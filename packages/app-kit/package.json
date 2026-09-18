@@ -1,0 +1,27 @@
+{
+  "name": "@qu/app-kit",
+  "version": "0.1.0",
+  "description": "Qu V5: createQuApp() - a batteries-included convenience wrapper over @qu/bootstrap for the common case (one call: identity+transport+storage adapters by name, an optional Kind-Schema map and DOM mount for Qu-Components, an optional WebRTC peer helper). Pure composition over already-tested primitives (AdapterRegistry, bootstrapSpace(), wrapWithSignaling(), createWebRTCPeer()) - never a new capability, always an escape hatch (registry/transport/an already-built identity) back to @qu/bootstrap directly. See docs/app-developer-guide.md.",
+  "type": "module",
+  "main": "src/browser.js",
+  "exports": {
+    ".": "./src/browser.js",
+    "./node": "./src/node.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/bootstrap": "^0.1.0",
+    "@qu/space-core": "^0.1.0",
+    "@qu/space-transport": "^0.1.0",
+    "@qu/space-components": "^0.1.0"
+  },
+  "peerDependencies": {
+    "@qu/space-storage": "^0.1.0",
+    "ws": "^8.18.0"
+  },
+  "peerDependenciesMeta": {
+    "@qu/space-storage": { "optional": true },
+    "ws": { "optional": true }
+  },
+  "license": "MIT"
+}

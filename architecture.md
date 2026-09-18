@@ -55,14 +55,15 @@ QuV5/
 │   ├── extensions/      @qu/extensions      - ExtensionPointHost: the plugin/composability registry (slots, actions, admin sections) apps contribute into and framework/UI code renders from
 │   ├── space-core/      @qu/space-core      - Space/Node/Field, envelopes, Kind-Schema, ACL, alias identities
 │   ├── space-storage/   @qu/space-storage   - storage adapters (memory/durable/file) a Space or relay mounts
-│   ├── space-transport/ @qu/space-transport - Transports (in-process/WebSocket), the Relay, federation
+│   ├── space-transport/ @qu/space-transport - Transports (in-process/WebSocket), the Relay, federation, optional WebRTC (relay-piggybacked signaling + createWebRTCPeer())
 │   ├── space-plugins/   @qu/space-plugins   - OPTIONAL app helpers: delivery-status (write-ack + read receipts), upload outbox, auto-compact-on-join
 │   ├── space-ui/        @qu/space-ui        - OPTIONAL vanilla-JS/DOM bindings: field bind, inline-edit, list-bind, upload-status
 │   ├── space-components/@qu/space-components- OPTIONAL declarative Custom Elements over @qu/space-ui: <qu-view>/<qu-bind>/<qu-list> - a CMS-authored template writes these as plain markup, no JS glue
 │   ├── app-core/        @qu/app-core        - App Runtime: Kind-Schemas for app content, content-addressed Node ids, ContentResolver, HashRouter, AppRuntime, Dev API
 │   ├── app-renderer/    @qu/app-renderer    - sanitizer, <qu-slot> resolution, style injection, renderPage() - Template+Page -> DOM
 │   ├── app-shell/       @qu/app-shell       - the minimal, application-agnostic bootstrap kernel a Relay serves; also its OWN production relay-server.js/Dockerfile (separate from @qu/space-transport's)
-│   └── bootstrap/       @qu/bootstrap       - the Mountpoint/Adapter-Registry: AdapterRegistry + bootstrapSpace() - declarative, named-adapter wiring of a Space's identity/transport/storage/volatileStorage (docs/bootstrap-adapter-registry.md)
+│   ├── bootstrap/       @qu/bootstrap       - the Mountpoint/Adapter-Registry: AdapterRegistry + bootstrapSpace() - declarative, named-adapter wiring of a Space's identity/transport/storage/volatileStorage (docs/bootstrap-adapter-registry.md)
+│   └── app-kit/         @qu/app-kit         - createQuApp(): a batteries-included convenience wrapper over @qu/bootstrap (docs/app-developer-guide.md §1.1) - one call, escape hatches back to @qu/bootstrap directly
 ├── demo/                 - runnable proofs: CLI chat, browser client, in-process auto-demo, app-shell-demo
 ├── docs/                 - docs/v5-space-core-guide.md (framework how-to), docs/app-shell-arbeitsauftrag.md (App Shell/Runtime design)
 └── architecture.md       - this file
@@ -367,6 +368,33 @@ compact function-by-function API reference (signatures, options, worked
 examples) for everything in this section - this section stays the WHY, that
 doc is the quick-lookup WHAT/HOW when actually writing code against it.
 
+**UPDATE - `@qu/app-kit`'s `createQuApp()`: a higher convenience layer ON
+TOP, not an alternative to, any of the above.** Every real caller still
+repeats the SAME several steps (construct a registry, register identity +
+one environment pack, resolve an identity, bootstrap, then hand
+`.quSpace`/`.quKinds` to some DOM element by hand) - `createQuApp(options)`
+collapses that into ONE call, pure composition (`registerIdentityStoreAdapters()`
++ `registerMemoryAdapters()` (always, zero-cost - tests/demos work with no
+extra registration) + one environment pack + `bootstrapSpace()`, nothing
+reimplemented). Two environment entries, the SAME split as `@qu/bootstrap`'s
+own adapter packs (`packages/app-kit/src/browser.js`/`node.js`): the browser
+entry additionally imports `@qu/space-components/elements` unconditionally
+(registers `<qu-view>`/`<qu-bind>`/`<qu-list>` with zero extra caller effort
+- "möglichst viel Qu-Components im HTML" is this package's whole second
+reason to exist, `docs/app-developer-guide.md` §2) and defaults
+`ensureUserProfile: true` (matches `@qu/app-shell`'s own real boot path);
+the Node entry never touches a DOM/`RTCPeerConnection` global at all -
+`mount`/`webrtc` throw loudly there rather than silently no-op'ing.
+`webrtc` (only when given: wraps the resolved transport via
+`wrapWithSignaling()`, §3.11, and returns `app.webrtc.connect(remotePub)`)
+is the one option that changes the RETURNED shape - "the instance grows
+only with what was actually requested," never a property sitting there
+`undefined` as a reminder of an unused feature. Every advanced escape hatch
+still works exactly as `bootstrapSpace()`'s own doc comment already
+promises - a pre-built `registry`/`transport`/`identity` object passed
+straight through, so a caller is never actually blocked by this
+convenience layer, only ever offered a shortcut past it.
+
 ### 3.8 Peer-User-Verwaltung: the User-Node
 
 `@qu/space-core`'s `user.js` (Arbeitspaket 5) is the GunDB-style "User-Node"
@@ -416,17 +444,16 @@ a resolved `transport` against the `Transport` contract
 at the bootstrap call site instead of as a cryptic `TypeError` deep inside
 `Space`.
 
-THIS IS WHERE A FUTURE WEBRTC TRANSPORT AND MESH ROUTING WOULD PLUG IN —
-deliberately not built yet, only the contract they'd target: a
-`RTCDataChannel`-backed transport is pure adapter work (implements the same
-three methods, registers under a name — zero core changes); a true mesh
-node (several simultaneous peer connections routing between each other)
-would need a thin layer ABOVE `Space` managing multiple `Transport`
-instances, the direct generalization of what `federation.js` already does
-for exactly two hops. A WebRTC SIGNALING relay (connection establishment —
-SDP/ICE exchange) is orthogonal to Qu's own content-mirroring Relay
-(`relay.js`) and would run as its own small protocol, never something
-`relay.js` itself needs to know about. None of this needs Yjs to change:
+THIS IS WHAT §3.11's WEBRTC MODULE PLUGS INTO — signaling and an
+app-initiated P2P peer connection are BUILT (§3.11); a WebRTC transport for
+`Space` ITSELF (1:1-P2P sync replacing the Relay for one hop) and true mesh
+routing (several simultaneous peer connections routing between each other)
+remain deliberately not built, only the contract they'd target: a
+`RTCDataChannel`-backed `Space` transport is pure adapter work (implements
+the same three methods, registers under a name — zero core changes); a true
+mesh node would need a thin layer ABOVE `Space` managing multiple
+`Transport` instances, the direct generalization of what `federation.js`
+already does for exactly two hops. None of this needs Yjs to change:
 the sealed Yjs update bytes (`Y.encodeStateAsUpdate()`/`Y.applyUpdate()`)
 are already transport-agnostic — see `docs/quv5-vs-quv3-decision.md`'s
 Status-Update on Arbeitspaket 3: Yjs stays the sole, primary sync basis (no
@@ -478,7 +505,77 @@ feature). THREE items, tracked by status:
     for an observer. Explicitly does NOT solve connection/timing-level
     correlation (the same transport connection/IP reused across a rotation
     is still correlatable) — that needs an actual connection change, future
-    Mesh/WebRTC-transport territory (§3.9), not an identity-layer fix.
+    Mesh/WebRTC-as-Space-transport territory (§3.9), not an identity-layer
+    fix. (§3.11's WebRTC module is a DIFFERENT, already-built thing — an
+    app-initiated P2P channel that deliberately reveals IP addresses to the
+    one other member it connects to, opted into explicitly per call, never
+    silently.)
+
+### 3.11 WebRTC: Signaling, Data-Channels, Audio/Video
+
+`docs/webrtc.md` — an OPTIONAL, App-initiiertes P2P-Modul auf `@qu/space-transport`,
+NOT a `Space` transport (§3.9's own "not built yet" stays accurate for
+that specific thing): a game's low-latency data channel, a voice/video
+call, opted into per call, with zero effect on a `Space` that never uses
+it. Three pieces:
+
+  - **`wrapWithSignaling(transport)`** (`webrtc-signaling.js`, browser- AND
+    node-safe — no browser globals) — wraps an existing `Transport` (e.g.
+    `WsClientTransport`) so SDP/ICE signaling can piggyback on the SAME
+    already-open relay connection a `Space` uses, with **zero changes to
+    `Space` itself**: since `Transport.onMessage()` is a single-listener
+    slot `Space` already claims, the wrapper claims the underlying
+    transport's OWN slot instead, forwards everything except
+    `{type:'rtc-signal'}` straight through unmodified, and routes THAT one
+    message type to its own `onSignal()` listeners (multi-listener, unlike
+    `onMessage()` — several concurrent `createWebRTCPeer()` calls, e.g.
+    several game opponents, each register their own). The wrapped object
+    passed to `bootstrapSpace()`/`new Space()` is itself a fully
+    Transport-contract-conforming object (§3.9) — Space never learns
+    `rtc-signal` exists as a concept.
+  - **Relay-side**: `relay.js` gained a sixth message shape,
+    `{type:'rtc-signal', to, signal}`, forwarded to whichever connection
+    `to`'s pubkey is CURRENTLY on (`PresenceTracker.peerIdFor()`, the
+    inverse of the `pubFor()` lookup `handleHello()` already populates).
+    `from` on the delivered message is NEVER the client's own claim — always
+    `presence.pubFor(fromPeerId)`, the same hello-derived trust `handleHello()`
+    already established, closing an impersonation vector a naive
+    "trust the payload" forward would have. Deliberately NEVER
+    mirrored/stored (unlike every write `relay.js` otherwise handles) — an
+    offline target's signal is silently dropped, on purpose: an SDP
+    offer/ICE candidate is meaningless outside the live negotiation it was
+    part of, so there is nothing legitimate to ever replay.
+  - **`createWebRTCPeer({signaling, identity, remotePub, iceServers})`**
+    (`webrtc-peer.js`, browser-only — `RTCPeerConnection` — own subpath
+    export like `ws-client-transport.js`) — negotiates ONE
+    `RTCPeerConnection` to one member via the signaling wrapper (standard
+    "Perfect Negotiation" glare handling: both sides independently compute
+    the SAME polite/impolite role via plain base64-pubkey string
+    comparison, no coordination needed), returning an instance an app holds
+    for the connection's lifetime: `createDataChannel()`/`onDataChannel()`,
+    `addTrack()`/`removeTrack()` (automatic renegotiation via the browser's
+    own `negotiationneeded` event — the app calls neither `createOffer()`
+    nor touches SDP directly), `setEnabled(kind, bool)` (cheap runtime
+    mute/unmute, no renegotiation — flips `track.enabled` only),
+    `onTrack()`/`onStateChange()`/`close()`. `RTCPeerConnectionImpl` is
+    injectable (default `globalThis.RTCPeerConnection`), the same DI
+    pattern `WsClientTransport`'s `WebSocketImpl` already uses — real logic
+    tests (`webrtc-peer.test.js`) inject a fake/double; only
+    `webrtc-browser-smoke.test.js` (Playwright + real Chromium, skips
+    cleanly when unavailable — `playwright` is a root-only devDependency,
+    no package depends on it at runtime) needs a real one. That smoke test
+    caught a genuine production bug the fake couldn't: a real
+    `RTCSessionDescription`'s `type`/`sdp` are prototype ACCESSORS, not
+    own-enumerable properties — `@qu/space-core`'s `encodeForWire()` (which
+    walks `Object.entries()` directly, needed elsewhere for tagging
+    `Uint8Array` fields) silently serialized a real offer/answer as `{}`;
+    fixed by sending a genuinely plain `{type, sdp}` object instead
+    (`toPlainDescription()`).
+  - **No default `iceServers`** — real P2P WebRTC ICE candidates tend to
+    reveal both peers' real IP addresses, even to a configured STUN/TURN
+    server, unlike the Relay-mediated Yjs sync path; a deliberate
+    per-call opt-in, never a silent default (`docs/webrtc.md`'s own
+    Datenschutz-Hinweis).
 
 ## 4. File-by-file map
 
@@ -553,14 +650,16 @@ envelope).
 | `src/in-process-transport.js` | `createInProcessHub()`, `InProcessTransport` — same-process transport for tests, star-shaped through a relay. |
 | `src/ws-server-hub.js` | `createWsServerHub(wss)` — the server-side hub over a real `ws` `WebSocketServer`. |
 | `src/ws-client-transport.js` | `WsClientTransport` — real WebSocket client, browser-safe (separate `exports` subpath, no `node:crypto`); now also auto-reconnect + `onStatusChange()` (§3.4). |
-| `src/relay.js` | `createRelayForwarder()` — the Relay itself: signature verification, subscriber-tracking, per-Kind durable/volatile mirroring (§3.4), `'named'`-ACL grant handling, push-notify routing, write-ack (§3.5), federation's `ingestFederated()` integration point. |
+| `src/relay.js` | `createRelayForwarder()` — the Relay itself: signature verification, subscriber-tracking, per-Kind durable/volatile mirroring (§3.4), `'named'`-ACL grant handling, push-notify routing, write-ack (§3.5), federation's `ingestFederated()` integration point, ephemeral `rtc-signal` forwarding (§3.11 — never mirrored, `from` always presence-authenticated). |
 | `src/federation.js` | `federateRelay()` — a relay as a subscribing peer of another relay. |
-| `src/presence-tracker.js` | `PresenceTracker` — pubkey ↔ peerId online/offline state, built from signed `hello` messages. |
+| `src/presence-tracker.js` | `PresenceTracker` — pubkey ↔ peerId online/offline state, built from signed `hello` messages; gained `peerIdFor(pubB64)` (§3.11 — the inverse of `pubFor()`, routes an `rtc-signal` to its live target connection). |
+| `src/webrtc-signaling.js` | `wrapWithSignaling(transport)` — piggybacks WebRTC SDP/ICE signaling on an existing Transport with zero `Space` changes (§3.11). Browser- AND node-safe. |
+| `src/webrtc-peer.js` | `createWebRTCPeer({signaling, identity, remotePub, iceServers})` — one negotiated `RTCPeerConnection` to one member, data channels + media + mute + auto-renegotiation (§3.11). Browser-only — own `exports` subpath, same reasoning as `ws-client-transport.js`. |
 | `src/push-handler.js` | `registerPushHandler(bus, {sendPush})` — reference delivery-channel handler for `relay.notify.**`. |
 | `src/relay-identity.js` | `loadOrCreateIdentity(filePath)`/`describeIdentity()` — a relay's own keypair, auto-generated on first boot and persisted (only needed for federation). |
 | `src/relay-app-server.js` | `createAppRequestHandler()` — the shared HTTP layer (static browser app, `GET /members.json`, `POST /join`) both `relay-server.js` and `demo/relay.mjs` serve alongside their WebSocket endpoint. |
 | `src/relay-server.js` | Standalone, env-var-configured relay process (`QU_*`, see its own doc comment; `--print-identity` CLI flag) — what the Dockerfile runs. Also serves an app (today, `demo/web/`) via `relay-app-server.js` — see its own "SERVES AN APP" doc comment. |
-| `src/index.js` | Package's public export surface (main entry — excludes `ws-client-transport.js`'s browser-safe subpath, see that file's own doc comment on why). |
+| `src/index.js` | Package's public export surface (main entry — excludes `ws-client-transport.js`'s and `webrtc-peer.js`'s own browser-only subpaths, see each file's own doc comment on why; DOES include `webrtc-signaling.js`'s `wrapWithSignaling()`, which is browser- and node-safe). |
 
 ### `packages/space-plugins/` — `@qu/space-plugins` (OPTIONAL)
 

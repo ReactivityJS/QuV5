@@ -46,7 +46,10 @@ standalone or via Docker).
   `@qu/space-transport`: in-process transport (for tests), a real WebSocket
   transport + relay (subscriber-tracking, node-level ACL enforcement,
   relay-to-relay federation), presence tracking, a pluggable
-  push-notification handler, and the relay's Docker deployment.
+  push-notification handler, the relay's Docker deployment, and an
+  OPTIONAL WebRTC module (relay-piggybacked signaling + `createWebRTCPeer()`
+  for an app-initiated P2P data/audio/video channel) - see
+  [`docs/webrtc.md`](./docs/webrtc.md).
 - [`packages/events`](./packages/events) - `@qu/events`: `EventBus`, a
   granular, dot-namespaced, wildcard-matching (`*`/`**`) pub/sub primitive -
   the ONE hooks/listeners/slots mechanism used for domain notifications,
@@ -101,6 +104,14 @@ standalone or via Docker).
   (design/motivation) and
   [`docs/bootstrap-api.md`](./docs/bootstrap-api.md) (full API reference with
   examples).
+- [`packages/app-kit`](./packages/app-kit) - `@qu/app-kit`: `createQuApp()`,
+  a batteries-included convenience wrapper over `@qu/bootstrap` for the
+  common case - one call, named options (identity/relay/storage by name, an
+  optional Kind-Schema map + DOM `mount` for Qu-Components, an optional
+  WebRTC `connect()` helper) - pure composition over already-tested
+  primitives, always with an escape hatch (`registry`/`transport`/an
+  already-built `identity`) back to `@qu/bootstrap` directly. See
+  `docs/app-developer-guide.md` §1.1.
 
 ## Development
 

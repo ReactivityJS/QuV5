@@ -7,7 +7,9 @@
   "exports": {
     ".": "./src/index.js",
     "./in-process-transport": "./src/in-process-transport.js",
-    "./ws-client-transport": "./src/ws-client-transport.js"
+    "./ws-client-transport": "./src/ws-client-transport.js",
+    "./webrtc-signaling": "./src/webrtc-signaling.js",
+    "./webrtc-peer": "./src/webrtc-peer.js"
   },
   "bin": {
     "qu-space-relay": "./src/relay-server.js"
