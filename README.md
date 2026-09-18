@@ -46,7 +46,10 @@ standalone or via Docker).
   `@qu/space-transport`: in-process transport (for tests), a real WebSocket
   transport + relay (subscriber-tracking, node-level ACL enforcement,
   relay-to-relay federation), presence tracking, a pluggable
-  push-notification handler, and the relay's Docker deployment.
+  push-notification handler, the relay's Docker deployment, and an
+  OPTIONAL WebRTC module (relay-piggybacked signaling + `createWebRTCPeer()`
+  for an app-initiated P2P data/audio/video channel) - see
+  [`docs/webrtc.md`](./docs/webrtc.md).
 - [`packages/events`](./packages/events) - `@qu/events`: `EventBus`, a
   granular, dot-namespaced, wildcard-matching (`*`/`**`) pub/sub primitive -
   the ONE hooks/listeners/slots mechanism used for domain notifications,

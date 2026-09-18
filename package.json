@@ -30,7 +30,8 @@
     "esbuild": "^0.25.0"
   },
   "devDependencies": {
-    "jsdom": "^25.0.1"
+    "jsdom": "^25.0.1",
+    "playwright": "^1.63.0"
   },
   "license": "MIT"
 }

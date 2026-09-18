@@ -51,4 +51,9 @@ export class PresenceTracker {
   pubFor(peerId) {
     return this.#pubByPeerId.get(peerId) ?? null;
   }
+
+  /** The exact inverse of `pubFor()` - which connection (if any) `pubB64` is CURRENTLY on. `null` if that pubkey isn't online at all. Added for `relay.js`'s own `rtc-signal` forwarding (`docs/webrtc.md`): routing a signal TO a specific member needs "which connection is that member on right now," the one lookup direction `isOnline()`/`pubFor()` didn't already cover. @param {string} pubB64 @returns {string|null} */
+  peerIdFor(pubB64) {
+    return this.#peerIdByPub.get(pubB64) ?? null;
+  }
 }

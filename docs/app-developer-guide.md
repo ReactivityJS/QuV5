@@ -1,11 +1,12 @@
 # App-Entwickler-Guide: Eine App mit Qu bauen
 
 Eine praxisnahe, grobe Anleitung: wie eine App das Framework tatsächlich
-nutzt — Bootstrap, Framework-API, deklarative Qu-Components im HTML, und
-(als Design-Vorschau) WebRTC. Für das WARUM/die Architektur siehe
-`architecture.md` (Gesamtüberblick) und `docs/bootstrap-api.md`
-(vollständige `@qu/bootstrap`-Referenz) — dieses Dokument ist der schnelle
-praktische Einstieg, keine vollständige API-Referenz.
+nutzt — Bootstrap, Framework-API (inkl. File-Handling), deklarative
+Qu-Components im HTML, und optionales WebRTC. Für das WARUM/die Architektur
+siehe `architecture.md` (Gesamtüberblick), `docs/bootstrap-api.md`
+(vollständige `@qu/bootstrap`-Referenz) und `docs/webrtc.md` (vollständige
+WebRTC-Referenz) — dieses Dokument ist der schnelle praktische Einstieg,
+keine vollständige API-Referenz.
 
 **Leitgedanke, der sich durch das ganze Framework zieht:** So viel wie
 möglich passiert deklarativ im HTML (Qu-Components binden sich selbst an
@@ -16,8 +17,9 @@ weitgehend die Qu-Components und den App-Shell/Renderer erledigen.
 ## Inhalt
 
 - [1. Framework-API](#1-framework-api)
+  - [1.6 Dateien: lokal speichern, syncen, teilen](#16-dateien-lokal-speichern-syncen-teilen)
 - [2. Qu-Components im HTML](#2-qu-components-im-html)
-- [3. WebRTC in einer App nutzen](#3-webrtc-in-einer-app-nutzen-design-noch-nicht-implementiert)
+- [3. WebRTC in einer App nutzen](#3-webrtc-in-einer-app-nutzen)
 - [4. Vollständiges Beispiel](#4-vollständiges-beispiel)
 
 ## 1. Framework-API
@@ -150,6 +152,77 @@ import { ensureUserProfile } from '@qu/space-core';
 await ensureUserProfile(space); // legt das eigene Profil an, falls es noch nicht existiert - idempotent
 ```
 
+### 1.6 Dateien: lokal speichern, syncen, teilen
+
+**Der zentrale Unterschied: Daten speichern ≠ Datei speichern.** Ein
+gewöhnliches Kind-Schema-Feld (Abschnitt 1.2) lebt IM Yjs-CRDT selbst —
+klein, strukturiert, jede Änderung ein neues signiertes (ggf.
+verschlüsseltes) Envelope, das der Relay mitschneidet/spiegelt. Das ist
+absichtlich UNGEEIGNET für eine große Binärdatei: der Relay leitet/spiegelt
+nur signierte Envelopes weiter, und Yjs' eigene Update-Historie kennt kein
+"ersetze/verwirf die alten Bytes" — für ein Foto oder Video würde die
+mitgeschnittene Historie unbegrenzt wachsen. Deshalb trennt `@qu/space-plugins`'
+`UploadOutbox` bewusst zwei Dinge:
+  - **METADATEN** (Name, Größe, Status, ...) — ein ganz normales,
+    self-certifying `'owner'`-ACL Kind-Schema-Feld, läuft über den exakt
+    gleichen Sync-Pfad wie jedes andere Feld.
+  - **DIE BYTES SELBST** — laufen NIEMALS durch Space/den Relay. Du gibst
+    `UploadOutbox` einen lokalen Store (fürs sofortige lokale Speichern)
+    und eine `upload()`-Funktion (wohin die Bytes tatsächlich gehen - ein
+    Objektspeicher, dein eigener Server, whatever) - das Framework
+    verwaltet nur die QUEUE/den Status, nie die Bytes selbst.
+
+```js
+import { UploadOutbox } from '@qu/space-plugins';
+
+// localStore: {save(id, blob), load(id), remove(id)} - z.B. IndexedDB im Browser, Filesystem in Node.
+const outbox = new UploadOutbox(
+  space,
+  indexedDbBlobStore,                              // lokal speichern
+  async (record, blob) => {                        // syncen - deine eigene Upload-Logik
+    const res = await fetch('https://your-object-store.example.com/upload', { method: 'POST', body: blob });
+    if (!res.ok) throw new Error('upload failed'); // wirft -> Record bleibt 'failed', retry(id) später möglich
+  },
+  space.bus                                        // optional: aktiviert den 'synced'-Status (relay-bestätigt, nicht nur "mein upload() ist fertig")
+);
+
+const fileId = await outbox.enqueue({ name: 'urlaub.jpg', size: blob.size, mimeType: 'image/jpeg' }, blob);
+// -> lokal SOFORT gespeichert + Metadaten geschrieben, sobald enqueue() resolved (Upload selbst läuft im Hintergrund)
+
+await outbox.watch(fileId, (record) => console.log(record.status));
+// 'pending' -> 'uploading' -> 'done' (eigener upload() fertig) -> 'synced' (Relay hat die Metadaten bestätigt)
+```
+
+**Teilen** ist KEIN eigener Mechanismus — es ist derselbe
+`recipients`-Trick, den "Groups and private/shared content" (README) schon
+für Seiten nutzt, nur angewendet auf eine Datei-REFERENZ statt auf Text:
+die Bytes liegen (über deine eigene `upload()`-Funktion) irgendwo extern,
+und was du tatsächlich "teilst" ist ein kleiner, für genau die gewünschten
+Empfänger verschlüsselter Datensatz (z. B. `{url, name, key?}` — `key?`,
+falls die Bytes selbst am Ablageort nochmal separat verschlüsselt sind):
+
+```js
+import { createPrivatePage } from '@qu/app-core';
+
+// nur `group.members` (deren xPub) kann das je entschlüsseln - der Relay sieht nur Ciphertext:
+await createPrivatePage(space, {
+  route: `/files/${fileId}`,
+  title: 'urlaub.jpg',
+  content: JSON.stringify({ url: uploadedUrl, name: 'urlaub.jpg' }),
+  recipients: group.members.map((m) => m.xPub),
+});
+```
+
+Empfangsbestätigung PRO Person (nicht nur "hochgeladen", sondern "diese
+Person hat es tatsächlich abgerufen"):
+
+```js
+import { markFileReceived, watchFileReceipts } from '@qu/space-plugins';
+
+await markFileReceived(receiverSpace, fileId);           // der Empfänger bestätigt
+const receipts = await watchFileReceipts(uploaderSpace, receiverPub); // der Uploader beobachtet live, wer schon hat
+```
+
 ## 2. Qu-Components im HTML
 
 `@qu/space-components` registriert drei Custom Elements
@@ -220,27 +293,27 @@ automatisch — ein neuer Post/Guestbook-Eintrag erscheint live, ohne Reload.
 <script type="module" src="/qu/app-shell.js"></script>
 ```
 
-## 3. WebRTC in einer App nutzen (Design, noch nicht implementiert)
-
-> **Status:** Die folgende API ist das in dieser Session abgestimmte
-> Design (Signaling huckepack über die bestehende Relay-Verbindung,
-> flüchtig/kein Storage; danach freie Nutzung von WebRTC direkt durch die
-> App). Der Code existiert noch nicht — dieser Abschnitt beschreibt die
-> geplante Nutzung, damit eine App schon heute dagegen entworfen werden
-> kann. Wird beim tatsächlichen Bau 1:1 hierher zurücksynchronisiert.
+## 3. WebRTC in einer App nutzen
 
 WebRTC ist bewusst KEIN Ersatz für den Space-eigenen Yjs-Sync (der bleibt
 Relay-vermittelt) — es ist ein rein optionales, App-initiiertes Modul für
 Fälle, die einen echten Echtzeit-P2P-Kanal brauchen: Spiele-Datenkanal,
-Sprach-/Videoanruf.
+Sprach-/Videoanruf. Volle Referenz: [`docs/webrtc.md`](./webrtc.md).
 
 ```js
+import { WsClientTransport } from '@qu/space-transport/ws-client-transport';
+import { wrapWithSignaling } from '@qu/space-transport/webrtc-signaling';
 import { createWebRTCPeer } from '@qu/space-transport/webrtc-peer';
 
-// Signaling läuft huckepack über die bereits offene Relay-Verbindung der Space -
-// die App braucht keinen zweiten Connect, kein eigenes Signaling-Protokoll.
+// Signaling läuft huckepack über die bereits offene Relay-Verbindung - dafür wird der Transport
+// VOR dem Bootstrap gewrappt und wie jeder andere Transport übergeben (Space merkt nichts davon):
+const signaling = wrapWithSignaling(new WsClientTransport('wss://your-relay.example.com'));
+const { space } = await bootstrapSpace({ registry, identity, transport: signaling, storage: { adapter: 'indexeddb' } });
+
+// Die App braucht keinen zweiten Connect, kein eigenes Signaling-Protokoll:
 const peer = await createWebRTCPeer({
-  space,                       // die schon verbundene Space von oben
+  signaling,                   // derselbe Wrapper von oben
+  identity,                    // die eigene Identität
   remotePub: otherUserPub,     // wen wir anrufen/verbinden wollen
   iceServers: [{ urls: 'stun:your-own-stun.example.com:3478' }], // KEIN Default - siehe Datenschutz-Hinweis unten
 });

@@ -118,21 +118,39 @@ Prüft bewusst NUR die drei PFLICHT-Methoden (`connect`/`send`/
 `onMessage`) — `onStatusChange`/`getPeerId`/`close` sind optional und
 werden nie verlangt.
 
-## Mesh, Signaling-Relays, WebRTC — wo dieser Vertrag hinführt (noch nicht gebaut)
+## Mesh, Signaling, WebRTC — wo dieser Vertrag hinführt
+
+> **Update:** Punkt 2 (Signaling) und ein eigenständiges (nicht in `Space`
+> eingehängtes) WebRTC-Peer-Modul sind inzwischen GEBAUT - siehe
+> [`docs/webrtc.md`](./webrtc.md) für die volle Referenz. Anders als
+> ursprünglich hier skizziert, läuft Signaling NICHT über einen separaten
+> Dienst, sondern huckepack über die bestehende Relay-Verbindung
+> (`@qu/space-transport`s `wrapWithSignaling()` + `relay.js`s neuer,
+> flüchtiger `rtc-signal`-Nachrichtentyp) - siehe die Begründung unten.
+> Punkt 1 (WebRTC als Space-eigener `transport`-Slot) und Punkt 3 (echtes
+> Mesh) bleiben wie hier beschrieben zurückgestellt.
 
 Drei Dinge, bewusst nicht verwechselt:
 
-1. **Ein WebRTC-Transport** ist reine Adapter-Arbeit (siehe oben) — ein
+1. **Ein WebRTC-Transport für `Space` selbst** (1:1-P2P-Sync statt über
+   Relay) ist reine Adapter-Arbeit (siehe oben) — ein
    `RTCDataChannel`-Wrapper, der `connect`/`send`/`onMessage` erfüllt,
    registriert sich wie `ws-client` unter einem Namen in der
-   Adapter-Registry. Kein Core-Code ändert sich.
-2. **Ein Signaling-Relay** (wer hilft zwei WebRTC-Peers, sich overhaupt zu
-   finden/SDP+ICE auszutauschen) ist ORTHOGONAL zu Qus eigenem Relay
-   (`relay.js`, das Node-Envelopes spiegelt/weiterleitet) — ein
-   eigenständiges, winziges Protokoll (Standard-WebRTC-Signaling, z. B. im
-   Stil von `y-webrtc`s eigenem Signaling-Server), das bei Bedarf NEBEN
-   dem bestehenden Relay-Prozess laufen kann, ohne dass `relay.js` selbst
-   etwas davon wissen muss.
+   Adapter-Registry. Kein Core-Code ändert sich. **Weiterhin nicht
+   gebaut** - `docs/webrtc.md`s `createWebRTCPeer()` ist bewusst ein
+   SEPARATES, App-initiiertes Modul, nicht in `Space`s eigenen Sync
+   eingehängt (siehe dessen "Was bewusst NICHT gebaut ist").
+2. **Signaling** (wer hilft zwei WebRTC-Peers, sich überhaupt zu finden/
+   SDP+ICE auszutauschen) - GEBAUT, siehe `docs/webrtc.md`. Statt eines
+   ORTHOGONALEN, eigenständigen Dienstes (die ursprünglich hier
+   erwogene, `y-webrtc`-artige Option) fiel die Wahl auf huckepack über
+   die bestehende Relay-WS-Verbindung: kein zweiter Connect, keine
+   zweite Infrastruktur, und `relay.js`s neuer `rtc-signal`-Typ bleibt
+   bewusst flüchtig (nie gemirrort/gespeichert) - der Relay bleibt
+   "blind" gegenüber dem eigentlichen Verhandlungsinhalt (`signal` ist
+   für ihn undurchsichtige Nutzlast), authentifiziert aber den Absender
+   über dieselbe `hello`-Signatur, die `handleHello()` ohnehin schon
+   prüft.
 3. **Echtes Mesh** (mehrere gleichzeitige Peer-Verbindungen EINES Knotens,
    der dann selbst weiterleitet) braucht mehr als nur einen neuen
    Transport — `Space` geht heute von GENAU EINEM Transport aus

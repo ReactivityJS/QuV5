@@ -130,6 +130,29 @@
  * writer's Space to a fresh session, same as `hello`/`subscribe` are
  * re-sent on every reconnect already.
  *
+ * A SIXTH shape, SIGNALING (WebRTC) - `docs/webrtc.md`: `{type:'rtc-signal',
+ * to, signal}`, routed to whichever connection the pubkey `to` is CURRENTLY
+ * on (`presence.peerIdFor()` - the inverse lookup of `presence.pubFor()`
+ * `handleHello()` already populates). `signal` is completely OPAQUE to this
+ * relay - an SDP offer/answer or ICE candidate, whatever the two peers'
+ * own WebRTC layer puts in it - this relay never parses or acts on its
+ * contents, purely a by-pubkey courier. `from` on the FORWARDED message is
+ * NEVER the sender's own claim (which a hostile client could forge to
+ * impersonate another member) but `presence.pubFor(fromPeerId)` - the same
+ * hello-derived trust `handleHello()` already established. DELIBERATELY
+ * NEVER MIRRORED/STORED (unlike every write above) - a peer currently
+ * offline simply never receives it, and reconnecting later replays
+ * NOTHING for this message type, on purpose: an ICE candidate/SDP offer is
+ * meaningless outside the live negotiation it was part of, so there is
+ * nothing legitimate to catch up on, only a growing, pointless log of
+ * connection attempts that could otherwise never expire. `to` currently
+ * offline (or `from` never having sent a valid `hello` at all) is a
+ * SILENT drop, not a rejection worth a `debug.relay.*` event - unlike a
+ * write/subscribe, there's no Node/ACL context to name, and a WebRTC
+ * negotiation failing silently because the other side isn't there yet is
+ * an entirely ordinary, expected outcome the calling app already has to
+ * handle (a connection timeout), not a protocol violation to surface here.
+ *
  * FEDERATION (`ingestFederated()` + the `relay.write.local` bus event, see
  * federation.js's own doc comment for the full mechanism): a relay
  * federates with another relay by being a SUBSCRIBING PEER to it -
@@ -340,6 +363,10 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
       await handleGrant(fromPeerId, message);
       return;
     }
+    if (message?.type === 'rtc-signal') {
+      handleRtcSignal(fromPeerId, message);
+      return;
+    }
     await handleWrite(fromPeerId, message);
   }
   hub.registerDisconnect?.((peerId) => {
@@ -503,6 +530,32 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
       if (peerId === fromPeerId) continue; // the owner already applied this to their own Space in grantWriter() - no need to echo it back.
       hub.deliverTo(peerId, fromPeerId, message);
     }
+  }
+
+  /**
+   * See this file's own "SIGNALING (WebRTC)" doc comment above. Forwards
+   * `{to, signal}` to whichever connection `to` is CURRENTLY on
+   * (`presence.peerIdFor()`) - `from` is NEVER taken from the message
+   * itself (a client could claim to be anyone), only from `presence.
+   * pubFor(fromPeerId)`, i.e. whatever pubkey THIS connection already
+   * proved possession of via its own signed `hello` - the same trust
+   * boundary `handleHello()` already established, reused rather than
+   * re-invented. A peer that never sent `hello` (or whose `hello` was
+   * rejected) has no entry in `presence` at all, so its signal is silently
+   * dropped - it was never routable to begin with, no debug event needed
+   * for what is, from this relay's perspective, an anonymous connection
+   * that tried to speak before introducing itself. `to` not currently
+   * online is likewise a silent drop (this is a LIVE-ONLY, deliberately
+   * un-mirrored message type - see this file's own top doc comment - a
+   * peer that comes online a moment later gets nothing to catch up on,
+   * exactly like a live write to a Node nobody is currently subscribed to).
+   */
+  function handleRtcSignal(fromPeerId, { to, signal }) {
+    const fromPubB64 = presence.pubFor(fromPeerId);
+    if (!fromPubB64 || !to) return;
+    const toPeerId = presence.peerIdFor(to);
+    if (!toPeerId) return;
+    hub.deliverTo(toPeerId, fromPeerId, { type: 'rtc-signal', from: fromPubB64, signal });
   }
 
   /**
