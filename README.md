@@ -18,7 +18,10 @@ platform code, and no backward-compatibility constraints during this build.
 **Start here:**
 [`architecture.md`](./architecture.md) is the bird's-eye map (repo
 layout, framework concept, file-by-file purpose, full API reference) —
-kept up to date with every architectural change. For the practical
+kept up to date with every architectural change. To actually build an app,
+see [`docs/app-developer-guide.md`](./docs/app-developer-guide.md) (a
+practical, example-driven walkthrough: bootstrap, Kind-Schema, Qu-Components
+in HTML, and how optional features like WebRTC plug in). For the practical
 how-to, see [`docs/v5-space-core-guide.md`](./docs/v5-space-core-guide.md)
 (the `Space`/`Node`/`Field` API, what's actually cryptographically
 enforced, the local-first query API, alias identities, compaction,
