@@ -73,7 +73,7 @@ import { registerApp, setAppMode, setAppBundleVersion, setAppConfig, setPlatform
 import { deriveOwnerNodeId } from '@qu/space-core';
 import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
 import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
-import { installForum } from '../forum-bundle.js';
+import { installForum, updateForum, FORUM_VERSION } from '../forum-bundle.js';
 import { installGlobalCms, cmsBundle } from '../cms-bundle.js';
 import { updateAdminConsole, ADMIN_CONSOLE_VERSION } from '../admin-console-bundle.js';
 import { verifyWritesAcked } from './verify-writes.js';
@@ -162,6 +162,8 @@ const APP_INSTALLERS = {
   forum: {
     label: 'Forum',
     install: installForum,
+    update: updateForum,
+    version: FORUM_VERSION,
     sharedLists: (prefix) => [`${prefix}:topics`, `${prefix}:replies`],
     viewNames: (prefix) => [`${prefix}-topics`],
   },

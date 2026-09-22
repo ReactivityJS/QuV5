@@ -1730,7 +1730,9 @@ nicht sichtbar." Two changes address this:
    pick up a NEW `admin-console-bundle.js` (this round's own "Editor-
    Einstellungen" checkbox included) short of re-running `bin/install-
    admin-console.mjs` from a terminal. Now it's the exact same in-app
-   affordance Guestbook/Blog/Forum already have:
+   affordance Guestbook/Blog already have (Forum's OWN version of this gap
+   - it had no `update`/`version` entry at all until a later round, see
+   this section's own "UPDATE - FORUM'S MISSING UPDATE PATH" note below):
    - `admin-console-bundle.js` gains `ADMIN_CONSOLE_VERSION` and
      `updateAdminConsole(space, {prefix})`, which re-applies this file's
      own `templates`/`pages` IN PLACE via two new `bundle-upsert.js`
@@ -1762,6 +1764,26 @@ nicht sichtbar." Two changes address this:
      own async tail work had settled let the stale first render win,
      overwriting the real page - fixed by awaiting the initial render
      before touching the registry at all, not a bug in the feature itself.
+
+**UPDATE - FORUM'S MISSING UPDATE PATH (a real, reported "404s on installed
+reference apps" cause).** Unlike Guestbook/Blog, `forum-bundle.js` shipped
+with `installForum()` only - no `FORUM_VERSION`, no `updateForum()`, and no
+`update`/`version` entry in `admin-actions.js`'s own `APP_INSTALLERS.forum`
+(the "Update verfügbar" button only ever renders when `installer.update` is
+set, `admin-actions.js`'s own doc comment above). Practical consequence: an
+already-installed Forum had NO admin-triggered remediation path at all -
+once `forum-bundle.js`'s own shipped content changed (a fixed field, a new
+View), every existing Forum installation stayed frozen at whatever it
+looked like the moment it was installed, forever, with no button to ever
+appear. Fixed the same way Guestbook/Blog's own gap gets closed each time
+their bundles change: `forum-bundle.js` gained `FORUM_VERSION` +
+`updateForum()` (re-applies `globalPageFields()`/`topicsViewFields()` via
+the SAME `upsertGlobalPage()`/`upsertGlobalView()` helpers `installForum()`
+already used - `installForum()` itself needed NO change, it was already
+upsert-based), wired into `APP_INSTALLERS.forum` exactly like every other
+entry. Verified with the SAME end-to-end pattern the Guestbook test above
+already establishes (register with `bundleVersion: 0`, click "Update
+verfügbar", confirm it clears and `bundleVersion` becomes `FORUM_VERSION`).
 
 **UPDATE - ADMIN CONSOLE EATS ITS OWN DOG FOOD (`admin-actions.js`'s
 installed-apps list).** The app list used to be its own bespoke "clear

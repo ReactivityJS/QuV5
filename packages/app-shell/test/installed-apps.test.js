@@ -611,6 +611,43 @@ test('Guestbook: the admin console\'s "Update verfügbar" button re-applies the 
   }
 });
 
+test('Forum: the admin console\'s "Update verfügbar" button re-applies the bundle\'s current content and clears itself once done', async () => {
+  // Mirrors the Guestbook test right above verbatim - Forum previously had NO update path at all
+  // (no FORUM_VERSION/updateForum(), a real gap: an installed Forum could never receive a later
+  // content fix via the admin console). This is the regression test for that gap being closed.
+  const relay = await bootRelay();
+  try {
+    const adminSpace = await relay.connect(relay.relayAdmin);
+    const { mountEl, router, platform } = mountAdmin(adminSpace);
+    await installViaForm(mountEl, 'forum', 'talk');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    await setAppBundleVersion(adminSpace, { prefix: 'talk', bundleVersion: 0 });
+    router.navigate('/admin/');
+    await waitUntil(() => mountEl.querySelector('[data-qu-bind="platform-apps-list"] li'));
+
+    function talkListItem() {
+      return [...mountEl.querySelectorAll('[data-qu-bind="platform-apps-list"] li')].find((li) => li.textContent.includes('#/talk'));
+    }
+    await waitUntil(() => [...(talkListItem()?.querySelectorAll('button') ?? [])].some((b) => b.textContent === 'Update verfügbar'));
+    let li = talkListItem();
+    const updateBtn = [...li.querySelectorAll('button')].find((b) => b.textContent === 'Update verfügbar');
+    assert.ok(updateBtn, '"Update verfügbar" shows for Forum too, once its registered bundleVersion (0) is behind the bundle\'s own current version');
+    updateBtn.dispatchEvent(new mountEl.ownerDocument.defaultView.Event('click', { bubbles: true, cancelable: true }));
+
+    await waitUntil(() => ![...(talkListItem()?.querySelectorAll('button') ?? [])].some((b) => b.textContent === 'Update verfügbar'), { timeout: 4000 });
+    assert.ok(!talkListItem()?.querySelector('[data-qu-status]')?.textContent, 'no error surfaced - the update actually succeeded');
+
+    const apps = await platform.resolveApps({ timeout: 1000 });
+    const talk = apps.find((a) => a.prefix === 'talk');
+    assert.equal(talk.bundleVersion, 1, 'setAppBundleVersion() recorded the bundle\'s own current version after the update');
+
+    router.stop();
+  } finally {
+    await relay.close();
+  }
+});
+
 test('Admin console: once registered with appType:"admin-console" (the one-time backfill), its OWN "Update verfügbar" button re-applies admin-console-bundle.js\'s current content in place', async () => {
   const relay = await bootRelay();
   try {

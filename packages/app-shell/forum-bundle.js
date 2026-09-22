@@ -39,6 +39,9 @@
 import { publishGlobalRoute } from '@qu/app-core';
 import { upsertGlobalPage, upsertGlobalView } from './bundle-upsert.js';
 
+/** Bumped whenever this bundle's own shipped content changes - see `guestbook-bundle.js`'s own `GUESTBOOK_VERSION` doc comment, identical reasoning. Previously MISSING entirely (a real, reported gap: an already-installed Forum had no "Update verfügbar" path at all, `admin-actions.js`'s own button only renders when `APP_INSTALLERS[appType].update` is set) - `installForum()` already used the same upsert-based helpers `updateForum()` below needs, so closing this gap needed no change to `installForum()` itself, only the missing update entry point. */
+export const FORUM_VERSION = 1;
+
 function globalPageFields(prefix) {
   return {
     route: '/',
@@ -93,6 +96,24 @@ function topicsViewFields(prefix) {
 export async function installForum(space, { prefix }) {
   await publishGlobalRoute(space, prefix, { route: '/', title: 'Forum' });
   await new Promise((resolve) => setTimeout(resolve, 400));
+  await upsertGlobalPage(space, prefix, globalPageFields(prefix));
+  await upsertGlobalView(space, prefix, topicsViewFields(prefix));
+}
+
+/**
+ * Re-applies this bundle's own GLOBAL content in place - the admin
+ * console's own "Update verfügbar" button (`admin-actions.js`'s own doc
+ * comment) calls this for an ALREADY-installed prefix, via `bundle-
+ * upsert.js`'s edit-with-create-fallback helpers - safe on existing
+ * content, unlike a raw `createGlobalPage()`/`createGlobalView()` call
+ * would be (this file's own top doc comment has the full "why upsert, not
+ * a blind create" reasoning, identical to `installForum()` above). Never
+ * touches `${prefix}:topics`/`${prefix}:replies` or any member's own
+ * topics/replies already posted into them - only the page/View
+ * DEFINITIONS this bundle itself owns.
+ */
+export async function updateForum(space, { prefix }) {
+  await publishGlobalRoute(space, prefix, { route: '/', title: 'Forum' }); // harmless no-op re-publish - publishGlobalRoute()'s own "deduplicates by route" doc comment.
   await upsertGlobalPage(space, prefix, globalPageFields(prefix));
   await upsertGlobalView(space, prefix, topicsViewFields(prefix));
 }
