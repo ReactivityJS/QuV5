@@ -11,11 +11,11 @@
  * consistent with every other global app's content, and arguably more
  * useful than the old "only the exact identity that installed it" default.
  *
- * INSTALL vs. UPDATE, DELIBERATELY SEPARATE CODE PATHS - see
- * `guestbook-bundle.js`'s own top doc comment for the full "why never
- * routed through installX()" reasoning (identical here: routing install
- * through the upsert-based update once made every fresh install pay a
- * multi-second doomed-`edit()` cost for no benefit).
+ * BUILT ON `./app-bundle.js`'s `defineAppBundle()` — see that file's own
+ * top doc comment for the full "install/update generated from ONE content
+ * declaration, never two hand-written functions that can drift apart"
+ * design (and the real "Forum shipped install but no update at all" bug it
+ * closes for good).
  *
  * UPDATE - `mode: 'personal'`'s own aggregate feed now exists: unlike
  * Guestbook, a Blog post is a self-owned PAGE, not a shared-list entry, so
@@ -109,8 +109,7 @@
  * `blog-actions.js`'s own `wireBlog()` doc comment for how a form actually
  * resolves this at submit time.
  */
-import { publishGlobalRoute, createPage, publishRoute, createView } from '@qu/app-core';
-import { upsertGlobalPage, upsertGlobalView, upsertPage, upsertView } from './bundle-upsert.js';
+import { defineAppBundle } from './app-bundle.js';
 import { ROUTE_SCHEMES } from './src/qu-placeholders.js';
 
 /** Bumped whenever this bundle's own shipped content changes - see `guestbook-bundle.js`'s own `GUESTBOOK_VERSION` doc comment, identical reasoning. */
@@ -167,62 +166,23 @@ function aggregateFeedViewFields(prefix) {
 }
 
 /**
- * @param {import('@qu/space-core').Space} space @param {{prefix: string, routeScheme?: 'flat'|'yyyy'|'yyyy/mm'|'yyyy/mm/dd'}} params
- *
- * UPSERT, NOT A BLIND `create*()` - see `guestbook-bundle.js`'s `installGuestbook()` own doc
- * comment for the full "Deinstallieren + reinstall" bug this fixes (identical reasoning here): a
- * real, reported failure where Blog's own feed/post pages 404ed after "Deinstallieren" followed by
- * reinstalling the SAME prefix, because the underlying page/View ids were never actually freed.
- */
-export async function installBlog(space, { prefix, routeScheme }) {
-  await publishGlobalRoute(space, prefix, { route: '/', title: 'Blog' });
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  await upsertGlobalPage(space, prefix, globalPageFields(prefix, routeScheme));
-  await upsertGlobalView(space, prefix, globalIndexViewFields(prefix));
-  await upsertGlobalView(space, prefix, aggregateFeedViewFields(prefix));
-}
-
-/**
- * Re-applies this bundle's own GLOBAL content in place - see
- * `guestbook-bundle.js`'s `updateGuestbook()` own doc comment for the full
- * "why upsert, why never routed through installX()" reasoning, identical
- * here. Never touches any already-published POST (a `realm: 'global'`
- * app's post is its own `adminPageKind` entry at its own route, untouched
- * by this - only the index page/View DEFINITIONS this bundle itself owns).
- * `routeScheme` should be the SAME value this app was installed/last
- * configured with (`admin-actions.js`'s own "Update verfügbar" button reads
- * it back off `app.config` and passes it straight through) - passing a
- * DIFFERENT one only changes the form's own template for POSTS PUBLISHED
- * AFTER this call; it never migrates already-published routes (the same
- * "no rename support" scope cut every other `updateX()`/`editX()` in this
- * codebase already accepts).
- */
-export async function updateBlog(space, { prefix, routeScheme }) {
-  await publishGlobalRoute(space, prefix, { route: '/', title: 'Blog' });
-  await upsertGlobalPage(space, prefix, globalPageFields(prefix, routeScheme));
-  await upsertGlobalView(space, prefix, globalIndexViewFields(prefix));
-  await upsertGlobalView(space, prefix, aggregateFeedViewFields(prefix));
-}
-
-/**
  * A VISITOR'S OWN PERSONAL BLOG — "not instead of the global one, an
  * ADDITIONAL corner alongside it," self-provisioned the first time this
  * identity reaches its own `#/<prefix>/u/me/` - see `guestbook-bundle.js`'s
- * `installPersonalGuestbook()` own top doc comment for the full "why
- * ADDITIVE, why prefixed" reasoning, identical here. Self-owned
- * `pageKind`/`viewKind` this time (unlike Guestbook's shared-list problem,
- * a Blog POST is already inherently per-owner-scoped - `deriveContentNodeId
- * (ownerPub, 'qu-page', route)` - so two different visitors' own posts can
- * never collide even without any extra tagging), at route `/<prefix>/`
- * with posts under `/<prefix>/post/<slug>` - PREFIXED, so this identity's
- * personal Blog coexists with its own "Mein Bereich" root and any OTHER
- * app's own personal instance, rather than colliding with either.
- * `blog-actions.js`'s `wireBlog()` reads the form's own `data-qu-mode`
- * attribute (set here, absent from the GLOBAL blog's own form) to know it
- * must publish through the self-owned `createPage()`/`publishRoute()` Dev
- * API instead of the global `createGlobalPage()`/`publishGlobalRoute()`
- * pair, at this PREFIXED route instead of the bare `/post/<slug>` the
- * global blog uses.
+ * own top doc comment for the full "why ADDITIVE, why prefixed" reasoning,
+ * identical here. Self-owned `pageKind`/`viewKind` this time (unlike
+ * Guestbook's shared-list problem, a Blog POST is already inherently
+ * per-owner-scoped - `deriveContentNodeId(ownerPub, 'qu-page', route)` - so
+ * two different visitors' own posts can never collide even without any
+ * extra tagging), at route `/<prefix>/` with posts under
+ * `/<prefix>/post/<slug>` - PREFIXED, so this identity's personal Blog
+ * coexists with its own "Mein Bereich" root and any OTHER app's own
+ * personal instance, rather than colliding with either. `blog-actions.js`'s
+ * `wireBlog()` reads the form's own `data-qu-mode` attribute (set here,
+ * absent from the GLOBAL blog's own form) to know it must publish through
+ * the self-owned `createPage()`/`publishRoute()` Dev API instead of the
+ * global `createGlobalPage()`/`publishGlobalRoute()` pair, at this
+ * PREFIXED route instead of the bare `/post/<slug>` the global blog uses.
  */
 function personalPageFields(prefix, routeScheme) {
   const template = `/${prefix}${routeTemplate(routeScheme)}`;
@@ -250,32 +210,31 @@ function personalIndexViewFields(prefix) {
   return { name: `${prefix}-personal-index`, sources: [{ type: 'pages', prefix: `/${prefix}/post/` }], sortBy: 'title', sortOrder: 'asc', itemTemplate: PERSONAL_ITEM_TEMPLATE };
 }
 
-/**
- * `routeScheme` (optional) - the SAME `qu-placeholders.js` scheme name the
- * GLOBAL blog was installed/configured with (`installed-apps-actions.js`'s
- * `provisionPersonalInstance()` threads `match.config` down to here, `boot.js`'s
- * own `platformAppsKind.config` doc comment) - a visitor's own personal blog
- * follows the SAME dated-or-flat convention the relay-admin picked for the
- * site overall, rather than needing its own separate setting.
- */
-export async function installPersonalBlog(space, { prefix, routeScheme }) {
-  const route = `/${prefix}/`;
-  await createPage(space, personalPageFields(prefix, routeScheme));
-  await publishRoute(space, { route, title: 'Mein Blog' });
-  await createView(space, personalIndexViewFields(prefix));
-}
+export const blogBundle = defineAppBundle({
+  key: 'blog',
+  label: 'Blog',
+  version: BLOG_VERSION,
+  route: { title: 'Blog' },
+  content: (prefix, { routeScheme } = {}) => [
+    { kind: 'page', fields: globalPageFields(prefix, routeScheme) },
+    { kind: 'view', fields: globalIndexViewFields(prefix) },
+    { kind: 'view', fields: aggregateFeedViewFields(prefix) },
+  ],
+  personal: {
+    title: 'Mein Blog',
+    content: (prefix, { routeScheme } = {}) => [
+      { kind: 'page', fields: personalPageFields(prefix, routeScheme) },
+      { kind: 'view', fields: personalIndexViewFields(prefix) },
+    ],
+  },
+  sharedLists: (prefix) => [`${prefix}:personal`],
+  viewNames: (prefix) => [`${prefix}-index`, `${prefix}-aggregate-feed`],
+});
 
-/**
- * Re-applies THIS VISITOR's own personal blog content in place - see
- * `guestbook-bundle.js`'s `updatePersonalGuestbook()` own doc comment for
- * the full "why upsert, self-service, stamped version, never routed
- * through installX()" reasoning, identical here. Never touches any
- * already-published personal post. `routeScheme` - see `installPersonalBlog()`'s
- * own doc comment.
- */
-export async function updatePersonalBlog(space, { prefix, routeScheme }) {
-  const route = `/${prefix}/`;
-  await upsertPage(space, personalPageFields(prefix, routeScheme));
-  await publishRoute(space, { route, title: 'Mein Blog' });
-  await upsertView(space, personalIndexViewFields(prefix));
-}
+// Thin named re-exports - every EXISTING caller (admin-actions.js/installed-apps-actions.js, both
+// mid-migration to reading `blogBundle` directly - see app-bundle.js's own top doc comment) keeps
+// working unchanged until that migration lands.
+export const installBlog = blogBundle.install;
+export const updateBlog = blogBundle.update;
+export const installPersonalBlog = blogBundle.personal.install;
+export const updatePersonalBlog = blogBundle.personal.update;
