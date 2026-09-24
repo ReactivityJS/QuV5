@@ -71,11 +71,8 @@
 import { QuCrypto } from '@qu/core';
 import { registerApp, setAppMode, setAppBundleVersion, setAppConfig, setPlatformConfig, addSharedLists, addGlobalTemplateNames, unregisterApp, nullGlobalAppContent, platformAppsKind, PLATFORM_REGISTRY_ANCHOR } from '@qu/app-core';
 import { deriveOwnerNodeId } from '@qu/space-core';
-import { installGuestbook, updateGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
-import { installBlog, updateBlog, BLOG_VERSION } from '../blog-bundle.js';
-import { installForum, updateForum, FORUM_VERSION } from '../forum-bundle.js';
 import { installGlobalCms, cmsBundle } from '../cms-bundle.js';
-import { updateAdminConsole, ADMIN_CONSOLE_VERSION } from '../admin-console-bundle.js';
+import { REFERENCE_APP_BUNDLES_BY_KEY } from '../reference-apps.js';
 import { verifyWritesAcked } from './verify-writes.js';
 import { discoveredApps } from '../apps-registry.generated.js';
 import { setFormStatus } from './form-status.js';
@@ -87,107 +84,18 @@ import { bindList } from '@qu/space-ui';
 const MODE_LABELS = { off: 'Aus', global: 'Global', multiuser: 'Multi-User', personal: 'Nur Persönlich' };
 
 /**
- * ONE-CLICK REFERENCE APP INSTALLERS — each entry pairs a bundle's own
- * `installX(space, {prefix})` (the same function an operator's install
- * script would otherwise call by hand) with the `sharedLists` a
- * `registerApp()` call for it must declare (`dev.js`'s own doc comment on
- * why: a `'members'`-ACL shared list's name has to be known to the relay
- * BEFORE any write to it can be classified, and these apps' shared lists
- * are only chosen here, at install time, under a relay-admin-picked
- * prefix). `label` doubles as the registered app's `name`.
- *
- * `realm: 'global'`, NOT the default `realm: 'main'` - the SAME identity
- * (whoever is currently signed in as a relay-admin, running this form) is
- * what would otherwise install EVERY one of these reference apps, and a
- * `realm: 'main'` app is content-addressed by (owner identity, kind, path)
- * alone - installing Gästebuch, Blog, AND Forum this way would derive the
- * EXACT SAME id for every one of their own index pages, each install
- * silently clobbering the last (a real, observed bug: all three prefixes
- * ending up showing whichever app's write happened to win). `realm:
- * 'global'` apps are anchored on their own PREFIX instead
- * (`globalAppAnchor()`, `guestbook-bundle.js`'s own top doc comment has the
- * full story) - collision-free by construction, no matter how many are
- * installed from the same session - and, as a bonus, they get the SAME
- * mode toggle (`MODE_LABELS` below) and "Verwalten"/"Besuchen" links every
- * other global app already has, for free.
- *
- * `personalBundle` (Gästebuch/Blog only, omitted for Forum - see
- * `installed-apps-actions.js`'s own `PERSONAL_INSTALLERS` doc comment on
- * why) tags this prefix so `boot.js`'s own ADDITIVE `/u/<ref>/` route
- * (alongside the global one, never instead of it) knows which reference
- * app's personal-instance installer to self-provision the first time a
- * visitor reaches `#/<prefix>/u/me/` - `dev.js`'s `registerApp()` own doc
- * comment on the field. Gästebuch's `sharedLists` here ALSO includes
- * `<prefix>:personal` upfront - `installPersonalGuestbook()`'s own doc
- * comment on why: unlike the global list (`prefix` itself), a per-visitor
- * personal guestbook's own list name can't be known until someone actually
- * self-provisions one, so ALL of them share this ONE, pre-registered list
- * instead, filtered per owner. Gästebuch's `viewNames` ALSO includes
- * `<prefix>-aggregate-feed` - `guestbook-bundle.js`'s `updateGuestbook()`'s
- * own doc comment on why `mode: 'personal'` needs it - a View the relay
- * must be told about upfront exactly like any other (`globalViewNames`'s
- * own doc comment in `dev.js`).
- *
- * `key` (this map's own key, e.g. `'guestbook'`) is ALSO stored as this
- * prefix's `appType` at registration time - the admin console's own way of
- * later finding this SAME entry again for an already-registered app (the
- * "Update verfügbar" button below), without the registry itself needing to
- * know anything about specific reference apps.
- *
- * `version`/`update` - this bundle's own CURRENT version constant and its
- * idempotent re-apply function (`guestbook-bundle.js`/`blog-bundle.js`'s
- * own `updateX()` doc comments - upsert-based, safe to call on an already-
- * installed prefix). Compared against a registered entry's own stored
- * `bundleVersion` to decide whether "Update verfügbar" shows at all.
+ * `REFERENCE_APP_BUNDLES_BY_KEY` (`../reference-apps.js`) IS `APP_INSTALLERS`
+ * now - every `defineAppBundle()` descriptor already has exactly the shape
+ * this file needs (`label`/`install?`/`update`/`version`/`sharedLists?`/
+ * `viewNames?`/`personalBundle?`/`bareRouteModes`), so there is nothing
+ * left to assemble by hand here any more. `key` (each bundle's own,
+ * e.g. `'guestbook'`) is what gets stored as a prefix's `appType` at
+ * registration time - the admin console's own way of later finding this
+ * SAME entry again for an already-registered app (the "Update verfügbar"
+ * button below), without the registry itself needing to know anything
+ * about specific reference apps.
  */
-const APP_INSTALLERS = {
-  guestbook: {
-    label: 'Gästebuch',
-    install: installGuestbook,
-    update: updateGuestbook,
-    version: GUESTBOOK_VERSION,
-    sharedLists: (prefix) => [prefix, `${prefix}:personal`],
-    viewNames: (prefix) => [`${prefix}-feed`, `${prefix}-aggregate-feed`],
-    personalBundle: 'guestbook',
-  },
-  blog: {
-    label: 'Blog',
-    install: installBlog,
-    update: updateBlog,
-    version: BLOG_VERSION,
-    sharedLists: (prefix) => [`${prefix}:personal`],
-    viewNames: (prefix) => [`${prefix}-index`, `${prefix}-aggregate-feed`],
-    personalBundle: 'blog',
-  },
-  forum: {
-    label: 'Forum',
-    install: installForum,
-    update: updateForum,
-    version: FORUM_VERSION,
-    sharedLists: (prefix) => [`${prefix}:topics`, `${prefix}:replies`],
-    viewNames: (prefix) => [`${prefix}-topics`],
-  },
-  /**
-   * The built-in admin console itself - no `install` (it's never seeded
-   * through the generic "install-app" form, only `bin/install-admin-
-   * console.mjs`/`bin/bootstrap-platform.mjs`, both of which now register
-   * it with `appType: 'admin-console'`/`bundleVersion: ADMIN_CONSOLE_VERSION`
-   * so THIS entry's `update`/`version` apply to it exactly like any
-   * reference app's own "Update verfügbar" button - a relay-admin no
-   * longer needs to know a CLI script even exists to pick up a NEW
-   * `admin-console-bundle.js` (e.g. this round's own "Editor-Einstellungen"
-   * form). A deployment bootstrapped BEFORE this existed has no `appType`
-   * on its already-registered "admin" entry yet - one re-run of
-   * `bin/install-admin-console.mjs` (still safe, see that file's own doc
-   * comment) backfills it; every future update after that needs only this
-   * button.
-   */
-  'admin-console': {
-    label: 'Relay-Admin (Admin-Konsole)',
-    update: updateAdminConsole,
-    version: ADMIN_CONSOLE_VERSION,
-  },
-};
+const APP_INSTALLERS = REFERENCE_APP_BUNDLES_BY_KEY;
 
 /**
  * `APP_INSTALLERS[appType]` above, extended with every FILE-BASED `/apps/*`
@@ -195,7 +103,7 @@ const APP_INSTALLERS = {
  * own `apps/README.md` - the SAME descriptor shape, `key` standing in for
  * this map's own property name). A discovered app with a `key` that
  * collides with a hardcoded one above loses - `/apps/*` is for apps that
- * genuinely need files, never a way to override one of the three reference
+ * genuinely need files, never a way to override one of the four reference
  * apps that don't.
  */
 function resolveInstaller(appType) {
@@ -204,46 +112,23 @@ function resolveInstaller(appType) {
 }
 
 /**
- * `mode`s a currently-registered `realm: 'global'` app CANNOT usefully
- * switch to, so the mode-toggle button below can be disabled instead of
- * leading to a silently broken state (a real, reported case: Blog switched
- * to `'multiuser'` 404s its own previously-reachable content) - both checks
- * are DATA-DRIVEN off information already known, never a hardcoded
- * per-prefix list, so they apply to any app shaped the same way, not just
- * the one that was reported:
- *   - `'multiuser'` - disabled whenever `app.personalBundle` is set (stored
- *     on the registry entry itself by `registerApp()`, `dev.js`'s own doc
- *     comment). `mode: 'multiuser'` (`boot.js`'s own dispatch doc comment)
- *     flips the bare prefix to mean "my own space" but NEVER provisions
- *     this app's own `personalBundle` there - only the generic "Mein
- *     Bereich" CMS starter, silently ignoring whatever app-specific
- *     personal content this app's own installer actually builds
- *     (`installPersonalBlog()`/`installPersonalGuestbook()`) - this used to
- *     be reachable and simply wrong, not a framework bug (the CMS starter
- *     IS what `'multiuser'` is documented to mean, kinds.js's own
- *     `platformAppsKind` doc comment - just never the right choice for an
- *     app that already has its own personal content shape).
- *   - `'personal'` - disabled when this app's OWN installer (`app.appType`
- *     -> `resolveInstaller()`) is KNOWN and its `viewNames()` do NOT
- *     include an aggregate/personal-feed-named View (`APP_INSTALLERS`' own
- *     entries above - both Guestbook's `${prefix}-aggregate-feed` and
- *     Blog's now build one) - `mode: 'personal'` renders a read-only feed
- *     at exactly that well-known name (`boot.js`'s `renderAggregateShell()`),
- *     so an app that never creates it gets a permanently empty feed. An app
- *     with NO known installer (a bare `registerApp()`, no `appType` match)
- *     is left unrestricted here - nothing to check it against, same
- *     "anything goes" behavior as before this function existed.
- * @param {{personalBundle?: string, appType?: string, prefix: string}} app
- * @returns {Set<'multiuser'|'personal'>}
+ * Which non-`'off'` `mode` values `app`'s bare `#/<prefix>/` route
+ * actually supports - `installer.bareRouteModes` (`app-bundle.js`'s own
+ * top doc comment on why this REPLACES the older inference-based
+ * `unsupportedModes()`: declared, not guessed from `viewNames()` naming
+ * conventions, so a bundle with no aggregate-feed View simply never lists
+ * `'personal'` here, rather than this function having to notice that on
+ * its own and risk missing a case - the exact gap that let the built-in
+ * admin console itself reach `'personal'` mode before this existed). A
+ * prefix with NO known installer (a bare `registerApp()`, no `appType`
+ * match - or a file-based `/apps/*` app, whose simpler descriptor shape
+ * never declares `bareRouteModes` at all) is left fully unrestricted, same
+ * "nothing to check it against" posture the old function had.
+ * @param {{appType?: string}} app @returns {Array<'global'|'multiuser'|'personal'>}
  */
-function unsupportedModes(app) {
-  const unsupported = new Set();
-  if (app.personalBundle) unsupported.add('multiuser');
-  const viewNames = resolveInstaller(app.appType)?.viewNames?.(app.prefix);
-  if (viewNames && !viewNames.some((name) => name.endsWith('-aggregate-feed') || name.endsWith('-personal-feed'))) {
-    unsupported.add('personal');
-  }
-  return unsupported;
+function supportedBareRouteModes(app) {
+  const installer = app.appType ? resolveInstaller(app.appType) : null;
+  return installer?.bareRouteModes ?? ['global', 'multiuser', 'personal'];
 }
 
 /** @param {{mountEl: Element, doc: Document, mainSpace: import('@qu/space-core').Space, platform: import('@qu/app-core').PlatformRuntime}} params */
@@ -390,13 +275,14 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
       );
 
       const modeButtonsGroup = appRowGroup('Sichtbarkeit für Besucher:');
-      const unsupported = unsupportedModes(app);
+      const supported = supportedBareRouteModes(app);
       for (const mode of ['off', 'global', 'multiuser', 'personal']) {
         const btn = doc.createElement('button');
         btn.type = 'button';
         btn.textContent = MODE_LABELS[mode];
         const isCurrent = (app.mode ?? 'global') === mode;
-        if (!isCurrent && unsupported.has(mode)) {
+        const isSupported = mode === 'off' || supported.includes(mode);
+        if (!isCurrent && !isSupported) {
           btn.disabled = true;
           btn.title =
             mode === 'multiuser'

@@ -37,8 +37,7 @@ import { wireGuestbook } from './guestbook-actions.js';
 import { wireBlog } from './blog-actions.js';
 import { wireForum } from './forum-actions.js';
 import { wireGenericWrite } from './generic-write-actions.js';
-import { installPersonalGuestbook, updatePersonalGuestbook, GUESTBOOK_VERSION } from '../guestbook-bundle.js';
-import { installPersonalBlog, updatePersonalBlog, BLOG_VERSION } from '../blog-bundle.js';
+import { REFERENCE_APP_BUNDLES_BY_KEY } from '../reference-apps.js';
 import { ContentResolver } from '@qu/app-core';
 import { discoveredApps } from '../apps-registry.generated.js';
 
@@ -54,38 +53,24 @@ export async function wireInstalledApps({ mountEl, doc, space }) {
 }
 
 /**
- * Which reference app's own PERSONAL-instance installer a `registerApp()`
- * entry's `personalBundle` tag (`dev.js`'s own doc comment) names - a 4th
- * reference app that wants a personal-instance story of its own only
- * touches THIS map, the same "one file, one edit" posture `wireInstalledApps()`
- * above already gives the RENDER side. Forum deliberately has no entry
- * here - "my own one-person forum" doesn't map onto anything a visitor
- * would actually want (`admin-actions.js`'s own `APP_INSTALLERS.forum`
- * simply never sets `personalBundle` at all, so this is never even
- * consulted for it).
+ * `REFERENCE_APP_BUNDLES_BY_KEY` (`../reference-apps.js`) IS the personal-
+ * instance registry now too - every `defineAppBundle()` descriptor already
+ * carries its own `personal.install`/`personal.update`/`version` (when it
+ * declares a `personal` block at all), so a 4th reference app that wants a
+ * personal-instance story of its own touches ONLY `reference-apps.js`, not
+ * a second, independently-maintained map here (previously THREE:
+ * `PERSONAL_INSTALLERS`/`PERSONAL_UPDATERS`/`PERSONAL_VERSIONS`, all three
+ * required to stay in sync by hand). Forum deliberately has no `personal`
+ * block at all (`forum-bundle.js`'s own top doc comment: "my own one-person
+ * forum" doesn't map onto anything a visitor would actually want), so
+ * `REFERENCE_APP_BUNDLES_BY_KEY.forum.personal` is simply `undefined` -
+ * `provisionPersonalInstance()`/`wirePersonalUpdateBanner()` below treat
+ * that the same "nothing to do" way the old map's missing entry already
+ * did.
  */
-const PERSONAL_INSTALLERS = {
-  guestbook: installPersonalGuestbook,
-  blog: installPersonalBlog,
-};
-
-/**
- * The self-service counterpart to `PERSONAL_INSTALLERS` above - which
- * reference app's own personal-instance UPDATE function
- * `wirePersonalUpdateBanner()` (below) calls when a visitor clicks their
- * own "Update verfügbar" button. Same map shape, same "Forum has no entry"
- * omission, same reasoning.
- */
-const PERSONAL_UPDATERS = {
-  guestbook: updatePersonalGuestbook,
-  blog: updatePersonalBlog,
-};
-
-/** Each reference app's own CURRENT personal-instance bundle version - `provisionPersonalInstance()`'s own doc comment on how this is used. */
-const PERSONAL_VERSIONS = {
-  guestbook: GUESTBOOK_VERSION,
-  blog: BLOG_VERSION,
-};
+function personalBundleOf(personalBundle) {
+  return REFERENCE_APP_BUNDLES_BY_KEY[personalBundle]?.personal;
+}
 
 /**
  * Self-provisions ONE reference app's own PERSONAL instance - called by
@@ -108,7 +93,7 @@ const PERSONAL_VERSIONS = {
  * ALREADY EXISTING instance: compares its own stored `data.bundleVersion`
  * (stamped by `installPersonalGuestbook()`/`installPersonalBlog()`
  * themselves, via `pageKind`'s own `data` field) against this bundle's
- * CURRENT version (`PERSONAL_VERSIONS`) - an older stamp (or none at all,
+ * CURRENT version (`REFERENCE_APP_BUNDLES_BY_KEY[personalBundle].version`) - an older stamp (or none at all,
  * an instance from before this versioning existed) means `updateAvailable:
  * true`, `boot.js`'s own cue to inject `wirePersonalUpdateBanner()`'s
  * button. Never updates automatically - a silent, unattended overwrite of a
@@ -124,17 +109,17 @@ const PERSONAL_VERSIONS = {
  * @returns {Promise<{updateAvailable: boolean}>}
  */
 export async function provisionPersonalInstance({ space, prefix, personalBundle, config }) {
-  const install = PERSONAL_INSTALLERS[personalBundle];
-  if (!install) return { updateAvailable: false };
+  const bundle = REFERENCE_APP_BUNDLES_BY_KEY[personalBundle];
+  const personal = bundle?.personal;
+  if (!personal) return { updateAvailable: false };
   const resolver = new ContentResolver(space, { appAdminPub: space.identity.signingPub });
   const page = await resolver.resolvePage(`/${prefix}/`, { timeout: 1500 });
   if (!page) {
-    await install(space, { prefix, ...config });
+    await personal.install(space, { prefix, ...config });
     return { updateAvailable: false };
   }
-  const currentVersion = PERSONAL_VERSIONS[personalBundle];
   const installedVersion = page.data?.bundleVersion ?? 0;
-  return { updateAvailable: installedVersion < currentVersion };
+  return { updateAvailable: installedVersion < bundle.version };
 }
 
 /**
@@ -142,7 +127,7 @@ export async function provisionPersonalInstance({ space, prefix, personalBundle,
  * at the top of THIS VISITOR's own personal-instance page - `boot.js`'s own
  * `renderMultiUserRoute()` calls this only when `provisionPersonalInstance()`
  * just reported `updateAvailable: true`, and only ever for `ref === 'me'`
- * (never for viewing someone ELSE's own personal instance: `PERSONAL_UPDATERS`
+ * (never for viewing someone ELSE's own personal instance: `personal.update`
  * always writes as `space.identity.signingPub`, i.e. the CURRENT session's
  * own identity - showing this button while looking at a different owner's
  * page would silently create/update the WRONG person's content, not merely
@@ -156,8 +141,8 @@ export async function provisionPersonalInstance({ space, prefix, personalBundle,
  * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, prefix: string, personalBundle: string, config?: Record<string, unknown>}} params
  */
 export function wirePersonalUpdateBanner({ mountEl, doc, space, prefix, personalBundle, config }) {
-  const update = PERSONAL_UPDATERS[personalBundle];
-  if (!update || mountEl.querySelector('[data-qu-personal-update]')) return;
+  const personal = personalBundleOf(personalBundle);
+  if (!personal || mountEl.querySelector('[data-qu-personal-update]')) return;
   const banner = doc.createElement('div');
   banner.setAttribute('data-qu-personal-update', '');
   const button = doc.createElement('button');
@@ -169,7 +154,7 @@ export function wirePersonalUpdateBanner({ mountEl, doc, space, prefix, personal
     button.disabled = true;
     status.textContent = '';
     try {
-      await update(space, { prefix, ...config });
+      await personal.update(space, { prefix, ...config });
       banner.remove();
     } catch (err) {
       status.textContent = ` Fehler: ${err.message}`;

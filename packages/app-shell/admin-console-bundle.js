@@ -48,7 +48,7 @@
  * requires editing this STORED content again just because a new file-based
  * app was added to the repo.
  */
-import { upsertGlobalTemplate, upsertGlobalPage } from './bundle-upsert.js';
+import { defineAppBundle } from './app-bundle.js';
 
 export const adminConsoleBundle = {
   manifest: { name: 'Relay-Admin', rootTemplate: 'main', defaultRoute: '/' },
@@ -124,24 +124,41 @@ export const adminConsoleBundle = {
 export const ADMIN_CONSOLE_VERSION = 1;
 
 /**
- * Re-applies this bundle's own template/page content IN PLACE - the admin
- * console's own "Update verfügbar" button calls this for the ALREADY-
- * installed `admin` prefix, via `bundle-upsert.js`'s edit-with-create-
- * fallback helpers (this file's own doc comment above on why never a raw
- * `createGlobalTemplate()`/`createGlobalPage()` call - see `dev.js`'s
- * `editTemplate()` doc comment on the "never re-`createNode()`" reasoning).
- * Safe to call on a FRESH install too (falls back to create for whatever
- * doesn't exist yet) - not how a fresh install actually happens though
- * (`bin/install-admin-console.mjs` still calls `installGlobalAppBundle()`
- * directly, the ordinary "create everything, prefix not registered yet"
- * path). `prefix` is a parameter, not hardcoded to `"admin"`, purely so
- * this fits `APP_INSTALLERS`' own generic `installer.update(space,
- * {prefix, ...})` call shape - every real deployment's admin console lives
- * at `"admin"` by convention (this package's own README), never enforced.
+ * BUILT ON `./app-bundle.js`'s `defineAppBundle()` — `content()` maps this
+ * file's own pre-existing `{templates, pages}` shape (kept exactly as-is
+ * above, since `bin/install-admin-console.mjs`/`bin/bootstrap-platform.mjs`
+ * both import `adminConsoleBundle` directly for `installGlobalAppBundle()`)
+ * into the generic `{kind, fields}` item shape `applyGlobalContent()`
+ * expects - no content duplicated, just re-described. Deliberately NO
+ * `route` (never seeded through the generic "install-app" form, this
+ * file's own top doc comment) - `install` is therefore never generated,
+ * matching this app's existing `{label, update, version}` shape exactly
+ * (a fresh install stays `bin/install-admin-console.mjs`'s own
+ * `installGlobalAppBundle()` call, the ordinary "create everything, prefix
+ * not registered yet" path - `update` is safe to call on a fresh install
+ * too, it just isn't how one actually happens).
+ */
+export const adminConsoleAppBundle = defineAppBundle({
+  key: 'admin-console',
+  label: 'Relay-Admin (Admin-Konsole)',
+  version: ADMIN_CONSOLE_VERSION,
+  content: () => [
+    ...adminConsoleBundle.templates.map((fields) => ({ kind: 'template', fields })),
+    ...adminConsoleBundle.pages.map((fields) => ({ kind: 'page', fields })),
+  ],
+  // No 'personal' - the admin console manages OTHER apps, it has no per-visitor content shape of
+  // its own an aggregate feed could ever show, so 'personal' is correctly absent here (a real gap
+  // the OLD inference-based unsupportedModes() had: an app with no `viewNames` at all silently
+  // skipped that check entirely instead of concluding "no views, so no aggregate feed possible" -
+  // see app-bundle.js's own top doc comment).
+  bareRouteModes: ['global', 'multiuser'],
+});
+
+/**
+ * Thin named re-export - kept for any caller outside `reference-apps.js` that still wants a
+ * single named function rather than the full bundle object (admin-actions.js now reads
+ * `adminConsoleAppBundle` via `REFERENCE_APP_BUNDLES_BY_KEY` instead).
  * @param {import('@qu/space-core').Space} space
  * @param {{prefix: string}} params
  */
-export async function updateAdminConsole(space, { prefix }) {
-  for (const template of adminConsoleBundle.templates) await upsertGlobalTemplate(space, prefix, template);
-  for (const page of adminConsoleBundle.pages) await upsertGlobalPage(space, prefix, page);
-}
+export const updateAdminConsole = adminConsoleAppBundle.update;

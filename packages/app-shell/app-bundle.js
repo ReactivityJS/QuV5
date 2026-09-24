@@ -38,12 +38,29 @@
  * (ownerPub, kind, path)`), with no relay-side "route must be seen first"
  * classification step the way `adminPageKind`'s `'relay-admins'`-ACL has.
  *
+ * `bareRouteModes` — WHICH non-`'off'` `qu-platform-apps.mode` values this
+ * app's bare `#/<prefix>/` route actually supports, DECLARED here instead
+ * of INFERRED reactively at the admin console's own render time. This
+ * replaces a real gap the previous inference-based `unsupportedModes()`
+ * had: an app with no `viewNames` entry at all (the built-in admin console
+ * itself, before this) silently skipped the "does this app build an
+ * aggregate feed" check entirely (`viewNames && !viewNames.some(...)`
+ * short-circuits to `false` when `viewNames` is `undefined`) rather than
+ * correctly concluding "no views declared, so no aggregate feed possible" -
+ * `'personal'` mode was reachable for it, showing a permanently-empty
+ * aggregate feed once selected. A bundle that simply declares
+ * `bareRouteModes: ['global', 'multiuser']` (no `'personal'`) cannot have
+ * this gap - there is no inference step left to have a blind spot in.
+ *
  * WHAT THIS FILE DELIBERATELY DOES NOT COVER: `wireX()` interactivity
  * (`guestbook-actions.js`/`blog-actions.js`/`forum-actions.js`) - a form's
  * submit handling, live re-render wiring, and similar per-app DOM behavior
  * stay genuinely app-specific hand-written code, registered once into
  * `installed-apps-actions.js`'s own `wireInstalledApps()` - a generic
- * content scaffold has no business swallowing that.
+ * content scaffold has no business swallowing that. `boot.js`'s own
+ * routing dispatch (what each `mode` value actually RENDERS) is likewise
+ * untouched - `bareRouteModes` only narrows which values the admin console
+ * ever lets a relay-admin SELECT, never what a selected mode does.
  */
 import { publishGlobalRoute, publishRoute, createPage, createView } from '@qu/app-core';
 import { QuCrypto } from '@qu/core';
@@ -97,6 +114,7 @@ export async function applyPersonalContent(space, items, { fresh = false } = {})
  *   personal?: {title: string, content: (prefix: string, opts: object, ctx: {ownerPub: string}) => Array<{kind: 'page'|'view', fields: object}>},
  *   sharedLists?: (prefix: string) => string[],
  *   viewNames?: (prefix: string) => string[],
+ *   bareRouteModes?: Array<'global'|'multiuser'|'personal'>,
  * }} descriptor
  *   `key` - this app's `appType`/`personalBundle` tag (`admin-actions.js`'s own `APP_INSTALLERS` doc
  *     comment) - how the admin console finds this SAME entry again for an already-registered prefix.
@@ -107,9 +125,12 @@ export async function applyPersonalContent(space, items, { fresh = false } = {})
  *     outside this file - `install()`/`update()` (and their personal counterparts) call them.
  *   `personal` - omit for an app with no personal-instance story (Forum: "my own one-person forum"
  *     doesn't map onto anything a visitor would want, `installed-apps-actions.js`'s own doc comment).
- * @returns {{key: string, label: string, version: number, install?: Function, update: Function, sharedLists?: Function, viewNames?: Function, personalBundle?: string, personal?: {install: Function, update: Function}}}
+ *   `bareRouteModes` - default `['global']` (the safe minimum every `realm: 'global'` app supports) -
+ *     see this file's own top doc comment. `'off'` is always implicitly available for every app,
+ *     never listed here.
+ * @returns {{key: string, label: string, version: number, install?: Function, update: Function, sharedLists?: Function, viewNames?: Function, personalBundle?: string, personal?: {install: Function, update: Function}, bareRouteModes: string[]}}
  */
-export function defineAppBundle({ key, label, version, route, content, personal, sharedLists, viewNames }) {
+export function defineAppBundle({ key, label, version, route, content, personal, sharedLists, viewNames, bareRouteModes }) {
   async function applyGlobal(space, prefix, opts, { waitForRoute }) {
     if (route) {
       await publishGlobalRoute(space, prefix, { route: '/', title: route.title });
@@ -118,7 +139,7 @@ export function defineAppBundle({ key, label, version, route, content, personal,
     await applyGlobalContent(space, prefix, content(prefix, opts));
   }
 
-  const bundle = { key, label, version, sharedLists, viewNames };
+  const bundle = { key, label, version, sharedLists, viewNames, bareRouteModes: bareRouteModes ?? ['global'] };
   bundle.update = (space, { prefix, ...opts }) => applyGlobal(space, prefix, opts, { waitForRoute: false });
   if (route) bundle.install = (space, { prefix, ...opts }) => applyGlobal(space, prefix, opts, { waitForRoute: true });
 

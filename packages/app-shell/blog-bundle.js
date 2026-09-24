@@ -229,11 +229,15 @@ export const blogBundle = defineAppBundle({
   },
   sharedLists: (prefix) => [`${prefix}:personal`],
   viewNames: (prefix) => [`${prefix}-index`, `${prefix}-aggregate-feed`],
+  // Same reasoning as `guestbook-bundle.js`'s own `bareRouteModes` doc comment: no 'multiuser'
+  // (this app's own `personal` bundle above would be silently ignored by the generic CMS starter
+  // that mode provisions instead), 'personal' IS supported (`aggregateFeedViewFields()` above).
+  bareRouteModes: ['global', 'personal'],
 });
 
-// Thin named re-exports - every EXISTING caller (admin-actions.js/installed-apps-actions.js, both
-// mid-migration to reading `blogBundle` directly - see app-bundle.js's own top doc comment) keeps
-// working unchanged until that migration lands.
+// Thin named re-exports - kept for any caller outside `reference-apps.js` that still wants a
+// single named function rather than the full bundle object (admin-actions.js/installed-apps-
+// actions.js both now read `blogBundle` via `REFERENCE_APP_BUNDLES_BY_KEY` instead).
 export const installBlog = blogBundle.install;
 export const updateBlog = blogBundle.update;
 export const installPersonalBlog = blogBundle.personal.install;

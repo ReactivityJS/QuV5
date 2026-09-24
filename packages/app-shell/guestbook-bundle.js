@@ -156,11 +156,17 @@ export const guestbookBundle = defineAppBundle({
   },
   sharedLists: (prefix) => [prefix, `${prefix}:personal`],
   viewNames: (prefix) => [`${prefix}-feed`, `${prefix}-aggregate-feed`],
+  // No 'multiuser' - this app already has its own `personal` bundle above, so `mode: 'multiuser'`
+  // (which only ever provisions the generic "Mein Bereich" CMS starter, never THIS app's own
+  // personal content shape) would silently ignore it - the exact case `app-bundle.js`'s own top doc
+  // comment describes. 'personal' IS supported - `aggregateFeedViewFields()` above always builds the
+  // `${prefix}-aggregate-feed` View that mode renders.
+  bareRouteModes: ['global', 'personal'],
 });
 
-// Thin named re-exports - every EXISTING caller (admin-actions.js/installed-apps-actions.js, both
-// mid-migration to reading `guestbookBundle` directly - see app-bundle.js's own top doc comment)
-// keeps working unchanged until that migration lands.
+// Thin named re-exports - kept for any caller outside `reference-apps.js` that still wants a
+// single named function rather than the full bundle object (admin-actions.js/installed-apps-
+// actions.js both now read `guestbookBundle` via `REFERENCE_APP_BUNDLES_BY_KEY` instead).
 export const installGuestbook = guestbookBundle.install;
 export const updateGuestbook = guestbookBundle.update;
 export const installPersonalGuestbook = guestbookBundle.personal.install;

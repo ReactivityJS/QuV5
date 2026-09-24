@@ -35,11 +35,18 @@
  * "parameterized/wildcard route" capability in `@qu/app-core`'s own
  * router/resolver, which does not exist today and is a substantially
  * bigger feature than this reference app warrants on its own.
+ *
+ * BUILT ON `./app-bundle.js`'s `defineAppBundle()` — see that file's own
+ * top doc comment for the full "install/update generated from ONE content
+ * declaration" design. No `personal` entry - Forum deliberately has no
+ * personal-instance story (`installed-apps-actions.js`'s own doc comment:
+ * "my own one-person forum" doesn't map onto anything a visitor would
+ * want), so `bareRouteModes` never includes `'personal'` either (there is
+ * no aggregate feed content it could ever show).
  */
-import { publishGlobalRoute } from '@qu/app-core';
-import { upsertGlobalPage, upsertGlobalView } from './bundle-upsert.js';
+import { defineAppBundle } from './app-bundle.js';
 
-/** Bumped whenever this bundle's own shipped content changes - see `guestbook-bundle.js`'s own `GUESTBOOK_VERSION` doc comment, identical reasoning. Previously MISSING entirely (a real, reported gap: an already-installed Forum had no "Update verfügbar" path at all, `admin-actions.js`'s own button only renders when `APP_INSTALLERS[appType].update` is set) - `installForum()` already used the same upsert-based helpers `updateForum()` below needs, so closing this gap needed no change to `installForum()` itself, only the missing update entry point. */
+/** Bumped whenever this bundle's own shipped content changes - see `guestbook-bundle.js`'s own `GUESTBOOK_VERSION` doc comment, identical reasoning. Previously MISSING entirely (a real, reported gap: an already-installed Forum had no "Update verfügbar" path at all) - closed by migrating onto `defineAppBundle()`, which always generates `update` alongside `install`. */
 export const FORUM_VERSION = 1;
 
 function globalPageFields(prefix) {
@@ -87,33 +94,22 @@ function topicsViewFields(prefix) {
   };
 }
 
-/**
- * @param {import('@qu/space-core').Space} space @param {{prefix: string}} params
- *
- * UPSERT, NOT A BLIND `create*()` - see `guestbook-bundle.js`'s `installGuestbook()` own doc
- * comment for the full "Deinstallieren + reinstall" bug this fixes (identical reasoning here).
- */
-export async function installForum(space, { prefix }) {
-  await publishGlobalRoute(space, prefix, { route: '/', title: 'Forum' });
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  await upsertGlobalPage(space, prefix, globalPageFields(prefix));
-  await upsertGlobalView(space, prefix, topicsViewFields(prefix));
-}
+export const forumBundle = defineAppBundle({
+  key: 'forum',
+  label: 'Forum',
+  version: FORUM_VERSION,
+  route: { title: 'Forum' },
+  content: (prefix) => [
+    { kind: 'page', fields: globalPageFields(prefix) },
+    { kind: 'view', fields: topicsViewFields(prefix) },
+  ],
+  sharedLists: (prefix) => [`${prefix}:topics`, `${prefix}:replies`],
+  viewNames: (prefix) => [`${prefix}-topics`],
+  bareRouteModes: ['global', 'multiuser'],
+});
 
-/**
- * Re-applies this bundle's own GLOBAL content in place - the admin
- * console's own "Update verfügbar" button (`admin-actions.js`'s own doc
- * comment) calls this for an ALREADY-installed prefix, via `bundle-
- * upsert.js`'s edit-with-create-fallback helpers - safe on existing
- * content, unlike a raw `createGlobalPage()`/`createGlobalView()` call
- * would be (this file's own top doc comment has the full "why upsert, not
- * a blind create" reasoning, identical to `installForum()` above). Never
- * touches `${prefix}:topics`/`${prefix}:replies` or any member's own
- * topics/replies already posted into them - only the page/View
- * DEFINITIONS this bundle itself owns.
- */
-export async function updateForum(space, { prefix }) {
-  await publishGlobalRoute(space, prefix, { route: '/', title: 'Forum' }); // harmless no-op re-publish - publishGlobalRoute()'s own "deduplicates by route" doc comment.
-  await upsertGlobalPage(space, prefix, globalPageFields(prefix));
-  await upsertGlobalView(space, prefix, topicsViewFields(prefix));
-}
+// Thin named re-exports - kept for any caller outside `reference-apps.js` that still wants a
+// single named function rather than the full bundle object (admin-actions.js now reads
+// `forumBundle` via `REFERENCE_APP_BUNDLES_BY_KEY` instead).
+export const installForum = forumBundle.install;
+export const updateForum = forumBundle.update;

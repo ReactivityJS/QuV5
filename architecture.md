@@ -3206,3 +3206,88 @@ the relay operator's OWN deployment, never fetched from Space content at
 all, so Stufe 3's whole "Space-writable `qu-security-policy` trust policy"
 premise doesn't apply) than a variant of any of the three - real, open
 design work, not started.
+
+**UPDATE - THE APP-BUNDLE SCAFFOLD (`packages/app-shell/app-bundle.js`),
+CLOSING THE UPDATE-PATH GAP FOR GOOD.** Reported cause of "404s on
+installed reference apps after a content update": an admin-triggered
+Content-Update, not a framework version mismatch - each reference app's
+`install`/`update` pair was, until now, two independently hand-written
+functions per app (`guestbook-bundle.js`, `blog-bundle.js`, ...) that could
+silently drift apart - exactly what happened to `forum-bundle.js` (shipped
+`installForum()` with no `updateForum()`/`FORUM_VERSION` at all, this
+section's own earlier "UPDATE - FORUM'S MISSING UPDATE PATH" note). Rather
+than trust every future reference app to remember both halves,
+`defineAppBundle({key, label, version, route?, content, personal?,
+sharedLists?, viewNames?, bareRouteModes?})` now generates `install`/
+`update` (global AND, when `personal` is given, its own personal
+`install`/`update` pair) FROM ONE content declaration - there is no code
+path left where one exists without the other:
+- **Global install vs. update** differ in exactly one thing: a first
+  install must `publishGlobalRoute()` and wait ~400ms before writing the
+  page (`live-app-resolver.js` only classifies a page write correctly once
+  it has observed the route); an already-registered route (every `update`
+  call) never needs that wait. Both ALWAYS write via `bundle-upsert.js`'s
+  edit-first, create-as-fallback helpers, never a raw `create*()` - the
+  real, previously-shipped "404 after Deinstallieren + reinstalling the
+  same prefix" bug (`nullGlobalAppContent()`'s own "not a genuine deletion"
+  doc comment) is what upsert-everywhere on the global side fixes for
+  good, on install too, not just update.
+- **Personal install vs. update** differ the OPPOSITE way: a personal
+  instance is self-provisioned (`installed-apps-actions.js`'s
+  `provisionPersonalInstance()`) only when nothing exists there yet -
+  genuinely, unconditionally fresh every time `install` runs (there is no
+  "Deinstallieren" for a personal instance to ever need re-creating over) -
+  so `install` writes via plain `create*()`, while `update` (a visitor's
+  own explicit "Update verfügbar" click on their ALREADY-existing
+  instance) goes through the same safe upsert helpers the global side
+  always uses.
+- All four reference apps (`guestbook-bundle.js`, `blog-bundle.js`,
+  `forum-bundle.js`, `admin-console-bundle.js`) are now built on this
+  scaffold - each file keeps only its own field-building functions and a
+  short `defineAppBundle({...})` call; every previously hand-written
+  `installX()`/`updateX()`/`installPersonalX()`/`updatePersonalX()` is now
+  a one-line re-export of the bundle's own `install`/`update`/
+  `personal.install`/`personal.update`.
+
+**`reference-apps.js` - the one list, replacing FOUR independently
+maintained ones.** `REFERENCE_APP_BUNDLES_BY_KEY` (`key -> bundle`) is now
+the single source both `admin-actions.js` (`APP_INSTALLERS`,
+`resolveInstaller()`) and `installed-apps-actions.js`
+(`provisionPersonalInstance()`/`wirePersonalUpdateBanner()`, via a small
+`personalBundleOf()` lookup) read from - previously `APP_INSTALLERS` in
+one file and `PERSONAL_INSTALLERS`/`PERSONAL_UPDATERS`/`PERSONAL_VERSIONS`
+(three separate maps) in the other, all four required to be kept in sync
+by hand for every reference app. A 5th reference app now touches exactly
+`reference-apps.js` (one line) plus its own new `<name>-bundle.js` file,
+never four scattered edits.
+
+**`bareRouteModes` replaces the old, inference-based `unsupportedModes()`
+(this section's own earlier "mode-toggle buttons now refuse to offer a
+mode that would silently break a given app" note).** That function GUESSED
+whether an app supported `'personal'` mode by checking whether its
+`viewNames()` happened to include a name ending in `-aggregate-feed`/
+`-personal-feed`, and had a real, previously-undetected gap: an app with
+no `viewNames` entry at ALL (the built-in admin console itself) silently
+skipped that check rather than concluding "no views declared, so no
+aggregate feed is possible" - `'personal'` mode was reachable for it,
+rendering a permanently-empty aggregate feed once selected. Each bundle
+now DECLARES `bareRouteModes: Array<'global'|'multiuser'|'personal'>`
+(default `['global']`) instead - `admin-actions.js`'s
+`supportedBareRouteModes(app)` resolves a registered app's own installer
+and reads this array directly, no inference left to have a blind spot in.
+Guestbook/Blog both declare `['global', 'personal']` (no `'multiuser'` -
+their own `personal` bundle would be silently ignored by the generic "Mein
+Bereich" CMS starter that mode provisions instead, the same mismatch the
+old function's `personalBundle`-based check already caught); Forum and the
+admin console both declare `['global', 'multiuser']` (no `'personal'` -
+neither builds an aggregate-feed View at all, closing the admin-console
+gap above for good, structurally rather than by remembering to special-
+case it).
+
+Verified end to end: the existing `installed-apps.test.js` suite (14
+tests, spanning install/update/personal-instance/mode-toggle/Deinstallieren
+for all four reference apps) plus `admin-mode-toggle.test.js`,
+`multiuser-app.test.js`, and `blog-aggregate-feed.test.js` all pass
+unchanged against the migrated code - no test needed to change to match
+the refactor, since `bareRouteModes` for every existing app was chosen to
+reproduce exactly what `unsupportedModes()` already computed for it.
