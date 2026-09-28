@@ -388,7 +388,7 @@ async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeo
  * simply by creating an `adminViewKind` at that name at install time (e.g.
  * `guestbook-bundle.js`'s `installGuestbook()`, sourcing it from the SAME
  * shared list every visitor's own personal instance already writes into -
- * `installed-apps-actions.js`'s own doc comment on `PERSONAL_INSTALLERS`).
+ * `installed-apps-actions.js`'s own doc comment on `provisionPersonalInstance()`).
  * If no such View exists (an app with no aggregate-feed story at all, or
  * one not yet installed under the new scheme), `wireViews()`'s own
  * `resolveView()` call is a correct no-op - the shell renders with an
