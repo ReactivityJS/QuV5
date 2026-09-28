@@ -122,3 +122,30 @@ test('bootstrapSpace(): bus: null opts out of the default auto-created EventBus'
   assert.equal(bus, null);
   assert.equal(space.bus, null);
 });
+
+test('bootstrapSpace(): warmNodeTTL/maxWarmNodes/staleAfter are forwarded to Space unchanged - omitted keeps Space\'s own default (warm-caching off)', async () => {
+  const identity = await actor();
+
+  // Omitted - Space's own default (warmNodeTTL: 0) applies, exactly as before these params existed:
+  // a released Node is torn down immediately, same as every OTHER bootstrapSpace() test in this file.
+  const { space: withoutWarmCache } = await bootstrapSpace({
+    identity,
+    transport: { async connect() {}, send() {}, onMessage() {} },
+    members: [{ pub: identity.signingPub, xPub: identity.xPublicKey }],
+  });
+  const plainHandle = await withoutWarmCache.useNode('n', noteKind);
+  plainHandle.release();
+  assert.equal(withoutWarmCache.getNode('n'), undefined);
+
+  // Explicitly passed through - a released Node stays warm, proving the option actually reached
+  // Space's own constructor rather than being silently dropped along the way.
+  const { space: withWarmCache } = await bootstrapSpace({
+    identity,
+    transport: { async connect() {}, send() {}, onMessage() {} },
+    members: [{ pub: identity.signingPub, xPub: identity.xPublicKey }],
+    warmNodeTTL: 10_000,
+  });
+  const warmHandle = await withWarmCache.useNode('n', noteKind);
+  warmHandle.release();
+  assert.equal(withWarmCache.getNode('n'), warmHandle.node);
+});
