@@ -239,5 +239,6 @@ test('markFileReceived()/watchFileReceipts() let a recipient confirm receipt of 
   await markFileReceived(bobSpace, fileId);
   await waitUntil(async () => (await watchFileReceipts(aliceSpace, bob.signingPub)).marks[fileId] !== undefined);
   const { marks } = await watchFileReceipts(aliceSpace, bob.signingPub);
-  assert.ok(marks[fileId].at > 0);
+  assert.equal(marks[fileId].deliveredUpTo, true);
+  assert.ok(marks[fileId].deliveredAt > 0);
 });

@@ -331,7 +331,7 @@ Punkte" oben zur Nicht-Rückwirkung, und §2a zum davon unabhängigen
    (`upload-outbox.js`) verwirft aktuell den Rückgabewert von
    `upload(record, blob)`. Erweiterung: das Ergebnis (z.B. `{url}`) wird
    in den Record gemerged und steht danach über `outbox.get(id)` zur
-   Verfügung - Chat-Nachrichten referenzieren dann diese `url`.
+   Verfügung - Chat-Nachrichten referenzieren dann diese `url`. ✅ So gebaut.
 3. **Relay als Blob-Storage-Mirror.** Entschieden: kein externer Dienst.
    Ablauf: Datei liegt zuerst NUR lokal (`UploadOutbox`s `localStore`) →
    wird zum Relay hochgeladen (neuer, ACL-geprüfter HTTP-Endpunkt am
@@ -346,7 +346,12 @@ Punkte" oben zur Nicht-Rückwirkung, und §2a zum davon unabhängigen
    `deliveredUpTo`-Muster wie Nachrichten selbst, nur mit der Datei-`id`
    als Anker statt einer Nachrichten-`id`).
 4. **`readReceiptKind` um `deliveredUpTo` erweitern** (siehe oben) -
-   kleine, additive Schema-Änderung.
+   kleine, additive Schema-Änderung. ✅ So gebaut: `marks[contentNodeId]`
+   trägt jetzt zusätzlich `{deliveredUpTo, deliveredAt}` neben `{upTo, at}`,
+   beide über einen gemeinsamen, mergenden `_patchMark()`-Helfer gesetzt
+   (`markRead()`/`markDelivered()` überschreiben sich gegenseitig nie).
+   `markFileReceived()` nutzt jetzt `markDelivered()` statt `markRead()` -
+   siehe Fußnote oben zu Punkt 3.
 5. **Neuer `'group'`-ACL-Modus (§2a) - der zentrale neue Baustein dieser
    Phase.** `chatKind` (Vorschlag oben) nutzt NICHT das bestehende
    `content`-ACL + `grantWriter()`-Muster (Nachtrag - ursprünglicher Plan,

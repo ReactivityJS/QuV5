@@ -11,7 +11,7 @@ import { defineKind, Space } from '@qu/space-core';
 import { createMemoryStore } from '@qu/space-storage';
 import { createInProcessHub, InProcessTransport, createRelayForwarder } from '@qu/space-transport';
 import { EventBus } from '@qu/events';
-import { awaitRelayAck, readReceiptKind, markRead, watchReadReceipts, ReadReceiptWatcher } from '../src/delivery-status.js';
+import { awaitRelayAck, readReceiptKind, markRead, markDelivered, watchReadReceipts, ReadReceiptWatcher } from '../src/delivery-status.js';
 
 async function actor() {
   const kp = await QuCrypto.generateKeypair();
@@ -88,4 +88,50 @@ test('ReadReceiptWatcher reactively tracks multiple readers off the bus', async 
 test('readReceiptKind is durable (unlike presenceKind) - a read marker is meant to survive', () => {
   assert.equal(readReceiptKind.persistence, 'durable');
   assert.equal(readReceiptKind.acl.write, 'owner');
+});
+
+test('markDelivered()/watchReadReceipts() round-trip a delivered marker peer-to-peer', async () => {
+  const alice = await actor();
+  const bob = await actor();
+  const [aliceTransport, bobTransport] = pairTransports();
+  const aliceSpace = new Space({ identity: alice, members: [{ pub: bob.signingPub, xPub: bob.xPublicKey }], transport: aliceTransport });
+  const bobSpace = new Space({ identity: bob, members: [], transport: bobTransport });
+
+  await watchReadReceipts(bobSpace, alice.signingPub);
+  await markDelivered(aliceSpace, 'thread-3', 'msg-9');
+  await waitUntil(async () => (await watchReadReceipts(bobSpace, alice.signingPub)).marks['thread-3']?.deliveredUpTo === 'msg-9');
+});
+
+test('markRead() and markDelivered() merge into the SAME entry without clobbering each other', async () => {
+  const alice = await actor();
+  const bob = await actor();
+  const [aliceTransport, bobTransport] = pairTransports();
+  const aliceSpace = new Space({ identity: alice, members: [{ pub: bob.signingPub, xPub: bob.xPublicKey }], transport: aliceTransport });
+  const bobSpace = new Space({ identity: bob, members: [], transport: bobTransport });
+
+  await watchReadReceipts(bobSpace, alice.signingPub);
+  await markDelivered(aliceSpace, 'thread-4', 'msg-1');
+  await waitUntil(async () => (await watchReadReceipts(bobSpace, alice.signingPub)).marks['thread-4']?.deliveredUpTo === 'msg-1');
+
+  await markRead(aliceSpace, 'thread-4', 'msg-1');
+  await waitUntil(async () => (await watchReadReceipts(bobSpace, alice.signingPub)).marks['thread-4']?.upTo === 'msg-1');
+
+  const { marks } = await watchReadReceipts(bobSpace, alice.signingPub);
+  assert.equal(marks['thread-4'].deliveredUpTo, 'msg-1'); // still present - markRead() must not have wiped it.
+  assert.ok(marks['thread-4'].deliveredAt > 0);
+  assert.ok(marks['thread-4'].at > 0);
+});
+
+test('ReadReceiptWatcher.deliveredUpToFor() reactively tracks delivered markers off the bus', async () => {
+  const alice = await actor();
+  const bob = await actor();
+  const [aliceTransport, bobTransport] = pairTransports();
+  const aliceSpace = new Space({ identity: alice, members: [{ pub: bob.signingPub, xPub: bob.xPublicKey }], transport: aliceTransport });
+  const bobBus = new EventBus();
+  const bobSpace = new Space({ identity: bob, members: [], transport: bobTransport, bus: bobBus });
+
+  const watcher = new ReadReceiptWatcher(bobSpace, bobBus);
+  await watcher.watch(alice.signingPub);
+  await markDelivered(aliceSpace, 'thread-5', 'msg-3');
+  await waitUntil(() => watcher.deliveredUpToFor(QuCrypto.toBase64(alice.signingPub), 'thread-5') === 'msg-3');
 });

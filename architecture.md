@@ -746,7 +746,7 @@ envelope).
 
 | File | Purpose |
 |---|---|
-| `src/delivery-status.js` | `awaitRelayAck()`, `readReceiptKind`, `markRead()`/`watchReadReceipts()`/`ReadReceiptWatcher` — local/relay-synced/read lifecycle helpers (§3.5). |
+| `src/delivery-status.js` | `awaitRelayAck()`, `readReceiptKind`, `markRead()`/`markDelivered()`/`watchReadReceipts()`/`ReadReceiptWatcher` — local/relay-synced/delivered/read lifecycle helpers (§3.5). |
 | `src/upload-outbox.js` | `uploadOutboxKind`, `UploadOutbox` — local-save-then-sync queue for (multiple) file uploads: caller supplies a local blob store + an `upload()` function; this class owns the pending→uploading→done/failed state machine, retry, and a reactive `watch()`. |
 | `src/index.js` | Package's public export surface. |
 
@@ -776,8 +776,9 @@ the three gaps a real file exchange needs, without inventing anything new:
    generic "reader confirms receipt of contentId" primitive (its
    `contentNodeId` key is caller-defined, not required to be an actual
    Node). `markFileReceived(space, fileId)`/`watchFileReceipts(space, pub)`
-   are one-line aliases of `markRead()`/`watchReadReceipts()` - a file id
-   works exactly like a chat message id. No new Kind, no duplicated state.
+   are one-line aliases of `markDelivered()`/`watchReadReceipts()` - a file
+   id works exactly like a chat message id. No new Kind, no duplicated
+   state.
 
 Why the blob itself still can't just ride the same "default" CRDT sync
 that the metadata uses: a relay only forwards/mirrors signed envelopes,
@@ -952,11 +953,12 @@ notice.
 | Export | Purpose |
 |---|---|
 | `awaitRelayAck(bus, nodeId)` | Resolves on the next write-ack for `nodeId` (§3.5) — correlated by ordering. |
-| `readReceiptKind` / `readReceiptNodeId(pub)` | Durable, self-certifying per-reader `'owner'`-ACL Kind holding an encrypted `{contentNodeId: {upTo, at}}` map. |
-| `markRead(space, contentNodeId, upTo)` | Writes this Space's own read marker. |
+| `readReceiptKind` / `readReceiptNodeId(pub)` | Durable, self-certifying per-reader `'owner'`-ACL Kind holding an encrypted `{contentNodeId: {upTo, at, deliveredUpTo, deliveredAt}}` map — `upTo`/`at` (read) and `deliveredUpTo`/`deliveredAt` (received+locally stored, independent of reading) are set independently via a shared merging patch, never clobbering each other. |
+| `markRead(space, contentNodeId, upTo)` | Writes this Space's own read marker (`upTo`/`at`). |
+| `markDelivered(space, contentNodeId, deliveredUpTo)` | Writes this Space's own delivered marker (`deliveredUpTo`/`deliveredAt`), independent of `markRead()`. |
 | `watchReadReceipts(space, pub)` | One-shot snapshot of another identity's read receipts. |
-| `ReadReceiptWatcher` | Reactive multi-reader cache — `.watch(pub)` / `.upToFor(pubB64, contentNodeId)`. |
-| `markFileReceived(space, fileId)` / `watchFileReceipts(space, pub)` | File-scoped aliases of `markRead()`/`watchReadReceipts()` — a file id works exactly like a `contentNodeId`. |
+| `ReadReceiptWatcher` | Reactive multi-reader cache — `.watch(pub)` / `.upToFor(pubB64, contentNodeId)` / `.deliveredUpToFor(pubB64, contentNodeId)`. |
+| `markFileReceived(space, fileId)` / `watchFileReceipts(space, pub)` | File-scoped aliases of `markDelivered()`/`watchReadReceipts()` — a file id works exactly like a `contentNodeId`; a file landing in the outbox is a delivery, not a read. |
 | `uploadOutboxKind` | Self-certifying `'owner'`-ACL Kind, `records: {shape:'atomic', visibility:'public'}` map. |
 | `UploadOutbox` | `.enqueue(meta, blob)` (fire-and-forget upload, resolves once locally saved+queued) / `.retry(id)` / `.statusOf(id)` / `.list()` / `.watch(id, cb)` (reactive). Constructor takes an optional 4th `bus` param — with it, `'done'` records advance to `'synced'` once the relay ack's the metadata write. |
 
