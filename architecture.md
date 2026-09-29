@@ -351,16 +351,14 @@ wants "the most recent N pushes" directly.
 
 ### 3.5 Presence, typing, and delivery status — ordinary data, not protocol
 
-Online/offline liveness stays exactly the pre-existing `hello`/
-`PresenceTracker` mechanism (relay-internal, push-routing only — see
-§3.6's event list). Everything else that might look like a "presence
-feature" is deliberately just Node writes:
+Self-reported presence/typing is deliberately just Node writes, never a
+bespoke protocol:
 
 - `@qu/space-core`'s `presence.js` — `presenceKind` (self-certifying
   `acl.write: 'owner'`, `persistence: 'volatile'`) holds `online`/`status`/
-  `updatedAt`/`typingIn`/`typingAt`. `publishPresence()`/`setStatus()`/
-  `setTyping()` write it; `watchPresence()`/`PresenceWatcher` read it
-  (one-shot snapshot vs. a reactive multi-member cache, same split
+  `updatedAt`/`typingIn`/`typingAt`/`onlineVisibility`. `publishPresence()`/
+  `setStatus()`/`setTyping()` write it; `watchPresence()`/`PresenceWatcher`
+  read it (one-shot snapshot vs. a reactive multi-member cache, same split
   `alias.js`'s functions vs. `AliasRegistry` already established).
   `online` is a best-effort, SELF-REPORTED flag (nothing can sign "went
   offline" after its own connection already dropped) — a reader wanting to
@@ -370,7 +368,54 @@ feature" is deliberately just Node writes:
 - `@qu/space-plugins`'s `delivery-status.js` — `awaitRelayAck(bus, nodeId)`
   correlates the relay's write-ack (below) to one write by ordering;
   `readReceiptKind` (durable, unlike `presenceKind`) is the same self-
-  certifying-per-reader shape for a "read up to here" marker.
+  certifying-per-reader shape for a "read up to here"/"received up to
+  here" marker (`upTo`/`at` and `deliveredUpTo`/`deliveredAt`, set
+  independently — see that file's own doc comment).
+
+**UPDATE — LIVE presence (the relay's own `PresenceTracker` ground truth,
+not the self-reported field above) made client-readable, gated by a
+profile-wide `onlineVisibility` setting.** Previously relay-internal,
+push-routing only (§3.6's event list still describes the underlying
+`hello`/`PresenceTracker` mechanism itself, unchanged). `onlineVisibility`
+is deliberately only `'public'`/`'private'` — no relay-computed
+`'contacts'` tier: that would require the relay to know which OTHER
+identities share a Space with a given viewer, a cross-Space membership
+index several of this framework's own ACL modes exist specifically to
+keep the relay from ever needing (private-group membership is meant to
+stay relay-opaque). Same "signed declaration, not relay-side Yjs
+decoding" shape `group-membership.js` established for `'group'`-ACL mode
+— the relay never decodes ANY Node's content, not even a `'public'`
+field, so `presenceKind.onlineVisibility` alone is invisible to it:
+
+- `@qu/space-core`'s `presence-visibility.js` — `signPresenceVisibility()`/
+  `verifyPresenceVisibility()`, a self-certifying `{type:
+  'presence-visibility', pub, onlineVisibility, ts, sig}` control message,
+  `ts`-monotonic same as `group-membership.js`'s own declarations.
+  `presence.js`'s `declareOnlineVisibility(space, onlineVisibility)` sets
+  BOTH the app-readable `presenceKind.onlineVisibility` field AND signs
+  +sends this separate relay declaration in one call, so the two never
+  drift apart.
+- `Space.watchLivePresence(pub)`/`unwatchLivePresence(pub)`/
+  `isLiveOnline(pubB64)` — no new global/space-independent channel; a
+  watcher sends `{type: 'watch-presence', pub}` over whatever Space
+  connection it already has open. Deliberately UNAUTHENTICATED (no
+  signature required) and NOT gated by Space membership at all — a
+  `'public'` setting means exactly that: anyone who knows the pubkey, not
+  just a fellow Space member (`relay.js`'s `handleWatchPresence()` — see
+  that function's own doc comment). The relay replies with the CURRENT
+  state immediately (if visible) and pushes every future
+  `presence-online`/`presence-offline` transition from then on;
+  `presence.js`'s `LivePresenceWatcher` is the reactive multi-identity
+  cache, same shape as `PresenceWatcher` above but backed by this bus
+  topic (`space.presence.live.changed`) instead of `useNode()`.
+- `relay.js`'s `presenceVisibility` (pubB64 → current declared
+  `{onlineVisibility, ts}`) and `presenceWatchers` (pubB64 → Set of
+  watching peerIds) maps — same non-durability scope as `groupMemberships`/
+  `grants` (in-memory, lost on relay restart). An UNDECLARED pubkey is
+  fail-closed (`'private'`) — a watch-presence request for it gets NO
+  reply at all, indistinguishable from "currently offline," so a
+  `'private'` setting never leaks even the fact that it is specifically
+  private via a differently-shaped response.
 
 WRITE-ACK: once a relay mirrors a LOCALLY-originated write, it sends
 `{type: 'write-ack', nodeId, seq}` back to that write's own author — `seq`
@@ -704,7 +749,8 @@ existed.
 | `src/field.js` | `AtomicField`/`TextField`/`ListField` (now also `ListField.slice()` — windowed reads, §3.4 UPDATE), `createField()`, `withWriteContext()` (the shared transact-with-origin wrapper every field mutation goes through), `setFieldValue()` (shape-agnostic "replace the whole value" helper — see `@qu/space-ui` note below). |
 | `src/space.js` | `Space` — the main class, now also reconnect/resync (`onStatusChange` wiring, §3.4) and per-Kind storage routing (`_storageFor()`). See §5 below for its full method surface. |
 | `src/alias.js` | `deriveAliasIdentity()`, `aliasRegistryKind`/`aliasRegistryNodeId()`, `publishAlias()`, `AliasRegistry` — per-space pseudonymity. |
-| `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes (§3.5). |
+| `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes; `declareOnlineVisibility()`/`LivePresenceWatcher` — the app-facing half of LIVE presence, §3.5 UPDATE. |
+| `src/presence-visibility.js` | `signPresenceVisibility()`/`verifyPresenceVisibility()` — the `'group'`-membership-declaration-shaped signed control message `onlineVisibility` enforcement runs on (§3.5 UPDATE). |
 | `src/user.js` | `userKind` (`qu-user`: `alias`/`epub`/`listed`, all public), `userNodeId()`, `resolveAlias()`, `ensureUserProfile()`, `filterListedUsers()` — the GunDB-style User-Node, the Peer-User-Verwaltung base primitive (§3.8). |
 | `src/wire-codec.js` | `encodeForWire()`/`decodeFromWire()` — Uint8Array ↔ base64 for any JSON serialization boundary (WebSocket, on-disk file). |
 | `src/compaction.js` | `compactIfNeeded(space, id, {threshold})` — opt-in compaction policy on top of `Space.compactNode()`/`envelopeCount()` (§3.4 UPDATE). |
@@ -731,7 +777,7 @@ envelope).
 | `src/in-process-transport.js` | `createInProcessHub()`, `InProcessTransport` — same-process transport for tests, star-shaped through a relay. |
 | `src/ws-server-hub.js` | `createWsServerHub(wss)` — the server-side hub over a real `ws` `WebSocketServer`. |
 | `src/ws-client-transport.js` | `WsClientTransport` — real WebSocket client, browser-safe (separate `exports` subpath, no `node:crypto`); now also auto-reconnect + `onStatusChange()` (§3.4). |
-| `src/relay.js` | `createRelayForwarder()` — the Relay itself: signature verification, subscriber-tracking, per-Kind durable/volatile mirroring (§3.4), `'named'`-ACL grant handling, push-notify routing, write-ack (§3.5), federation's `ingestFederated()` integration point, ephemeral `rtc-signal` forwarding (§3.11 — never mirrored, `from` always presence-authenticated). |
+| `src/relay.js` | `createRelayForwarder()` — the Relay itself: signature verification, subscriber-tracking, per-Kind durable/volatile mirroring (§3.4), `'named'`-ACL grant handling, push-notify routing, write-ack (§3.5), federation's `ingestFederated()` integration point, ephemeral `rtc-signal` forwarding (§3.11 — never mirrored, `from` always presence-authenticated); `presenceVisibility`/`presenceWatchers` maps, `handlePresenceVisibility()`/`handleWatchPresence()`/`handleUnwatchPresence()`/`broadcastLivePresence()` — LIVE presence made client-readable (§3.5 UPDATE). |
 | `src/federation.js` | `federateRelay()` — a relay as a subscribing peer of another relay. |
 | `src/presence-tracker.js` | `PresenceTracker` — pubkey ↔ peerId online/offline state, built from signed `hello` messages; gained `peerIdFor(pubB64)` (§3.11 — the inverse of `pubFor()`, routes an `rtc-signal` to its live target connection). |
 | `src/webrtc-signaling.js` | `wrapWithSignaling(transport)` — piggybacks WebRTC SDP/ICE signaling on an existing Transport with zero `Space` changes (§3.11). Browser- AND node-safe. |
@@ -900,11 +946,15 @@ notice.
 | `publishAlias(space, spaceId)` | Derive + publish this Space's alias to the registry. |
 | `aliasRegistryKind` / `aliasRegistryNodeId(realPub)` | The registry Kind and its deterministic per-member nodeId. |
 | `AliasRegistry` | Bus watcher maintaining an alias→real map. |
-| `presenceKind` | Self-certifying `'owner'`-ACL, `persistence: 'volatile'` Kind — `online`/`status`/`updatedAt`/`typingIn`/`typingAt` (§3.5). |
+| `presenceKind` | Self-certifying `'owner'`-ACL, `persistence: 'volatile'` Kind — `online`/`status`/`updatedAt`/`typingIn`/`typingAt`/`onlineVisibility` (§3.5). |
 | `presenceNodeId(pub)` | Deterministic presence Node id for `pub`. |
 | `publishPresence(space, fields)` / `setStatus(space, status)` / `setTyping(space, nodeId, typing)` | Write this Space's own presence Node. |
 | `watchPresence(space, pub)` | One-shot presence snapshot of another identity (subscribes if needed). |
 | `PresenceWatcher` | Reactive multi-member presence cache off the bus — `.watch(pub)` / `.of(pubB64)`. |
+| `declareOnlineVisibility(space, 'public'\|'private')` | Sets `presenceKind.onlineVisibility` AND signs+sends the separate relay declaration LIVE-presence enforcement runs on (§3.5 UPDATE). |
+| `signPresenceVisibility()` / `verifyPresenceVisibility()` | The signed `presence-visibility` control message itself (§3.5 UPDATE). |
+| `Space.watchLivePresence(pub)` / `.unwatchLivePresence(pub)` / `.isLiveOnline(pubB64)` | Subscribe to/read another identity's REAL relay-tracked connection state (§3.5 UPDATE) — distinct from `presenceKind.online` above. |
+| `LivePresenceWatcher` | Reactive multi-identity cache for the relay's own live connection state — `.watch(pub)` / `.unwatch(pub)` / `.isOnline(pubB64)` (§3.5 UPDATE). |
 | `userKind` | Self-certifying `'owner'`-ACL Kind — `alias`/`epub`/`listed` (§3.8, the GunDB-style User-Node). |
 | `userNodeId(pub)` | Deterministic User-Node id for `pub`. |
 | `resolveAlias(alias, pub)` | `alias` if set, else `pub` base64url-encoded — GunDB's "alias defaults to pub". |

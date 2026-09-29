@@ -190,6 +190,7 @@ import { sealUpdate, sealPublicUpdate, verifyEnvelope, openUpdate } from './enve
 import { deriveOwnerNodeId, deriveContentNodeId, defineKind } from './kind-schema.js';
 import { signGrant, verifyGrant } from './grant.js';
 import { signGroupMembership } from './group-membership.js';
+import { signPresenceVisibility } from './presence-visibility.js';
 import { sealStrategies } from './seal-strategies.js';
 
 const REMOTE_ORIGIN = Symbol('space-core:remote-update');
@@ -321,6 +322,8 @@ export class Space {
     this._warmTimers = new Map();
     /** @type {Map<string, {members: Set<string>, release: () => void, offChanged: (() => void)|undefined}>} `"<groupOwnerPub-b64>:<groupName>" -> live-cached state - see `_currentGroupMembers()`'s own doc comment (kind-schema.js's own `'group'` ACL mode). Grows lazily, only for a Group actually referenced by a `'group'`-ACL write this Space had to verify - never all Groups this Space happens to know about. */
     this._groupMembershipCache = new Map();
+    /** @type {Map<string, boolean>} pubB64 -> last known REAL connection state from `watchLivePresence()` - see that method's own doc comment. Distinct from `presenceKind`'s self-reported `online` field (`presence.js`): this is the relay's own ground truth, pushed via `presence-online`/`presence-offline`. */
+    this._livePresence = new Map();
     // Serialized (never overlapping) - see _handleIncoming()'s own doc comment on why processing
     // order must match ARRIVAL order for a 'content'-ACL Kind's grant-then-write sequence to be
     // race-free, and why relying on each _handleIncoming() call's own internal await timing to
@@ -659,6 +662,46 @@ export class Space {
   async declareGroupMembership({ groupName, members }) {
     const message = await signGroupMembership({ groupName, members }, this._identity);
     this._transport.send(message);
+  }
+
+  /**
+   * Tells this Space's relay who may see THIS identity's REAL, live connection state (the relay's
+   * own `PresenceTracker`, not `presenceKind`'s self-reported `online` field - see `presence.js`'s
+   * own doc comment on that split) - a signed, self-certifying declaration for the exact same
+   * reason `declareGroupMembership()` above is one: the relay never decodes ANY Node's Yjs content,
+   * not even a `'public'`-visibility field, so `presenceKind.onlineVisibility` alone (however it's
+   * set) is invisible to it - see `presence-visibility.js`'s own top doc comment. Undeclared
+   * defaults CLOSED at the relay (fail-closed, same posture as an undeclared `'group'`).
+   * @param {'public'|'private'} onlineVisibility
+   */
+  async declareOnlineVisibility(onlineVisibility) {
+    const message = await signPresenceVisibility(onlineVisibility, this._identity);
+    this._transport.send(message);
+  }
+
+  /**
+   * Starts watching `pub`'s REAL live connection state through this Space's relay - see
+   * `declareOnlineVisibility()`'s own doc comment for what gates whether anything is ever actually
+   * told back. The relay replies with the CURRENT state right away (if visible) and pushes every
+   * future transition from then on, as `presence-online`/`presence-offline` (`_handleIncoming()`'s
+   * own doc comment) - read the running result via `isLiveOnline(pub)`, or react to changes via
+   * `presence.js`'s `LivePresenceWatcher`/the `space.presence.live.changed` bus topic.
+   * @param {Uint8Array|string} pub
+   */
+  async watchLivePresence(pub) {
+    const pubBytes = typeof pub === 'string' ? QuCrypto.fromBase64(pub) : pub;
+    this._transport.send({ type: 'watch-presence', pub: pubBytes });
+  }
+
+  /** The exact inverse of `watchLivePresence()` - stops future pushes for `pub`; does not clear any already-cached `isLiveOnline()` value. @param {Uint8Array|string} pub */
+  async unwatchLivePresence(pub) {
+    const pubBytes = typeof pub === 'string' ? QuCrypto.fromBase64(pub) : pub;
+    this._transport.send({ type: 'unwatch-presence', pub: pubBytes });
+  }
+
+  /** @param {string} pubB64 @returns {boolean|undefined} the last `presence-online`/`presence-offline` this Space received for `pubB64`, or `undefined` if never watched/never heard back (not yet arrived, or the relay never considered it visible). */
+  isLiveOnline(pubB64) {
+    return this._livePresence.get(pubB64);
   }
 
   /**
@@ -1225,6 +1268,18 @@ export class Space {
   async _handleIncoming(message) {
     const { nodeId, envelope, type, pub, xPub, name, groupRef } = message;
     if (type === 'subscribe' || type === 'unsubscribe' || type === 'hello') return; // all three are relay-bound, not peer-bound (see _sendSubscribeRequest/unsubscribeNode/_sendHello) - defensive no-op if one ever reaches here anyway.
+    if (type === 'presence-visibility' || type === 'watch-presence' || type === 'unwatch-presence') return; // also relay-bound, not peer-bound - see declareOnlineVisibility()/watchLivePresence()/unwatchLivePresence() and presence-visibility.js's own doc comment.
+    if (type === 'presence-online' || type === 'presence-offline') {
+      // The relay's reply to watchLivePresence() (both the immediate current-state reply and every
+      // later push) - see that method's own doc comment. Recorded regardless of whether ANYTHING
+      // ever called watchLivePresence() for this exact pub (a stray push is simply redundant, never
+      // harmful) - same "cheap to just accept" posture 'member-joined' takes above.
+      const pubB64 = QuCrypto.toBase64(pub);
+      const online = type === 'presence-online';
+      this._livePresence.set(pubB64, online);
+      this._bus?.emit('space.presence.live.changed', { pub: pubB64, online });
+      return;
+    }
     if (type === 'write-ack') {
       // See @qu/space-transport's relay.js "WRITE-ACK" doc comment - `seq` is this Node's mirror
       // size after the ack-triggering write landed, a cheap, storage-derived "your write reached

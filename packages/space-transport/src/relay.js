@@ -270,7 +270,7 @@
  * A relay never has a decryption key regardless of whether `bus` is wired
  * up - none of this exposes anything `seen`/`emitNotify()` don't already.
  */
-import { verifyEnvelope, deriveOwnerNodeId, deriveContentNodeId, verifyGrant, verifyGroupMembership } from '@qu/space-core';
+import { verifyEnvelope, deriveOwnerNodeId, deriveContentNodeId, verifyGrant, verifyGroupMembership, verifyPresenceVisibility } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
 import { createMemoryStore } from '@qu/space-storage';
 import { PresenceTracker } from './presence-tracker.js';
@@ -334,6 +334,33 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
    * relay restart, the owning Space expected to re-declare on its own next edit.
    */
   const groupMemberships = new Map();
+
+  /**
+   * @type {Map<string, {onlineVisibility: 'public'|'private', ts: number}>} pubB64 -> this
+   * identity's CURRENT `onlineVisibility`, 100% derived from verified `presence-visibility`
+   * declarations (`@qu/space-core`'s `presence-visibility.js`) - same shape/reasoning/`ts`-monotonic
+   * guard as `groupMemberships` above, just keyed by pubkey instead of `(groupOwnerPub, groupName)`.
+   * An UNDECLARED pubkey (no entry here at all) is treated as `'private'` - fail-closed, same posture
+   * an undeclared Group's writes get (kind-schema.js's own "'group'" doc comment). Same non-durability
+   * scope boundary as `groupMemberships`/`grants`/`presence` - in-memory only, lost on relay restart.
+   */
+  const presenceVisibility = new Map();
+
+  /**
+   * @type {Map<string, Set<string>>} pubB64 (the WATCHED identity) -> Set<peerId> (who asked to be
+   * told about it) - see `handleWatchPresence()`/`handleUnwatchPresence()` below. Deliberately NOT
+   * gated by `onlineVisibility` at REGISTRATION time (a watch for a currently-`'private'` pubkey is
+   * still recorded) - only at BROADCAST time (`isPresenceVisibleTo()`), so an identity that later
+   * flips to `'public'` doesn't require every already-registered watcher to re-subscribe. A stale
+   * entry for a peer that has since disconnected is pruned the same place `subscribers` is (this
+   * file's own `hub.registerDisconnect()` wiring, below).
+   */
+  const presenceWatchers = new Map();
+
+  /** `presenceVisibility`'s own fail-closed default - see that map's doc comment. @param {string} pubB64 @returns {boolean} */
+  function isPresenceVisibleTo(pubB64) {
+    return presenceVisibility.get(pubB64)?.onlineVisibility === 'public';
+  }
 
   /**
    * @type {Map<string, {groupOwnerPub: Uint8Array, groupName: string}>} nodeId -> the `groupRef` any
@@ -414,6 +441,18 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
       await handleGroupMembership(fromPeerId, message);
       return;
     }
+    if (message?.type === 'presence-visibility') {
+      await handlePresenceVisibility(fromPeerId, message);
+      return;
+    }
+    if (message?.type === 'watch-presence') {
+      handleWatchPresence(fromPeerId, message);
+      return;
+    }
+    if (message?.type === 'unwatch-presence') {
+      handleUnwatchPresence(fromPeerId, message);
+      return;
+    }
     if (message?.type === 'rtc-signal') {
       handleRtcSignal(fromPeerId, message);
       return;
@@ -423,10 +462,69 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
   hub.registerDisconnect?.((peerId) => {
     const pubB64 = presence.pubFor?.(peerId) ?? null;
     presence.disconnect(peerId);
-    if (pubB64) bus?.emit('debug.relay.presence.offline', { pub: pubB64 });
+    if (pubB64) {
+      bus?.emit('debug.relay.presence.offline', { pub: pubB64 });
+      broadcastLivePresence(pubB64, false);
+    }
     for (const peerIds of subscribers.values()) peerIds.delete(peerId); // a dropped connection stops being a forward target for everything it had subscribed to - see this file's own "SUBSCRIBER-TRACKING" doc comment on why a fresh connection must re-subscribe from scratch anyway.
+    for (const peerIds of presenceWatchers.values()) peerIds.delete(peerId); // same pruning, for THIS peer having watched others' live presence - see that map's own doc comment.
     peerQueues.delete(peerId); // that peer's own queue can never receive another message - nothing left to serialize.
   });
+
+  /** Pushes `pub`'s live online/offline transition to every currently-registered watcher, but ONLY if `onlineVisibility` allows it right now (checked at broadcast time, not at watch time - see `presenceWatchers`' own doc comment). @param {string} pubB64 @param {boolean} online */
+  function broadcastLivePresence(pubB64, online) {
+    if (!isPresenceVisibleTo(pubB64)) return;
+    const watchers = presenceWatchers.get(pubB64);
+    if (!watchers?.size) return;
+    const pub = QuCrypto.fromBase64(pubB64);
+    for (const peerId of watchers) hub.deliverTo(peerId, 'relay', { type: online ? 'presence-online' : 'presence-offline', pub });
+  }
+
+  /**
+   * See `@qu/space-core`'s `presence-visibility.js` - verified with `verifyPresenceVisibility()`
+   * BEFORE anything else, same "never trust a claim just because it arrived" posture every other
+   * signed control message here already takes. Deliberately does NOT itself broadcast anything - a
+   * visibility change alone has no online/offline transition to report; the next real `handleHello()`/
+   * disconnect is what actually notifies any already-registered watcher, via `broadcastLivePresence()`.
+   */
+  async function handlePresenceVisibility(fromPeerId, message) {
+    if (!(await verifyPresenceVisibility(message))) {
+      bus?.emit('debug.relay.presence-visibility.rejected', { reason: 'bad-signature' });
+      return;
+    }
+    const pubB64 = QuCrypto.toBase64(message.pub);
+    const current = presenceVisibility.get(pubB64);
+    if (current && message.ts <= current.ts) {
+      bus?.emit('debug.relay.presence-visibility.stale', { pub: pubB64, ts: message.ts, currentTs: current.ts }); // reordered delivery, correctly ignored - see presenceVisibility's own doc comment on `ts`.
+      return;
+    }
+    presenceVisibility.set(pubB64, { onlineVisibility: message.onlineVisibility, ts: message.ts });
+    bus?.emit('debug.relay.presence-visibility.received', { pub: pubB64, onlineVisibility: message.onlineVisibility });
+  }
+
+  /**
+   * Registers `fromPeerId` as wanting to know `pub`'s live online/offline transitions, and replies
+   * with the CURRENT state right away if `onlineVisibility` allows it (silence otherwise - never
+   * distinguishable from "currently offline," by design, so a `'private'` setting never leaks even
+   * the FACT that it is private via a differently-shaped reply). Deliberately unauthenticated (no
+   * `sig` required, unlike `handleSubscribe()`) - `onlineVisibility: 'public'` means exactly that:
+   * anyone who knows the pubkey, not just fellow Space members (see `presence-visibility.js`'s own
+   * doc comment on why there is no relay-enforced `'contacts'` tier to check a requester's identity
+   * against in the first place).
+   */
+  function handleWatchPresence(fromPeerId, { pub }) {
+    if (!pub) return;
+    const pubB64 = QuCrypto.toBase64(pub);
+    if (!presenceWatchers.has(pubB64)) presenceWatchers.set(pubB64, new Set());
+    presenceWatchers.get(pubB64).add(fromPeerId);
+    if (isPresenceVisibleTo(pubB64)) hub.deliverTo(fromPeerId, 'relay', { type: presence.isOnline(pubB64) ? 'presence-online' : 'presence-offline', pub });
+  }
+
+  /** The exact inverse of `handleWatchPresence()` - not gated on anything beyond well-formedness, same posture `handleUnsubscribe()` already takes (narrowing what a peer receives is never something it needs to prove authorization for). */
+  function handleUnwatchPresence(fromPeerId, { pub }) {
+    if (!pub) return;
+    presenceWatchers.get(QuCrypto.toBase64(pub))?.delete(fromPeerId);
+  }
 
   /** See this file's own "A THIRD message shape" doc comment. */
   async function handleHello(fromPeerId, { pub, sig }) {
@@ -447,6 +545,7 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
     presence.setOnline(pubB64, fromPeerId);
     bus?.emit('debug.relay.hello.received', { pub: pubB64 });
     bus?.emit('debug.relay.presence.online', { pub: pubB64 });
+    broadcastLivePresence(pubB64, true);
   }
 
   /**

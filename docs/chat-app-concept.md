@@ -322,11 +322,29 @@ Punkte" oben zur Nicht-Rückwirkung, und §2a zum davon unabhängigen
    Filter.** Aktuell rein relay-intern (nur für Push-Routing gelesen).
    Neuer Broadcast-Mechanismus: der Relay veröffentlicht Online/Offline-
    Übergänge für Pubkeys, die ein verbundener Client explizit abonniert -
-   ABER nur, wenn `presenceKind.onlineVisibility` das für DIESEN
-   Abonnenten erlaubt (`'public'` → jeder, `'contacts'` → nur
-   gemeinsame-Chat-Teilnehmer, `'private'` → niemand außer einem selbst).
-   Muss im Detail entworfen werden (eigener kleiner Technik-Plan vor der
-   Umsetzung).
+   ABER nur, wenn `onlineVisibility` das für DIESEN Abonnenten erlaubt.
+   ✅ So gebaut, nach kurzer Abstimmung mit dem Nutzer (siehe unten) -
+   BEWUSST NUR `'public'`/`'private'`, KEIN relay-berechnetes `'contacts'`:
+   ein Cross-Space-Mitgliedschafts-Index am Relay würde genau das
+   Membership-Wissen preisgeben, das mehrere ACL-Modi dieses Frameworks
+   bewusst vom Relay fernhalten (private Gruppen!) - siehe
+   `presence-visibility.js`'s eigenen Kommentar dazu. Mechanik, identisch
+   zum `'group'`-ACL-Muster (§2a): eine SEPARATE signierte Deklaration
+   (`Space.declareOnlineVisibility()`/`presence.js`s `declareOnlineVisibility()`,
+   setzt zusätzlich das app-lesbare `presenceKind.onlineVisibility`-Feld),
+   da der Relay niemals Yjs-Inhalte decodiert, auch keine `'public'`-Felder.
+   Abonniert wird NICHT über einen neuen globalen Kanal, sondern über die
+   ohnehin schon offene Space-Verbindung (`Space.watchLivePresence(pub)`/
+   `unwatchLivePresence()`/`isLiveOnline()`, reaktiv über
+   `presence.js`s neuen `LivePresenceWatcher` und den Bus-Topic
+   `space.presence.live.changed`) - ein FREMDER (kein gemeinsames Space-
+   Mitglied) kann trotzdem abonnieren, solange er den Pubkey kennt und
+   dieser `'public'` deklariert hat, exakt der "profilweite Einstellung"-
+   Anspruch aus der Analyse unten. Undeklarierte/`'private'`-Pubkeys sind
+   fail-closed (keine Antwort, nicht unterscheidbar von "gerade offline").
+   Ein weiterhin per-Space/per-App gepflegter, self-reported
+   `presenceKind.online` (bestehend, unverändert) bleibt der "App-
+   spezifische Override" für Chat-lokale Anwesenheit.
 2. **`UploadOutbox` um ein Ergebnis-Feld erweitern.** `_attempt()`
    (`upload-outbox.js`) verwirft aktuell den Rückgabewert von
    `upload(record, blob)`. Erweiterung: das Ergebnis (z.B. `{url}`) wird
