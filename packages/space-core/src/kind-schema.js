@@ -79,6 +79,55 @@
  *     Kind-agnostic "who may edit THIS specific page/event/post" primitive
  *     any many-per-owner content Kind wants - chat, calendar, forum, and
  *     CMS content alike, not something reinvented per app.
+ *   - `'group'` - `'content'`'s REVOCABLE counterpart: many-per-owner (one
+ *     Node per `(groupOwnerPub, groupName)` pair, same
+ *     `deriveContentNodeId()` this file already exports - a `'group'`-ACL
+ *     Kind's `path` argument IS `groupName`, its "owner" for id-derivation
+ *     purposes IS the referenced Group's own owner, never the Node's own
+ *     creator identity), but authorization is checked LIVE against a named
+ *     `@qu/app-core` `groupKind` Group's CURRENT membership instead of a
+ *     permanent, unrevocable grant (`grant.js`'s own doc comment: "Revocation
+ *     is deliberately out of scope" for `'content'`/`'named'` - the real gap
+ *     this mode closes, see `docs/chat-app-concept.md` §2a for the full
+ *     motivating case, a chat room whose membership must be able to shrink,
+ *     not just grow). Concretely:
+ *       - `nodeId = deriveContentNodeId(groupOwnerPub, kind, groupName)` -
+ *         self-certifying in the SAME sense `'content'` already is (anyone
+ *         who knows `(groupOwnerPub, groupName)` can compute it, nobody can
+ *         invert `nodeId` back to them), just committing to a GROUP's
+ *         identity instead of the creating peer's own.
+ *       - Every write message for a `'group'`-ACL Node carries `groupRef:
+ *         {groupOwnerPub, groupName}` alongside its ordinary `{nodeId,
+ *         envelope}` (see `Space._handleLocalUpdate()`/`@qu/space-transport`'s
+ *         relay.js `handleWrite()`) - required because, exactly like
+ *         `'content'`, `nodeId` alone cannot be inverted back to the
+ *         `(groupOwnerPub, groupName)` a verifier needs to (a) confirm this
+ *         write's own `nodeId` genuinely commits to (self-certifying, same
+ *         `deriveContentNodeId()` recompute-and-compare check `'content'`
+ *         already does) and (b) resolve WHOSE current membership to check
+ *         the signer against. No separate grant/scope-declaration CONTROL
+ *         MESSAGE is needed (unlike `'content'`'s self-grant) - the
+ *         self-certifying `nodeId` check on every single write already
+ *         proves the claimed scope is genuine, nothing to remember between
+ *         writes.
+ *       - The membership check itself reads a `groupKind` Group's CURRENT
+ *         `members` field (`@qu/app-core`'s `ContentResolver.resolveGroup()`
+ *         shape) - `Space._isAuthorizedWriter()`/`relay.js`'s `buildWriteAcl()`
+ *         both watch/cache each REFERENCED group's live state (same
+ *         "live-watched registry" pattern `@qu/app-shell`'s
+ *         `live-app-resolver.js` already established for `qu-platform-apps`)
+ *         rather than reading it fresh on every write - a deliberately
+ *         accepted bounded staleness window on REMOVAL (adding a member is
+ *         never unsafe to have stale for a moment; removing one means a
+ *         just-kicked writer's OWN in-flight write can still land until the
+ *         cache catches up - acceptable, explicitly confirmed, see that doc
+ *         section).
+ *       - Encryption `recipients` are COMPLETELY INDEPENDENT of this ACL
+ *         check (same split every OTHER mode already keeps between write-ACL
+ *         and read-visibility) - a caller resolves the Group's own CURRENT
+ *         members itself for that, same as any other `recipients`-narrowed
+ *         write already does; membership changes are never retroactive for
+ *         ALREADY-sealed content either way (`groupKind`'s own doc comment).
  *   - `'relay-admins'` - a FLAT, symmetric list of writers, exactly like
  *     `'members'`, but checked against a list a `Space`/relay is
  *     constructed with SEPARATELY from ordinary Space membership (a new
@@ -150,7 +199,7 @@ import { QuCrypto } from '@qu/core';
 
 const SHAPES = new Set(['atomic', 'text', 'list', 'richtext']);
 const VISIBILITIES = new Set(['encrypted', 'public']);
-const ACL_MODES = new Set(['members', 'owner', 'named', 'content', 'relay-admins']);
+const ACL_MODES = new Set(['members', 'owner', 'named', 'content', 'relay-admins', 'group']);
 const PERSISTENCE_MODES = new Set(['durable', 'volatile']);
 
 /** Prefix for a self-certifying owner/named Node id - see `deriveOwnerNodeId()`. Deliberately the same "~" convention Qu's earlier path-based identity Nodes used. */
@@ -160,7 +209,7 @@ const CONTENT_NODE_PREFIX = '~content:';
 
 /**
  * @param {string} kind
- * @param {{fields: Record<string, {shape: 'atomic'|'text'|'list'|'richtext', visibility?: 'encrypted'|'public'}>, acl?: {write?: 'members'|'owner'|'named'|'content'}, notifyTopics?: string[], persistence?: 'durable'|'volatile'}} def
+ * @param {{fields: Record<string, {shape: 'atomic'|'text'|'list'|'richtext', visibility?: 'encrypted'|'public'}>, acl?: {write?: 'members'|'owner'|'named'|'content'|'relay-admins'|'group'}, notifyTopics?: string[], persistence?: 'durable'|'volatile'}} def
  */
 export function defineKind(kind, { fields, acl = { write: 'members' }, notifyTopics = [], persistence = 'durable' }) {
   if (!kind || typeof kind !== 'string') throw new Error('defineKind: "kind" must be a non-empty string');
@@ -196,13 +245,14 @@ export function defineKind(kind, { fields, acl = { write: 'members' }, notifyTop
     acl: Object.freeze({ ...acl }),
     notifyTopics: Object.freeze([...notifyTopics]),
     persistence,
-    // A 'members'/'content'/'relay-admins'-Kind Node's meta stays 'encrypted' (pre-existing
-    // behavior for 'members', unchanged; 'content' and 'relay-admins' follow it since neither is a
-    // self-certifying identity Node either); an 'owner'/'named' identity Node's meta is 'public'
-    // automatically - see this file's own doc comment. A Kind that wants 'relay-admins' content to
-    // ALSO be publicly readable (the common case - e.g. `platformAppsKind`) overrides
+    // A 'members'/'content'/'relay-admins'/'group'-Kind Node's meta stays 'encrypted' (pre-existing
+    // behavior for 'members', unchanged; 'content', 'relay-admins' and 'group' all follow it since
+    // none is a self-certifying IDENTITY Node either - 'group' commits to a referenced Group's own
+    // identity, never a Node-owning identity of its own); an 'owner'/'named' identity Node's meta is
+    // 'public' automatically - see this file's own doc comment. A Kind that wants 'relay-admins'
+    // content to ALSO be publicly readable (the common case - e.g. `platformAppsKind`) overrides
     // `metaVisibility` itself, same as `@qu/app-core`'s `publicMeta()` already does for `'content'`.
-    metaVisibility: acl.write === 'members' || acl.write === 'content' || acl.write === 'relay-admins' ? 'encrypted' : 'public',
+    metaVisibility: acl.write === 'members' || acl.write === 'content' || acl.write === 'relay-admins' || acl.write === 'group' ? 'encrypted' : 'public',
   });
 }
 

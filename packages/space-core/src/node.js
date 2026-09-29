@@ -12,15 +12,23 @@ import { createField } from './field.js';
 
 export class SpaceNode {
   /**
-   * @param {{id: string, kindSchema: object, doc: Y.Doc, identity: object, recipientXPubKeys: () => Array<Uint8Array>}} params
+   * @param {{id: string, kindSchema: object, doc: Y.Doc, identity: object, recipientXPubKeys: () => Array<Uint8Array>, groupRef?: {groupOwnerPub: Uint8Array, groupName: string}|null}} params
+   *   `groupRef` - only meaningful for an `acl.write: 'group'` Kind (see kind-schema.js's own doc
+   *   comment on that mode) - which Group this Node's own writes are scoped to. Fixed for this
+   *   Node's whole lifetime (unlike `recipients`, which can vary per write) - stored here once,
+   *   at attach time, rather than threaded through every individual field write the way
+   *   `recipients` is. `null` for every other ACL mode, and for a `'group'`-ACL Node this peer only
+   *   ever intends to READ (not write) - `Space._handleLocalUpdate()` is the one place that reads
+   *   it back, to attach it to this Node's own outgoing write messages.
    */
-  constructor({ id, kindSchema, doc, identity, recipientXPubKeys }) {
+  constructor({ id, kindSchema, doc, identity, recipientXPubKeys, groupRef = null }) {
     this.id = id;
     this.kind = kindSchema.kind;
     this.kindSchema = kindSchema;
     this.doc = doc;
     this._identity = identity;
     this._recipientXPubKeys = recipientXPubKeys;
+    this.groupRef = groupRef;
     this._fields = new Map();
   }
 
