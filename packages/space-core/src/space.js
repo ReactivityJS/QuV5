@@ -189,6 +189,7 @@ import { SpaceNode, stampMeta } from './node.js';
 import { sealUpdate, sealPublicUpdate, verifyEnvelope, openUpdate } from './envelope.js';
 import { deriveOwnerNodeId, deriveContentNodeId, defineKind } from './kind-schema.js';
 import { signGrant, verifyGrant } from './grant.js';
+import { signGroupMembership } from './group-membership.js';
 import { sealStrategies } from './seal-strategies.js';
 
 const REMOTE_ORIGIN = Symbol('space-core:remote-update');
@@ -630,6 +631,34 @@ export class Space {
     if (!this._grants.has(message.nodeId)) this._grants.set(message.nodeId, new Set());
     this._grants.get(message.nodeId).add(granteePubB64);
     return true;
+  }
+
+  /**
+   * Tells this Space's relay who CURRENTLY belongs to a Group this identity owns, so the relay can
+   * enforce a `'group'`-ACL write's live membership check itself (relay.js's own `buildWriteAcl()` -
+   * its `groupMemberships` map is 100% derived from this exact message, never invented) WITHOUT ever
+   * having to decode that Group's own Yjs content - group-membership.js's own top doc comment has the
+   * full "why a signed declaration, not relay-side Yjs decoding" reasoning. Only meaningful for THIS
+   * identity's own Groups (`groupName` under `this._identity.signingPub` as owner) - there is no way
+   * to declare membership on someone else's behalf, by construction (the message is self-certifying,
+   * signed by the exact `groupOwnerPub` it carries).
+   *
+   * Callers should send this ALONGSIDE every write to a Group's own `members` field (see
+   * `@qu/app-core`'s `createGroup()`/`editGroup()`) - same "self-grant before any field write"
+   * discipline `createNode()`'s own `'content'`-ACL branch already establishes for `grantWriter()`,
+   * just for a REVOCABLE fact instead of a permanent one. Skipping this call for a given Group is
+   * safe for CLIENT-side enforcement (every client already reads the Group's real field content
+   * directly - `_currentGroupMembers()`'s own doc comment) but leaves the RELAY unable to enforce
+   * that Group's writes at all until the first declaration arrives - relay-side rejection is
+   * fail-closed (kind-schema.js's own "'group'" doc comment), so an undeclared Group's writes are
+   * simply dropped by the relay, never silently over-permitted.
+   * @param {{groupName: string, members: Array<Uint8Array>}} params - `members`: every CURRENT
+   *   member's signing pubkey (raw bytes) - see group-membership.js's own doc comment on why only
+   *   the signing pubkey half is needed here.
+   */
+  async declareGroupMembership({ groupName, members }) {
+    const message = await signGroupMembership({ groupName, members }, this._identity);
+    this._transport.send(message);
   }
 
   /**

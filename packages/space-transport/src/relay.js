@@ -40,7 +40,7 @@
  *     mirrored storage (nothing is deleted) - purely a live-forwarding
  *     opt-out.
  *
- * `resolveKindSchema(nodeId, claimedPub?)` lets the relay gate WRITES to
+ * `resolveKindSchema(nodeId, claimedPub?, groupRef?)` lets the relay gate WRITES to
  * only Node ids it's willing to route for, without needing to understand
  * what a Node's content means - same "blind to content, aware only of
  * routing/ACL metadata" posture QuStore's own relay has today. May be
@@ -48,7 +48,22 @@
  * still works fine, `await`ing a non-Promise value just resolves it
  * immediately). The optional second argument is the WRITE/SUBSCRIBE
  * message's own claimed signer pubkey, straight off the (not yet verified
- * at this point) envelope/request - see `@qu/app-core`'s
+ * at this point) envelope/request; the optional THIRD argument, `groupRef`
+ * (only ever present on a WRITE - `handleWrite()`/`ingestFederated()` below,
+ * never on a bare `subscribe` request, which carries none), is the SAME
+ * unverified-at-this-point `{groupOwnerPub, groupName}` claim `buildWriteAcl()`'s
+ * own `'group'` branch later re-derives and compares against `nodeId` for real -
+ * a resolver for an app that defines a `'group'`-ACL Kind can use it the exact
+ * same "unverified claim for CLASSIFICATION ONLY is safe" way `claimedPub` is
+ * already used for `'owner'`/`'named'` below (recompute `deriveContentNodeId(
+ * groupRef.groupOwnerPub, thatKind.kind, groupRef.groupName)` and compare to
+ * `nodeId`; a forged claim still fails the REAL authorization check regardless
+ * of what it got classified as). A `'group'`-ACL Node's FIRST-EVER subscribe
+ * (before this relay has seen any write for it yet, so `nodeGroupRefs` above
+ * has nothing to offer either) has no `groupRef` to classify by at all - a
+ * known, accepted gap for now: such a subscribe falls back to requiring flat
+ * `memberList` membership, same as any other unresolved nodeId already does.
+ * See `@qu/app-core`'s
  * `createAppResolveKindSchema()` for the reference consumer: an 'owner'/
  * 'named' Kind's id is `deriveOwnerNodeId(ownerPub, kind)` with NO `path`
  * involved, so a resolver CAN classify it purely by re-deriving from this
@@ -255,7 +270,7 @@
  * A relay never has a decryption key regardless of whether `bus` is wired
  * up - none of this exposes anything `seen`/`emitNotify()` don't already.
  */
-import { verifyEnvelope, deriveOwnerNodeId, verifyGrant } from '@qu/space-core';
+import { verifyEnvelope, deriveOwnerNodeId, deriveContentNodeId, verifyGrant, verifyGroupMembership } from '@qu/space-core';
 import { QuCrypto } from '@qu/core';
 import { createMemoryStore } from '@qu/space-storage';
 import { PresenceTracker } from './presence-tracker.js';
@@ -304,6 +319,38 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
 
   /** @type {Map<string, Set<string>>} nodeId -> Set<base64 Ed25519 pubkey> - 'named'-mode write-ACL state, 100% derived from verified `grant` messages (see grant.js) - see this file's own "GRANTS" doc comment below. */
   const grants = new Map();
+
+  /**
+   * @type {Map<string, {members: Set<string>, ts: number}>} `"<groupOwnerPub-b64>:<groupName>"` ->
+   * this Group's CURRENT membership, 100% derived from verified `group-membership` declarations
+   * (`@qu/space-core`'s `group-membership.js`) - this file's own `dispatch()`/`handleGroupMembership()`
+   * below, mirroring `grants` above but for `'group'`-ACL Kinds (kind-schema.js's own "'group'" doc
+   * comment): revocable, LIVE membership instead of a permanent per-Node grant. `ts` is the
+   * declaration's own signing timestamp - a later `handleGroupMembership()` call for the SAME key
+   * only applies if its own `ts` is strictly newer, so a REORDERED delivery (an older "remove bob"
+   * declaration arriving after a newer "add bob" one) can never regress this map - see
+   * group-membership.js's own doc comment on `ts`. Same explicit non-durability scope boundary
+   * `grants`/`presence` already accept (this file's own top doc comment) - in-memory only, lost on
+   * relay restart, the owning Space expected to re-declare on its own next edit.
+   */
+  const groupMemberships = new Map();
+
+  /**
+   * @type {Map<string, {groupOwnerPub: Uint8Array, groupName: string}>} nodeId -> the `groupRef` any
+   * write to this `'group'`-ACL Node carried - FIXED for that Node's whole lifetime (kind-schema.js's
+   * own "'group'" doc comment: `groupRef` never varies per write, only `recipients` does), so the
+   * FIRST write this relay ever sees for a given `nodeId` is enough to populate this map for good.
+   * Exists purely so `handleSubscribe()`'s catch-up REPLAY (below) can re-attach `groupRef` to each
+   * stored envelope it hands back - mirrored storage holds only the bare envelope (same shape every
+   * other ACL mode's mirror already uses), never the outer wire message's own `groupRef` field, so
+   * without this a catch-up subscriber would receive every past 'group'-ACL write with NO `groupRef`
+   * at all and reject every single one (`_isAuthorizedWriter()`'s own "no groupRef at all means never
+   * authorized" fail-closed rule - `@qu/space-core`'s space.js) - a real gap this Task closes, not a
+   * hypothetical one. Same non-durability scope boundary as `groupMemberships` right above (lost on
+   * relay restart) - acceptable for the identical reason: a relay that lost this also already lost
+   * `groupMemberships` for the same Node, so enforcement needs the owner to write again regardless.
+   */
+  const nodeGroupRefs = new Map();
 
   /**
    * @type {Map<string, Set<string>>} nodeId -> Set<peerId> - see this
@@ -361,6 +408,10 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
     }
     if (message?.type === 'grant') {
       await handleGrant(fromPeerId, message);
+      return;
+    }
+    if (message?.type === 'group-membership') {
+      await handleGroupMembership(fromPeerId, message);
       return;
     }
     if (message?.type === 'rtc-signal') {
@@ -456,8 +507,9 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
       hub.deliverTo(fromPeerId, 'relay', grantMessage);
     }
     const envelopes = await nodeStorage.load(nodeId);
+    const storedGroupRef = nodeGroupRefs.get(nodeId); // see that map's own doc comment - re-attached to EVERY replayed envelope, never persisted per-envelope.
     for (const envelope of envelopes) {
-      hub.deliverTo(fromPeerId, 'relay', { nodeId, envelope });
+      hub.deliverTo(fromPeerId, 'relay', storedGroupRef ? { nodeId, envelope, groupRef: storedGroupRef } : { nodeId, envelope });
     }
     bus?.emit('debug.relay.subscribe.replayed', { nodeId, count: envelopes.length, grants: storedGrants.length });
     // SYNC-ACK: tells the subscriber "you have now seen everything this relay had mirrored for this
@@ -533,6 +585,33 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
   }
 
   /**
+   * See this file's own `groupMemberships` doc comment (near its declaration above) and
+   * `@qu/space-core`'s group-membership.js. Verified with `verifyGroupMembership()` BEFORE anything
+   * here trusts it - exactly as strict as verifying a write's own signature, never adopted just
+   * because it arrived over an already-open connection. Unlike `handleGrant()`, this is NEVER
+   * broadcast to other peers and NEVER durably stored - see `groupMemberships`' own doc comment on
+   * that explicit, `presence`-like scope boundary: it exists purely so THIS relay can enforce a
+   * `'group'`-ACL write's live membership check itself; every client already learns a Group's real
+   * current membership directly from that Group's own (Yjs-decoded) content, never from this
+   * declaration.
+   */
+  async function handleGroupMembership(fromPeerId, message) {
+    const { groupOwnerPub, groupName } = message ?? {};
+    if (!(await verifyGroupMembership(message))) {
+      bus?.emit('debug.relay.group-membership.rejected', { groupName });
+      return;
+    }
+    const key = `${QuCrypto.toBase64(groupOwnerPub)}:${groupName}`;
+    const current = groupMemberships.get(key);
+    if (current && current.ts >= message.ts) {
+      bus?.emit('debug.relay.group-membership.stale', { groupName, ts: message.ts, currentTs: current.ts }); // reordered delivery, correctly ignored - see groupMemberships' own doc comment on `ts`.
+      return;
+    }
+    groupMemberships.set(key, { members: new Set(message.members.map((pub) => QuCrypto.toBase64(pub))), ts: message.ts });
+    bus?.emit('debug.relay.group-membership.received', { groupName, memberCount: message.members.length });
+  }
+
+  /**
    * See this file's own "SIGNALING (WebRTC)" doc comment above. Forwards
    * `{to, signal}` to whichever connection `to` is CURRENTLY on
    * (`presence.peerIdFor()`) - `from` is NEVER taken from the message
@@ -593,10 +672,28 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
    * the creating owner a transparent SELF-grant instead (see that file's
    * own doc comment), which arrives here as an ordinary signed `grant`
    * message exactly like any other, verified by the SAME `verifyGrant()`.
+   * `'group'` (kind-schema.js's own "'group'" doc comment) - `'content'`'s REVOCABLE counterpart -
+   * mirrors `@qu/space-core`'s `Space._isAuthorizedWriter()` exactly: `groupRef` (this function's
+   * THIRD argument, carried on the incoming write message itself, same as client-side) is REQUIRED,
+   * checked FIRST against `groupMemberships` above - no `groupRef` at all, or membership this relay
+   * has no declaration for yet, means never authorized (fail closed, same posture every other "don't
+   * know" case here already takes). Two checks, both must pass, same order as the client-side mirror:
+   * (1) self-certifying - `nodeId` must actually equal `deriveContentNodeId(groupRef.groupOwnerPub,
+   * kindSchema.kind, groupRef.groupName)`; (2) the signer is a member per `groupMemberships`' current
+   * value for that exact `(groupOwnerPub, groupName)` pair.
    */
-  function buildWriteAcl(kindSchema, nodeId) {
+  function buildWriteAcl(kindSchema, nodeId, groupRef) {
     const mode = kindSchema?.acl?.write;
     if (mode === 'relay-admins') return (pubB64) => relayAdminPubs.has(pubB64);
+    if (mode === 'group') {
+      if (!groupRef) return () => false;
+      return async (pubB64) => {
+        const expectedId = await deriveContentNodeId(groupRef.groupOwnerPub, kindSchema.kind, groupRef.groupName);
+        if (expectedId !== nodeId) return false; // self-certifying check failed - this write's own nodeId does not actually commit to the group it claims.
+        const key = `${QuCrypto.toBase64(groupRef.groupOwnerPub)}:${groupRef.groupName}`;
+        return groupMemberships.get(key)?.members.has(pubB64) ?? false;
+      };
+    }
     if (mode !== 'owner' && mode !== 'named' && mode !== 'content') return isSpaceMember;
     if (mode === 'content') return (pubB64) => grants.get(nodeId)?.has(pubB64) ?? false;
     return async (pubB64) => {
@@ -607,17 +704,17 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
     };
   }
 
-  async function handleWrite(fromPeerId, { nodeId, envelope }) {
-    const kindSchema = await resolveKindSchema(nodeId, envelope?.pub);
+  async function handleWrite(fromPeerId, { nodeId, envelope, groupRef }) {
+    const kindSchema = await resolveKindSchema(nodeId, envelope?.pub, groupRef);
     if (!kindSchema) {
       bus?.emit('debug.relay.write.rejected', { nodeId, reason: 'unknown-node' });
       return; // unknown Node - nothing to route to.
     }
-    if (!(await verifyEnvelope(envelope, buildWriteAcl(kindSchema, nodeId)))) {
+    if (!(await verifyEnvelope(envelope, buildWriteAcl(kindSchema, nodeId, groupRef)))) {
       bus?.emit('debug.relay.write.rejected', { nodeId, reason: 'bad-signature' });
       return; // bad/foreign signature - drop, never forwarded or mirrored.
     }
-    await acceptWrite(kindSchema, nodeId, envelope, fromPeerId);
+    await acceptWrite(kindSchema, nodeId, envelope, fromPeerId, groupRef);
   }
 
   /**
@@ -637,8 +734,9 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
    * so an envelope this relay only just received FROM upstream is never
    * immediately bounced back upstream again.
    */
-  async function acceptWrite(kindSchema, nodeId, envelope, excludePeerId) {
+  async function acceptWrite(kindSchema, nodeId, envelope, excludePeerId, groupRef) {
     bus?.emit('debug.relay.write.received', { nodeId, kind: kindSchema.kind });
+    if (groupRef) nodeGroupRefs.set(nodeId, groupRef); // see nodeGroupRefs' own doc comment - fixed per Node, harmless to re-set on every write.
 
     seen.push({ nodeId, envelope });
     const nodeStorage = storageFor(kindSchema);
@@ -664,12 +762,12 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
     const toPeerIds = [];
     for (const peerId of subscribers.get(nodeId) ?? []) {
       if (peerId === excludePeerId) continue; // never echo a write back to its own local author.
-      hub.deliverTo(peerId, excludePeerId ?? 'federation', { nodeId, envelope });
+      hub.deliverTo(peerId, excludePeerId ?? 'federation', groupRef ? { nodeId, envelope, groupRef } : { nodeId, envelope });
       toPeerIds.push(peerId);
     }
     bus?.emit('debug.relay.write.forwarded', { nodeId, toPeerIds });
 
-    if (excludePeerId !== null) bus?.emit('relay.write.local', { nodeId, envelope }); // see "FEDERATION" doc comment - a federateRelay() upstream link is the only intended subscriber of this.
+    if (excludePeerId !== null) bus?.emit('relay.write.local', groupRef ? { nodeId, envelope, groupRef } : { nodeId, envelope }); // see "FEDERATION" doc comment - a federateRelay() upstream link is the only intended subscriber of this.
 
     await emitNotify(kindSchema, nodeId, envelope);
   }
@@ -688,13 +786,17 @@ export function createRelayForwarder({ hub, members, relayAdmins = [], resolveKi
    * upstream relay can never inject unauthorized content downstream.
    * @param {string} nodeId
    * @param {object} envelope
+   * @param {{groupOwnerPub: Uint8Array, groupName: string}} [groupRef] - only meaningful for an
+   *   `acl.write: 'group'` Kind, carried alongside `nodeId`/`envelope` on the upstream relay's own
+   *   `relay.write.local` event exactly as a local write's wire message carries it - see this file's
+   *   own `acceptWrite()`.
    * @returns {Promise<boolean>} whether the envelope was accepted.
    */
-  async function ingestFederated(nodeId, envelope) {
-    const kindSchema = await resolveKindSchema(nodeId, envelope?.pub);
+  async function ingestFederated(nodeId, envelope, groupRef) {
+    const kindSchema = await resolveKindSchema(nodeId, envelope?.pub, groupRef);
     if (!kindSchema) return false;
-    if (!(await verifyEnvelope(envelope, buildWriteAcl(kindSchema, nodeId)))) return false;
-    await acceptWrite(kindSchema, nodeId, envelope, null);
+    if (!(await verifyEnvelope(envelope, buildWriteAcl(kindSchema, nodeId, groupRef)))) return false;
+    await acceptWrite(kindSchema, nodeId, envelope, null, groupRef);
     return true;
   }
 
