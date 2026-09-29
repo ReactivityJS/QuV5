@@ -2,3 +2,4 @@ export { awaitRelayAck, readReceiptKind, readReceiptNodeId, markRead, markDelive
 export { uploadOutboxKind, UploadOutbox } from './upload-outbox.js';
 export { autoCompactOnJoin } from './auto-compact.js';
 export { guardSync } from './sync-guard.js';
+export { uploadToRelayBlob } from './blob-upload.js';

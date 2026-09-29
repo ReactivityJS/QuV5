@@ -362,7 +362,25 @@ Punkte" oben zur Nicht-Rückwirkung, und §2a zum davon unabhängigen
    heruntergeladen hat, ist eine separate, pro-Empfänger verfolgbare
    Information (wiederverwendet dasselbe `readReceiptKind`/
    `deliveredUpTo`-Muster wie Nachrichten selbst, nur mit der Datei-`id`
-   als Anker statt einer Nachrichten-`id`).
+   als Anker statt einer Nachrichten-`id`). ✅ So gebaut:
+   `@qu/space-core`s `blob-auth.js` (`deriveBlobId(ownerPub, localId)` -
+   selbstzertifizierend, exakt dasselbe "id neu herleiten und vergleichen"
+   Muster wie `grant.js`, kein Relay-Register nötig) +
+   `@qu/space-transport`s `relay-blob-server.js` (`PUT`/`GET
+   /blob/<blobId>` auf demselben HTTP-Port wie `relay-app-server.js`,
+   ACL-Check via Signaturprüfung OHNE jeden Registry-Zustand) +
+   `@qu/space-storage`s `createBlobFileStore()`/`createMemoryBlobStore()`
+   (dieselbe Adapter-Konvention wie `createFileStore()`, nur für rohe
+   Bytes statt Envelopes) + `@qu/space-plugins`s `uploadToRelayBlob(space,
+   relayHttpUrl, localId, blob)` - direkt als `UploadOutbox`s `upload()`-
+   Callback einsetzbar, ihr Rückgabewert `{url}` landet automatisch im
+   Record (Punkt 2 oben). In `relay-server.js` (die generische
+   `@qu/space-transport`-Referenz-Relay) verdrahtet, unter
+   `QU_RELAY_DATA_DIR/blobs`; `app-shell`s eigener Relay-Entrypoint noch
+   NICHT verdrahtet (App-spezifische Integration, kein Phase-2-Scope).
+   Download bewusst UNAUTHENTIFIZIERT (der `blobId` selbst - ein SHA-256-
+   Digest - ist die Zugriffskontrolle, dieselbe Capability-URL-Haltung wie
+   bei gewöhnlichem Objekt-Storage).
 4. **`readReceiptKind` um `deliveredUpTo` erweitern** (siehe oben) -
    kleine, additive Schema-Änderung. ✅ So gebaut: `marks[contentNodeId]`
    trägt jetzt zusätzlich `{deliveredUpTo, deliveredAt}` neben `{upTo, at}`,

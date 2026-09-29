@@ -703,6 +703,53 @@ it. Three pieces:
     per-call opt-in, never a silent default (`docs/webrtc.md`'s own
     Datenschutz-Hinweis).
 
+### 3.12 The relay as a blob-storage mirror
+
+`docs/chat-app-concept.md`'s own Phase 2 item 3: `UploadOutbox`
+(`@qu/space-plugins`) already handles the LOCAL save-then-sync state
+machine, but a relay's ordinary envelope-mirroring path (§3.1) is a poor
+fit for large binary data — a Yjs update history has no notion of
+"replace/discard the old bytes" (`upload-outbox.js`'s own top doc
+comment). This gives the relay a SEPARATE, purpose-built mirror path for
+the actual bytes, so any Space member can download a file even once the
+original uploader is offline — the same reason mirroring structured CRDT
+data exists at all.
+
+- `@qu/space-core`'s `blob-auth.js` — `deriveBlobId(ownerPub, localId)` is
+  a pure, self-certifying function (same `deriveXNodeId()`-then-verify
+  shape `grant.js`'s own `verifyGrant()` already uses) — no relay-side
+  ownership registry needed. `signBlobUpload()`/`verifyBlobUpload()` is
+  the upload proof: a relay recomputes the expected `blobId` from the
+  claimed `(pub, localId)` and rejects if it doesn't match the URL path,
+  THEN checks the signature.
+- `@qu/space-transport`'s `relay-blob-server.js` — `createBlobRequestHandler()`,
+  the same shared-HTTP-layer factoring `relay-app-server.js` already uses
+  (`(req, res) => boolean`). `PUT /blob/<blobId>?pub=&localId=&sig=`
+  (ACL-checked via `verifyBlobUpload()`, size-limited via `maxBlobSize`,
+  default 25 MiB) / `GET /blob/<blobId>` (deliberately UNAUTHENTICATED —
+  `blobId` is an opaque SHA-256 digest, unguessable in practice, so
+  "whoever holds the id/url" is itself the access control, the same
+  capability-URL posture `handleWatchPresence()`'s `'public'`
+  `onlineVisibility` already takes — §3.5 UPDATE). `blobStore: null`
+  degrades every `/blob/*` request to 503 rather than removing the route.
+  Wired into `relay-server.js` (the generic `@qu/space-transport`
+  reference relay) under `QU_RELAY_DATA_DIR/blobs` — NOT yet wired into
+  `@qu/app-shell`'s own relay entrypoint (app-specific integration,
+  outside this Phase 2 item's scope).
+- `@qu/space-storage`'s `createBlobFileStore()`/`createMemoryBlobStore()`
+  — the same swappable-adapter convention `createFileStore()`/
+  `createMemoryStore()` already establish, just for raw bytes
+  (`{save(blobId, bytes), load(blobId), remove(blobId)}`) instead of
+  envelopes.
+- `@qu/space-plugins`'s `blob-upload.js` — `uploadToRelayBlob(space,
+  relayHttpUrl, localId, blob)`, designed to be passed DIRECTLY as
+  `UploadOutbox`'s own `upload(record, blob)` callback: it signs the
+  proof, `PUT`s the bytes, and resolves `{url, blobId}` — which
+  `UploadOutbox._attempt()` already merges into the record on `'done'`
+  (task/item 2's own "UPDATE — UPLOAD RESULT" mechanism), so
+  `outbox.statusOf(id)` sees the relay-hosted download URL like any other
+  field, no separate lookup.
+
 ## 4. File-by-file map
 
 ### `packages/core/` — `@qu/core`
@@ -751,6 +798,7 @@ existed.
 | `src/alias.js` | `deriveAliasIdentity()`, `aliasRegistryKind`/`aliasRegistryNodeId()`, `publishAlias()`, `AliasRegistry` — per-space pseudonymity. |
 | `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes; `declareOnlineVisibility()`/`LivePresenceWatcher` — the app-facing half of LIVE presence, §3.5 UPDATE. |
 | `src/presence-visibility.js` | `signPresenceVisibility()`/`verifyPresenceVisibility()` — the `'group'`-membership-declaration-shaped signed control message `onlineVisibility` enforcement runs on (§3.5 UPDATE). |
+| `src/blob-auth.js` | `deriveBlobId(ownerPub, localId)`/`signBlobUpload()`/`verifyBlobUpload()` — the self-certifying proof a relay's blob-storage mirror authorizes an upload with, no relay-side registry needed (§3.12). |
 | `src/user.js` | `userKind` (`qu-user`: `alias`/`epub`/`listed`, all public), `userNodeId()`, `resolveAlias()`, `ensureUserProfile()`, `filterListedUsers()` — the GunDB-style User-Node, the Peer-User-Verwaltung base primitive (§3.8). |
 | `src/wire-codec.js` | `encodeForWire()`/`decodeFromWire()` — Uint8Array ↔ base64 for any JSON serialization boundary (WebSocket, on-disk file). |
 | `src/compaction.js` | `compactIfNeeded(space, id, {threshold})` — opt-in compaction policy on top of `Space.compactNode()`/`envelopeCount()` (§3.4 UPDATE). |
@@ -764,11 +812,15 @@ existed.
 | `src/durable-store.js` | `createDurableStore()` — simulated persistence (in-memory backing object) for tests; same contract as real disk. |
 | `src/file-store.js` | `createFileStore(dataDir)` — real on-disk persistence, one newline-delimited JSON file per Node. Relay-only (`node:fs/promises`) — never import this into browser-bundled code. |
 | `src/indexeddb-store.js` | `createIndexedDbStore()`/`isIndexedDbAvailable()` — the browser CLIENT's own persistent tier (§3.4 UPDATE). Exposed via its own `@qu/space-storage/indexeddb-store` subpath export, not the barrel — see that UPDATE note for why. |
+| `src/blob-file-store.js` | `createBlobFileStore(dataDir)` — real on-disk persistence for raw BLOB bytes (§3.12), one `<blobId>.bin` file per blob. Relay-only. |
+| `src/blob-memory-store.js` | `createMemoryBlobStore()` — ephemeral in-process tier for raw blob bytes (§3.12), `blob-file-store.js`'s test-friendly counterpart. |
 
-All four implement the same contract: `append(nodeId, envelope)`,
-`load(nodeId)`, `replace(nodeId, envelopes)` (compaction — discards prior
-history in favor of the given envelopes, typically one `snapshot: true`
-envelope).
+All four Node-envelope stores implement the same contract:
+`append(nodeId, envelope)`, `load(nodeId)`, `replace(nodeId, envelopes)`
+(compaction — discards prior history in favor of the given envelopes,
+typically one `snapshot: true` envelope). The two blob stores implement a
+SEPARATE, simpler contract instead (§3.12): `save(blobId, bytes)`,
+`load(blobId)`, `remove(blobId)` — raw bytes, no CRDT/compaction concept.
 
 ### `packages/space-transport/` — `@qu/space-transport`
 
@@ -785,7 +837,8 @@ envelope).
 | `src/push-handler.js` | `registerPushHandler(bus, {sendPush})` — reference delivery-channel handler for `relay.notify.**`. |
 | `src/relay-identity.js` | `loadOrCreateIdentity(filePath)`/`describeIdentity()` — a relay's own keypair, auto-generated on first boot and persisted (only needed for federation). |
 | `src/relay-app-server.js` | `createAppRequestHandler()` — the shared HTTP layer (static browser app, `GET /members.json`, `POST /join`) both `relay-server.js` and `demo/relay.mjs` serve alongside their WebSocket endpoint. |
-| `src/relay-server.js` | Standalone, env-var-configured relay process (`QU_*`, see its own doc comment; `--print-identity` CLI flag) — what the Dockerfile runs. Also serves an app (today, `demo/web/`) via `relay-app-server.js` — see its own "SERVES AN APP" doc comment. |
+| `src/relay-blob-server.js` | `createBlobRequestHandler()` — `PUT`/`GET /blob/<blobId>`, the relay's blob-storage mirror (§3.12), same shared-HTTP-layer factoring as `relay-app-server.js`. |
+| `src/relay-server.js` | Standalone, env-var-configured relay process (`QU_*`, see its own doc comment; `--print-identity` CLI flag) — what the Dockerfile runs. Also serves an app (today, `demo/web/`) via `relay-app-server.js` — see its own "SERVES AN APP" doc comment — and a blob mirror via `relay-blob-server.js` under `QU_RELAY_DATA_DIR/blobs` (§3.12, "SERVES A BLOB MIRROR"). |
 | `src/index.js` | Package's public export surface (main entry — excludes `ws-client-transport.js`'s and `webrtc-peer.js`'s own browser-only subpaths, see each file's own doc comment on why; DOES include `webrtc-signaling.js`'s `wrapWithSignaling()`, which is browser- and node-safe). |
 
 ### `packages/space-plugins/` — `@qu/space-plugins` (OPTIONAL)
@@ -795,6 +848,7 @@ envelope).
 | `src/delivery-status.js` | `awaitRelayAck()`, `readReceiptKind`, `markRead()`/`markDelivered()`/`watchReadReceipts()`/`ReadReceiptWatcher` — local/relay-synced/delivered/read lifecycle helpers (§3.5). |
 | `src/upload-outbox.js` | `uploadOutboxKind`, `UploadOutbox` — local-save-then-sync queue for (multiple) file uploads: caller supplies a local blob store + an `upload()` function; this class owns the pending→uploading→done/failed state machine, retry, and a reactive `watch()`/`watchAll()`. |
 | `src/sync-guard.js` | `guardSync(outbox)` — holds a Screen Wake Lock (`navigator.wakeLock`) while `UploadOutbox` has `'pending'`/`'uploading'` entries, releases once all are settled; re-acquires on `visibilitychange`, degrades to a silent no-op where `wakeLock` is unsupported. |
+| `src/blob-upload.js` | `uploadToRelayBlob(space, relayHttpUrl, localId, blob)` — signs+`PUT`s to `relay-blob-server.js`, designed to be passed directly as `UploadOutbox`'s own `upload()` callback (§3.12). |
 | `src/index.js` | Package's public export surface. |
 
 Built entirely on `@qu/space-core`'s public API — `Space` has zero
@@ -955,6 +1009,8 @@ notice.
 | `signPresenceVisibility()` / `verifyPresenceVisibility()` | The signed `presence-visibility` control message itself (§3.5 UPDATE). |
 | `Space.watchLivePresence(pub)` / `.unwatchLivePresence(pub)` / `.isLiveOnline(pubB64)` | Subscribe to/read another identity's REAL relay-tracked connection state (§3.5 UPDATE) — distinct from `presenceKind.online` above. |
 | `LivePresenceWatcher` | Reactive multi-identity cache for the relay's own live connection state — `.watch(pub)` / `.unwatch(pub)` / `.isOnline(pubB64)` (§3.5 UPDATE). |
+| `deriveBlobId(ownerPub, localId)` | Self-certifying blob id, no relay registry needed (§3.12). |
+| `signBlobUpload(localId, owner)` / `verifyBlobUpload(msg)` | The signed proof a relay's blob-storage mirror authorizes an upload with (§3.12). |
 | `userKind` | Self-certifying `'owner'`-ACL Kind — `alias`/`epub`/`listed` (§3.8, the GunDB-style User-Node). |
 | `userNodeId(pub)` | Deterministic User-Node id for `pub`. |
 | `resolveAlias(alias, pub)` | `alias` if set, else `pub` base64url-encoded — GunDB's "alias defaults to pub". |
@@ -975,6 +1031,7 @@ notice.
 | `registerPushHandler(bus, {sendPush, pattern?})` | Reference push delivery-channel handler. |
 | `loadOrCreateIdentity(filePath)` / `describeIdentity(identity)` | A relay's own keypair — auto-generate-and-persist, and a printable public summary. |
 | `createAppRequestHandler({webDir, members, relay, allowJoin?, onJoin?, log?})` | Shared HTTP handler: static browser app, `GET /members.json`, `POST /join`. |
+| `createBlobRequestHandler({blobStore, maxBlobSize?, log?})` | Shared HTTP handler: `PUT`/`GET /blob/<blobId>`, the relay's blob-storage mirror (§3.12). `blobStore: null` degrades every request to 503. |
 
 ### Storage (`@qu/space-storage`)
 
@@ -983,6 +1040,8 @@ notice.
 | `createMemoryStore()` | Ephemeral tier: `{append, load, replace}`. |
 | `createDurableStore(backingStore?)` | Simulated-persistence tier (tests): same contract, plus `._backingStore`. |
 | `createFileStore(dataDir)` | Real on-disk tier: same contract, one `.ndjson` file per Node. |
+| `createBlobFileStore(dataDir)` | Real on-disk tier for raw blob bytes (§3.12): `{save(blobId, bytes), load(blobId), remove(blobId)}`, one `.bin` file per blob. |
+| `createMemoryBlobStore()` | Ephemeral tier for raw blob bytes (§3.12): same `{save, load, remove}` contract. |
 
 ### Bootstrap / Adapter Registry (`@qu/bootstrap`, see §3.7, §3.9)
 
@@ -1013,6 +1072,7 @@ notice.
 | `uploadOutboxKind` | Self-certifying `'owner'`-ACL Kind, `records: {shape:'atomic', visibility:'public'}` map. |
 | `UploadOutbox` | `.enqueue(meta, blob)` (fire-and-forget upload, resolves once locally saved+queued) / `.retry(id)` / `.statusOf(id)` / `.list()` / `.watch(id, cb)` / `.watchAll(cb)` (reactive, all records at once). Constructor takes an optional 4th `bus` param — with it, `'done'` records advance to `'synced'` once the relay ack's the metadata write. |
 | `guardSync(outbox)` | Holds a Screen Wake Lock while `outbox` (any `{watchAll}`-shaped object, e.g. `UploadOutbox`) has `'pending'`/`'uploading'` entries; releases once settled, re-acquires on `visibilitychange`. Returns a `stop()` that unobserves and releases. No-ops silently where `navigator.wakeLock` is unavailable. |
+| `uploadToRelayBlob(space, relayHttpUrl, localId, blob)` | Signs+`PUT`s to a relay's `relay-blob-server.js` endpoint (§3.12); designed to be passed directly as `UploadOutbox`'s own `upload()` callback — resolves `{url, blobId}`. |
 
 ### UI bindings (`@qu/space-ui`, OPTIONAL)
 

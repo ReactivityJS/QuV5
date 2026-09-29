@@ -5,6 +5,7 @@ export { sealUpdate, sealPublicUpdate, verifyEnvelope, openUpdate } from './enve
 export { signGrant, verifyGrant } from './grant.js';
 export { signGroupMembership, verifyGroupMembership } from './group-membership.js';
 export { signPresenceVisibility, verifyPresenceVisibility } from './presence-visibility.js';
+export { deriveBlobId, signBlobUpload, verifyBlobUpload } from './blob-auth.js';
 export { deriveAliasIdentity, aliasRegistryKind, aliasRegistryNodeId, publishAlias, AliasRegistry } from './alias.js';
 export { presenceKind, presenceNodeId, publishPresence, setStatus, setTyping, declareOnlineVisibility, watchPresence, PresenceWatcher, LivePresenceWatcher } from './presence.js';
 export { userKind, userNodeId, resolveAlias, ensureUserProfile, filterListedUsers } from './user.js';
