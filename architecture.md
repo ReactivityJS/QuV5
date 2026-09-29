@@ -110,7 +110,7 @@ private key to attempt decryption with (`verifyEnvelope()` needs only a
 public key; `openUpdate()` needs the private key and the relay never gets
 one).
 
-### 3.2 Kind-Schema: shape × visibility, and FIVE ACL modes
+### 3.2 Kind-Schema: shape × visibility, and SIX ACL modes
 
 A field declares two INDEPENDENT properties (`kind-schema.js`):
 
@@ -151,6 +151,87 @@ A field declares two INDEPENDENT properties (`kind-schema.js`):
   `removeRelayAdmin()` for how that list is grown/shrunk without a relay
   restart, the same reactive shape `addMember()`/`removeMember()` already
   give `'members'`).
+- **`'group'`** — `'content'`'s REVOCABLE counterpart: write access tracks
+  a referenced Group's CURRENT membership live, instead of a permanent
+  per-Node grant (`grant.js`'s own doc comment: "revocation is deliberately
+  out of scope" for `'named'`/`'content'` grants) — the primitive
+  `docs/chat-app-concept.md`'s chat rooms are designed around (a room's own
+  message history stays `'group'`-ACL, referencing a `'content'`-ACL Group
+  for its member list), and any other Qu-level content that needs "remove
+  someone's write access starting now, without re-encrypting history."
+  `nodeId = deriveContentNodeId(groupOwnerPub, kind, groupName)` —
+  self-certifying against the REFERENCED GROUP's identity, not the writing
+  peer's own, so a verifier who only has `nodeId` can never recover
+  `(groupOwnerPub, groupName)` from it alone: every write for a `'group'`-
+  ACL Node carries an explicit `groupRef: {groupOwnerPub, groupName}`
+  alongside `{nodeId, envelope}` on the wire (never inside the envelope
+  itself, which stays byte-identical in shape to every other Kind's) — a
+  verifier recomputes `deriveContentNodeId()` from the CLAIMED `groupRef`
+  and compares it to `nodeId`; a mismatched claim is rejected outright,
+  regardless of what it claims. No separate grant/scope-declaration message
+  is needed for THIS check — the self-certifying recompute-and-compare on
+  every single write already proves the claimed scope is genuine.
+
+  CLIENT-side, `Space._currentGroupMembers()` answers "who belongs to this
+  Group right now" the same way any other read does — by decoding the
+  Group's own `members` field directly (trivial for a client, which already
+  decrypts/decodes everything it subscribes to) — live-cached per Group,
+  invalidated by the ordinary `space.node.<groupId>.changed` event a later
+  membership edit already fires, never a separate polling mechanism. That
+  method is written to NEVER block/wait for network I/O, on purpose: it is
+  called from inside `_isAuthorizedWriter()`, itself called while VERIFYING
+  an incoming write — i.e. from inside `Space`'s own single, fully
+  serialized incoming-message queue (§3.2's own closing paragraph on why
+  that queue is serial at all). A Group's own catch-up data arrives over
+  that SAME queue as an ordinary later message, so a version of this check
+  that awaited "until the Group is confirmed synced" would deadlock the
+  queue outright — confirmed by hand while building this: a `'group'`-ACL
+  write to a not-yet-locally-known Group timed out every single time, even
+  when the Group's own data demonstrably arrived moments later on the wire.
+  Instead it reads whatever this Space already has locally RIGHT NOW —
+  fail-closed (nobody authorized yet) if genuinely nothing has arrived —
+  and the `changed` subscription catches it up the moment real data lands,
+  whether that is before or after the write it's gating. One real
+  consequence worth being explicit about: a `'group'`-ACL write reaching a
+  peer who has never independently seen that Group before can be dropped
+  even from a genuine member, since Yjs never retroactively replays a
+  discarded update once a later one from the same author has been accepted
+  — in practice unreachable for a real reader, who resolves a room's own
+  membership (`ContentResolver.resolveGroup()`) before ever caring about
+  its messages, warming this exact cache first. A Group Node, once ANY code
+  path has ever attached one, is never torn down by `Space._releaseNode()`
+  for that Space's own remaining lifetime (regardless of ordinary
+  reference-counting/Warm-Release-Cache rules — this file's own "WARM-
+  RELEASE CACHE" update, further down) — a real bug this otherwise hits: an
+  unrelated, perfectly ordinary read (`ContentResolver.resolveGroup()`'s
+  own `useNode()`+`release()`) can release a Group's refcount to zero
+  before `_currentGroupMembers()` ever gets a chance to run, and tearing it
+  down at that moment would silently and permanently strand every future
+  write from whichever author's verification happened to race that exact
+  moment (same Yjs "no retroactive integration" property as the paragraph
+  above).
+
+  RELAY-side, the relay never decodes ANY Yjs content — not even a
+  `visibility: 'public'` field, which the relay could technically read
+  losslessly since it isn't encrypted, but never bothers to Yjs-decode
+  either — so it has no way to learn a Group's current membership from the
+  Group's own writes the way a client does. `Space.declareGroupMembership()`
+  closes this with a SEPARATE, explicitly signed control message (self-
+  certifying like `grant`, verified by `@qu/space-core`'s
+  `group-membership.js`) that a Group owner sends ALONGSIDE their ordinary
+  field write — `@qu/app-core`'s `createGroup()`/`editGroup()` do this
+  automatically now. A `ts` field guards a reordered delivery from
+  regressing the relay's own view of current membership. `relay.js`'s
+  `buildWriteAcl()` mirrors the client-side check exactly (self-certifying
+  recompute, then a live lookup into its own `groupMemberships` map) — a
+  Group with no declaration at all is fail-closed, rejecting even its own
+  owner's writes, same as kind-schema.js's own posture everywhere else. A
+  separate `nodeGroupRefs` map closes one more gap: mirrored storage holds
+  only the bare envelope (same shape every other mode's mirror already
+  uses), never the outer wire message's own `groupRef` — without
+  remembering it (fixed per Node, so the first write is enough), a peer
+  catching up via subscribe-replay would receive every past `'group'`-ACL
+  write with no `groupRef` at all and reject every one of them.
 
 See `docs/v5-space-core-guide.md` §3 for the full behavioral contract, and
 `packages/space-core/src/grant.js`'s doc comment for the real Yjs property

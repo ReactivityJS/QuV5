@@ -159,7 +159,13 @@ Mitgliedschaft lebt ausschließlich in der referenzierten `groupKind`-Group
 Quelle der Wahrheit gibt, die auch für Verschlüsselungs-`recipients` UND
 den neuen `'group'`-Schreibzugriffs-Check gleichermaßen genutzt wird.
 
-### §2a. Mitglieder hinzufügen/entfernen - der neue Baustein
+### §2a. Mitglieder hinzufügen/entfernen - umgesetzt
+
+**Status: fertig implementiert** (`@qu/space-core`, `@qu/space-transport`,
+`@qu/app-core`, jeweils mit End-zu-Ende-Tests über einen echten Relay). Die
+folgenden Absätze sind das ursprüngliche Vorab-Konzept; zwei Stellen sind
+beim tatsächlichen Bauen bewusst ANDERS gelandet als hier ursprünglich
+skizziert - siehe die beiden Kästen unten für den finalen Stand.
 
 Der EINE Mechanismus, der noch nicht existiert (alles andere in diesem
 Dokument ist bereits vorhandenes Framework-Primitiv): ein Kind-Schema-ACL-
@@ -170,7 +176,8 @@ Grant (wie `'content'`/`'named'` heute, `grant.js`s eigener Kommentar:
 die AKTUELLE Mitgliederliste einer benannten `groupKind`-Group:
 
 - **Neuer ACL-Modus `'group'`** (`kind-schema.js`s `ACL_MODES`, sechster
-  Eintrag neben `owner`/`named`/`content`/`members`/`relay-admins`).
+  Eintrag neben `owner`/`named`/`content`/`members`/`relay-admins`). ✅ So
+  gebaut.
 - **Scope-Deklaration bei Erstellung** - dieselbe Notwendigkeit, die
   `'content'`-Modus bereits hat (ein `nodeId` lässt sich nicht zurück in
   seinen `path` umkehren, siehe `kind-schema.js`s eigener Kommentar) - ein
@@ -181,6 +188,17 @@ die AKTUELLE Mitgliederliste einer benannten `groupKind`-Group:
   ~552). Relay UND Space (nie nur der Relay, gleiche "nie blind vertrauen"
   Haltung wie überall sonst) halten das in einer neuen, zu `_grants`
   parallelen Map (`nodeId -> {groupOwnerPub, groupName}`).
+
+  > **❌ Anders gelandet:** Eine separate Scope-Deklaration war am Ende gar
+  > nicht nötig. `groupRef: {groupOwnerPub, groupName}` reist stattdessen
+  > direkt auf JEDER einzelnen Write-Nachricht mit (neben `{nodeId,
+  > envelope}`, nie innerhalb des Envelopes selbst) - ein Verifizierer
+  > rechnet `deriveContentNodeId(groupRef.groupOwnerPub, kind,
+  > groupRef.groupName)` nach und vergleicht mit `nodeId`; eine falsche
+  > Behauptung fällt bei JEDEM Write sofort durch, genau wie bei `'content'`
+  > selbst. Das macht eine vorab gespeicherte Scope-Map überflüssig - weder
+  > Relay noch Space müssen sich "wessen Scope ist Node X" merken, es steckt
+  > selbstzertifizierend in jeder Nachricht.
 - **Live-Mitgliedschafts-Cache statt Lookup pro Schreibvorgang** - ein
   Membership-Check bei JEDEM Write direkt gegen die Group-Node zu lesen
   wäre teurer als der heutige O(1)-Set-Check. Empfehlung: derselbe
@@ -191,14 +209,34 @@ die AKTUELLE Mitgliederliste einer benannten `groupKind`-Group:
   zeitliches Nachziehen beim Entfernen ist akzeptabel ("könnte eine Zeit
   gecacht werden") - ein einfacherer periodischer Refresh (statt
   Event-getrieben) ist als Fallback ausreichend, falls der Live-Watch-Ansatz
-  für v1 mehr Aufwand wäre als gerechtfertigt.
+  für v1 mehr Aufwand wäre als gerechtfertigt. ✅ So gebaut, CLIENT-seitig:
+  `Space._currentGroupMembers()` liest die Group direkt (entschlüsselt/
+  dekodiert wie jeder andere Read), gecacht, invalidiert über
+  `space.node.<groupId>.changed`. Blockiert dabei NIE auf Netzwerk-I/O -
+  ein früherer Entwurf tat das und deadlockte die eigene serialisierte
+  Incoming-Queue (die Group-Daten selbst kommen über dieselbe Queue rein,
+  auf die gerade gewartet würde) - siehe `space.js`s eigenen Kommentar an
+  `_currentGroupMembers()` für die volle Herleitung.
+
+  > **❌ Zusätzlich gelandet (Relay-seitig, ursprünglich nicht bedacht):**
+  > Der Relay dekodiert NIE Yjs-Inhalte, auch keine `visibility: 'public'`-
+  > Felder - er kann die Group also nicht einfach "mitlesen" wie ein Client.
+  > Für die RELAY-seitige Durchsetzung gibt es deshalb eine eigene, separat
+  > signierte Kontrollnachricht, `Space.declareGroupMembership()`
+  > (`@qu/space-core`s `group-membership.js`, selbstzertifizierend wie
+  > `grant`) - der Group-Owner sendet sie zusätzlich zum gewöhnlichen
+  > Feld-Write; `createGroup()`/`editGroup()` (`@qu/app-core`s `dev.js`) tun
+  > das automatisch. Ein `ts`-Feld verhindert, dass eine verspätet
+  > eintreffende ältere Deklaration eine neuere Mitgliedschaft zurückdreht.
+  > Ohne Deklaration lehnt der Relay JEDEN `'group'`-ACL-Write ab, fail-
+  > closed, auch den des Group-Owners selbst.
 - **Kein Einfluss auf bestehende Nachrichten-Verschlüsselung** - `recipients`
   beim Schreiben einer Nachricht wird weiterhin aus der Group zum
   Schreibzeitpunkt gelesen (bereits bestehendes `resolveGroup()`-Verhalten,
   "nicht rückwirkend", siehe oben) - der neue ACL-Modus entscheidet NUR, WER
   überhaupt schreiben darf, nicht FÜR WEN verschlüsselt wird. Beides bleibt
   bewusst getrennt (derselbe Split, den `kind-schema.js` schon immer macht:
-  Schreib-ACL und Lese-Sichtbarkeit sind unabhängige Achsen).
+  Schreib-ACL und Lese-Sichtbarkeit sind unabhängige Achsen). ✅ So gebaut.
 - **Umfang der Arbeit**: `kind-schema.js` (`ACL_MODES` + Doku),
   `space.js`s `_isAuthorizedWriter()` (Client-Spiegel, inkl. Live-Watch
   eigener referenzierter Groups), `relay.js`s `buildWriteAcl()`
@@ -207,6 +245,12 @@ die AKTUELLE Mitgliederliste einer benannten `groupKind`-Group:
   nicht-triviale Framework-Arbeit, vergleichbar zur bereits bestehenden
   `grant`/`'content'`-Mechanik - kein kleiner Zusatz, aber auch kein neues
   Konzept (reine Erweiterung eines bereits fünfmal bewährten Musters).
+  ✅ Plus ein real gefundener, unabhängiger Bug unterwegs behoben:
+  `Space._releaseNode()` durfte eine Group-Node bislang bei jedem Refcount-
+  Nulldurchgang abbauen (auch durch einen ganz gewöhnlichen, unbeteiligten
+  `ContentResolver.resolveGroup()`-Read) - das riss dem Live-Membership-
+  Cache irgendwann den Boden weg. Group-Nodes werden jetzt nie mehr
+  abgebaut, sobald irgendein Code-Pfad sie einmal angefasst hat.
 
 ### Nachrichtenform - bewusst robust/erweiterbar
 Jedes Element im `messages`-`ListField` ist ein flaches, offenes Objekt -
