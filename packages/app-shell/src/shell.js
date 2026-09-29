@@ -59,6 +59,14 @@
  * registry.md) - a deployment that wants a DIFFERENT adapter (a different
  * persistent-storage backend, a non-WebSocket transport) swaps the config
  * value, never this file's own code.
+ *
+ * UPDATE - WARM-RELEASE CACHE: `bootstrapSpace()` is now called with
+ * `warmNodeTTL`/`maxWarmNodes`/`staleAfter` set (see the call site's own
+ * comment, and `@qu/space-core`'s `Space`'s own "WARM-RELEASE CACHE" doc
+ * comment for the full design) - a page/View a visitor already resolved
+ * moments ago now resolves again instantly, no fresh relay round trip,
+ * without needing any change to `@qu/app-core`'s `ContentResolver`/
+ * `AppRuntime` or this file's own render calls.
  */
 import { QuCrypto } from '@qu/core';
 import { ensureUserProfile } from '@qu/space-core';
@@ -124,6 +132,22 @@ export class QuAppShell extends HTMLElement {
         relayAdmins,
         transport: { adapter: 'ws-client', url: relayUrl },
         storage: typeof indexedDB !== 'undefined' ? { adapter: 'indexeddb' } : null,
+        // WARM-RELEASE CACHE (`@qu/space-core`'s `Space`'s own doc comment has the full design) -
+        // ON by default for a real browser visitor, since this is exactly where the "every page
+        // navigation re-pays a full subscribe+sync-ack round trip" cost is actually felt. 5 minutes
+        // comfortably covers "revisited this page a moment later" without holding a Node warm for an
+        // entire idle browser tab session; 100 warm Nodes bounds relay-side subscriber-list growth
+        // (see that same doc comment's own scalability paragraph) regardless of how many distinct
+        // pages/Views one visitor's session touches; 60s staleAfter is the defensive belt-and-
+        // suspenders for the narrow "relay silently lost this peer's subscription without a
+        // detectable transport disconnect" edge case RESYNC ON RECONNECT doesn't already cover.
+        // `@qu/space-core`'s own default (`warmNodeTTL: 0`, i.e. today's exact behavior) is
+        // deliberately left untouched for every OTHER caller (tests, `demo/`, a future non-browser
+        // embedding) - this is the one place real visitors are served from, so it's the one place
+        // that opts in.
+        warmNodeTTL: 5 * 60 * 1000,
+        maxWarmNodes: 100,
+        staleAfter: 60 * 1000,
       });
 
       // This SAME local identity's own User-Node (`@qu/space-core`'s `ensureUserProfile()`,

@@ -3291,3 +3291,127 @@ for all four reference apps) plus `admin-mode-toggle.test.js`,
 unchanged against the migrated code - no test needed to change to match
 the refactor, since `bareRouteModes` for every existing app was chosen to
 reproduce exactly what `unsupportedModes()` already computed for it.
+
+**UPDATE - WARM-RELEASE CACHE (`@qu/space-core`'s `Space`), CLOSING THE
+"SEITEN AUS DER DB SIND TRÄGE" REPORT.** Root cause, traced through
+`@qu/app-core`'s `resolver.js`/`Space.useNode()`: every `resolvePage()`/
+`resolveView()`/`resolveTemplate()`/... call gates on `isNodeSynced(id)` -
+a relay's explicit `sync-ack` confirmation - before returning ANY field, a
+deliberate anti-stale-read guarantee (`waitFor()`'s own doc comment, and a
+REAL, previously-caught cross-peer race it fixes). Correct, but combined
+with `useNode()`/`release()`'s reference count hitting zero always meaning
+"tear the local Y.Doc down and unsubscribe right now"
+(`_releaseNode()`), this meant EVERY re-resolution of a Node ALREADY known
+to be current - a visitor navigating back to a page they were just on, a
+second `<div data-qu-view>` reading a source another View on the same page
+already resolved a moment earlier - paid a full fresh `subscribe` +
+wait-for-`sync-ack` round trip again, even though nothing about it could
+possibly have changed in between (the round trip is genuinely free of new
+information most of the time - Yjs makes a re-applied envelope idempotent,
+`compactNode()`'s own doc comment). A single page with 3-4 `<div
+data-qu-view>`s could easily mean 5-6 sequential relay round trips
+(Manifest+Page in parallel, then Template+Style in parallel,
+`runtime.js`'s `resolveRoute()`, plus one more per View) on EVERY visit,
+including the second visit to the exact same page in the exact same
+session.
+
+**The fix is deliberately NOT a second, parallel "resolved value" cache
+with its own invalidation rules** - a real, previously-caught bug CLASS in
+this exact codebase (stale reads from two data sources not kept in lockstep,
+see `resolver.js`'s own doc comments throughout). Instead, `Space` itself
+(the shared root EVERY Kind - Pages, Views, shared lists, Groups,
+Collections, the User/Platform-Apps registries, all of it - already goes
+through, via `useNode()`) can now be told to keep a refcount-zero Node
+attached and SUBSCRIBED (still receiving live updates completely normally
+the whole time - "warm" never means "paused") for a configurable grace
+period instead of tearing it down instantly:
+
+- **`warmNodeTTL`** (ms, `Space` constructor option, default `0` =
+  unchanged, exactly today's immediate-teardown behavior -
+  `use-node.test.js`'s own pre-existing 4 tests encode this default as a
+  hard contract, so it could never silently change). `> 0` means a released
+  Node stays attached up to `warmNodeTTL` ms; a `useNode()` re-acquiring it
+  within that window cancels the pending teardown and hands back the SAME
+  already-synced handle - `resolver.js`'s own `waitFor()`, completely
+  unchanged, resolves this on its very first, SYNCHRONOUS `checkFn()` call,
+  since `isNodeSynced()` never stopped being true. Zero `resolver.js`/
+  `ContentResolver`/`AppRuntime` changes were needed for this - staying
+  correct is automatic (the ordinary live-update path, not a cache
+  invalidation scheme that has to be got right), not something a second
+  cache layer has to reimplement.
+- **`maxWarmNodes`** (default `100`) - a time budget alone isn't a
+  sufficient scalability bound: `@qu/space-transport`'s `relay.js` tracks
+  `subscribers` as a `Map<nodeId, Set<peerId>>`, so every warm-held Node
+  costs the relay a permanent Set entry AND widens every future write's own
+  fan-out cost for that Node (`for (const peerId of subscribers.get(nodeId))`)
+  for as long as it stays warm. A visitor who browses many distinct pages in
+  one session would otherwise grow this without bound purely from
+  `warmNodeTTL`. `_warmSince`'s own Map-insertion-order (a warm entry is,
+  by definition, never touched again until re-`useNode()`d or evicted -
+  insertion order IS oldest-warmed-first order, no separate LRU bookkeeping
+  needed) is what `_evictWarmOverCap()` reads to evict the LEAST-recently-
+  warmed Node first once the cap is exceeded - bounded relay-side memory/
+  fan-out cost regardless of session length or how many pages one visitor
+  touches.
+- **`staleAfter`** (ms, default `0` = disabled) - the defensive belt on top:
+  even a continuously warm/subscribed Node could in principle miss a write
+  if a relay silently dropped its in-memory subscriber-list entry for this
+  peer WITHOUT the transport itself detecting a disconnect (the ordinary
+  "genuinely went offline" case is already covered for free by `Space`'s
+  own pre-existing "RESYNC ON RECONNECT" - `_handleTransportStatus()`
+  already re-subscribes every currently-attached Node on `'connected'`/
+  `'reconnected'`, so anything still warm at reconnect time self-heals with
+  no new code). A `useNode()` reacquiring a warm Node whose last confirmed
+  `sync-ack` is older than `staleAfter` clears `isNodeSynced()` for it and
+  sends one fresh `subscribe` before returning - the same real round trip a
+  cold resolve pays, bounded to "at most once every `staleAfter` ms per
+  Node" rather than on every single re-resolution.
+- **`forceRevalidate: true`** (a per-call option, `Space.useNode()` and now
+  every `ContentResolver` method - `resolvePage`/`resolveView`/
+  `resolveTemplate`/`resolveStyle`/`resolveManifest`/`resolveGroup`/
+  `resolvePrivatePage`/`resolveSharedList`/`resolveCollectionItem(s)`/
+  `resolveRoutes`/`resolveTemplateNames`/`resolveStyleNames`, all
+  documented once on `resolvePage()` and referenced from the rest) does the
+  identical "clear `isNodeSynced()`, send a fresh `subscribe`" thing
+  UNCONDITIONALLY, regardless of age - the explicit "prove this is fresh
+  right now" escape hatch for a pull-to-refresh action or an editor's own
+  "did my save actually land" check, layered on top of the same mechanism
+  rather than a separate code path.
+
+**Deployment**: `@qu/bootstrap`'s `bootstrapSpace()` forwards
+`warmNodeTTL`/`maxWarmNodes`/`staleAfter` straight through to `Space`
+(plain numbers, no adapter-resolution step needed, unlike `storage`/
+`transport`) - `undefined` by default, i.e. every existing caller keeps
+`Space`'s own off-by-default behavior unless it explicitly opts in.
+`@qu/app-shell`'s `shell.js` is the one caller that DOES, for a real
+browser deployment (5 min `warmNodeTTL`, 100 `maxWarmNodes`, 60s
+`staleAfter`) - exactly where a visitor actually feels the "every
+navigation re-pays a full relay round trip" cost this closes. Every other
+construction site (tests, `demo/`, a future non-browser embedding) is
+untouched and behaves exactly as before.
+
+**On the separately-discussed "serve read-mostly content from the
+filesystem instead" idea**: investigated and deliberately NOT pursued as a
+performance fix. `apps/README.md`'s own `/apps/*` convention already
+exists, but it only moves an app's own INTERACTIVE CODE to a build-time
+static bundle - the Pages/Views/Templates that code operates on still
+resolve through this exact same `ContentResolver` path, so it would not
+have addressed the reported latency at all. The warm-release cache above
+keeps every one of the Yjs/relay model's real properties (multi-writer
+CRDT, E2E encryption, per-Kind ACL, no central single point of failure -
+worth their cost for genuinely collaborative content: Guestbook entries,
+Forum topics, personal Blog instances) while removing the "renegotiate
+with the relay on every single navigation" tax that was actually
+responsible for the sluggishness, for read-mostly admin-authored content
+and collaborative content alike, without introducing a second,
+divergence-prone content source.
+
+Verified: `use-node.test.js` gained dedicated tests for the opt-in warm
+path (instant re-`useNode()` within `warmNodeTTL`, real teardown once the
+TTL fires, `maxWarmNodes` evicting oldest-first, `forceRevalidate`
+clearing `isNodeSynced()` and forcing a fresh round trip even while warm,
+`staleAfter` forcing revalidation past its window but not before) -
+without touching its own 4 pre-existing tests, which continue to prove the
+`warmNodeTTL: 0` default is pixel-for-pixel unchanged. `bootstrap-space.test.js`
+gained a pass-through test proving the three options actually reach
+`Space`'s own constructor rather than being silently dropped in transit.

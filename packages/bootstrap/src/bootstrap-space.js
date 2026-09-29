@@ -55,6 +55,15 @@
  * `{adapter: '<name>'}`-or-instance resolution as every other slot - see
  * `seal-strategies.js`'s `registerSealStrategyAdapters()` and
  * docs/routing-anonymity.md for what `'none'`/`'pad-to-members'` mean.
+ * `warmNodeTTL`/`maxWarmNodes`/`staleAfter` (all optional, all `undefined`
+ * by default - `Space`'s own defaults, i.e. warm-caching stays OFF unless a
+ * caller opts in) are forwarded to `Space` unchanged, no adapter-resolution
+ * step (plain numbers, nothing to resolve by name) - see `Space`'s own
+ * "WARM-RELEASE CACHE" doc comment for what they do. `@qu/app-shell`'s
+ * `shell.js` is the reference caller that turns them on for a real browser
+ * deployment - this function itself stays a neutral pass-through, same
+ * "every caller decides for itself" posture every other optional slot here
+ * already has.
  * @param {{
  *   registry?: import('./adapter-registry.js').AdapterRegistry,
  *   identity: object,
@@ -65,6 +74,9 @@
  *   relayAdmins?: Array<Uint8Array>,
  *   bus?: object|null,
  *   sealStrategy?: object|null,
+ *   warmNodeTTL?: number,
+ *   maxWarmNodes?: number,
+ *   staleAfter?: number,
  * }} config
  * @returns {Promise<{identity: object, transport: object, storage: object|undefined, volatileStorage: object|undefined, bus: object|null, sealStrategy: Function|undefined, space: import('@qu/space-core').Space}>}
  */
@@ -84,7 +96,20 @@ async function resolveSlot(registry, slot, value) {
   return registry.create(slot, adapter, options);
 }
 
-export async function bootstrapSpace({ registry, identity, transport, storage = null, volatileStorage = null, members = [], relayAdmins = [], bus, sealStrategy = null } = {}) {
+export async function bootstrapSpace({
+  registry,
+  identity,
+  transport,
+  storage = null,
+  volatileStorage = null,
+  members = [],
+  relayAdmins = [],
+  bus,
+  sealStrategy = null,
+  warmNodeTTL,
+  maxWarmNodes,
+  staleAfter,
+} = {}) {
   const resolvedIdentity = await resolveSlot(registry, 'identity', identity);
   if (!resolvedIdentity) throw new Error('bootstrapSpace: "identity" is required');
 
@@ -107,6 +132,9 @@ export async function bootstrapSpace({ registry, identity, transport, storage = 
     bus: resolvedBus,
     ...(resolvedVolatileStorage !== undefined ? { volatileStorage: resolvedVolatileStorage } : {}),
     ...(resolvedSealStrategy !== undefined ? { sealStrategy: resolvedSealStrategy } : {}),
+    ...(warmNodeTTL !== undefined ? { warmNodeTTL } : {}),
+    ...(maxWarmNodes !== undefined ? { maxWarmNodes } : {}),
+    ...(staleAfter !== undefined ? { staleAfter } : {}),
   });
 
   return {

@@ -162,11 +162,11 @@ export class ContentResolver {
     this._kinds = kinds;
   }
 
-  /** @returns {Promise<{name, version, rootTemplate, defaultRoute, theme, metadata}|null>} `null` if no manifest is published (or it hasn't synced within `timeout`). */
-  async resolveManifest({ timeout } = {}) {
+  /** @param {{timeout?: number, forceRevalidate?: boolean}} [options] - see `resolvePage()`'s own doc comment on `forceRevalidate`. @returns {Promise<{name, version, rootTemplate, defaultRoute, theme, metadata}|null>} `null` if no manifest is published (or it hasn't synced within `timeout`). */
+  async resolveManifest({ timeout, forceRevalidate = false } = {}) {
     const appManifestKind = this._kinds.appManifestKind;
     const id = await deriveOwnerNodeId(this._appAdminPub, appManifestKind.kind);
-    const { node, release } = await this._space.useNode(id, appManifestKind);
+    const { node, release } = await this._space.useNode(id, appManifestKind, { forceRevalidate });
     const manifest = await waitFor(this._space, id, async () => {
       const name = await node.field('name').get();
       if (!name) return null;
@@ -183,11 +183,11 @@ export class ContentResolver {
     return manifest;
   }
 
-  /** @returns {Promise<Array<{route: string, title: string}>>} Every route this app has published (docs §12) - for enumeration (nav/sitemap), never for resolving one already-known route (see router.js). Empty array if no registry exists yet. */
-  async resolveRoutes({ timeout } = {}) {
+  /** @param {{timeout?: number, forceRevalidate?: boolean}} [options] - see `resolvePage()`'s own doc comment on `forceRevalidate`. @returns {Promise<Array<{route: string, title: string}>>} Every route this app has published (docs §12) - for enumeration (nav/sitemap), never for resolving one already-known route (see router.js). Empty array if no registry exists yet. */
+  async resolveRoutes({ timeout, forceRevalidate = false } = {}) {
     const routeRegistryKind = this._kinds.routeRegistryKind;
     const id = await deriveOwnerNodeId(this._appAdminPub, routeRegistryKind.kind);
-    const { node, release } = await this._space.useNode(id, routeRegistryKind);
+    const { node, release } = await this._space.useNode(id, routeRegistryKind, { forceRevalidate });
     await waitFor(this._space, id, () => (node.field('routes').length > 0 ? true : null), { timeout: timeout ?? 500 });
     const routes = await node.field('routes').toArray();
     release();
@@ -215,12 +215,19 @@ export class ContentResolver {
    *   is loaded, the form is reset, or the edit completes) - `hold: true`
    *   with the returned `release()` never called leaks exactly like any
    *   other un-released `useNode()` handle would.
-   * @param {{timeout?: number, hold?: boolean, includeDrafts?: boolean}} [options] - `includeDrafts`
+   * @param {{timeout?: number, hold?: boolean, includeDrafts?: boolean, forceRevalidate?: boolean}} [options] - `includeDrafts`
    *   (default `false`) - see kinds.js's `pageKind.status` own doc comment: a `'draft'` page resolves
    *   as `null` (indistinguishable from "never published," the same 404-style signal an unpublished
    *   route already produces) unless the caller opts in - the app's own ordinary navigation/View
    *   rendering NEVER passes this, only an editor's own "load this draft back into the form" call site
    *   (e.g. `@qu/app-shell`'s `blog-actions.js`'s `loadForEdit()`) does.
+   *   `forceRevalidate` (default `false`) - passed straight through to `Space.useNode()` (see its own
+   *   "WARM-RELEASE CACHE" doc comment): forces one fresh `subscribe` round trip even if this exact
+   *   Node is still warm/synced from a moment ago, for a caller that explicitly wants proof of
+   *   freshness right now (a "pull to refresh" action, an editor's own "did my save really land"
+   *   check) rather than the ordinary local-first "reuse what's already known" default every OTHER
+   *   call here gets for free. Every `resolve*()` method in this class accepts the identical option,
+   *   with the identical meaning - documented here once rather than repeated at each call site.
    * @returns {Promise<{route, title, template, content, data, style, status}|null>|Promise<{page: object|null, release: () => void}>}
    *   Bare `page` (`null` if this route has no published page, or it hasn't
    *   synced within `timeout`) when `hold` is falsy (default); `{page,
@@ -236,10 +243,10 @@ export class ContentResolver {
    *   published) as actually stored - a caller that passed `includeDrafts`
    *   still needs to read it to tell the two apart.
    */
-  async resolvePage(route, { timeout, hold = false, includeDrafts = false } = {}) {
+  async resolvePage(route, { timeout, hold = false, includeDrafts = false, forceRevalidate = false } = {}) {
     const pageKind = this._kinds.pageKind;
     const id = await deriveContentNodeId(this._appAdminPub, pageKind.kind, route);
-    const { node, release } = await this._space.useNode(id, pageKind);
+    const { node, release } = await this._space.useNode(id, pageKind, { forceRevalidate });
     const page = await waitFor(this._space, id, async () => {
       // GATE ON isNodeSynced() FIRST - a REAL, caught bug (architecture.md §7's own "does not exist
       // (or has not synced)" production report, and this file's own resolveGroup()/resolveSharedList()
@@ -278,33 +285,33 @@ export class ContentResolver {
     return page;
   }
 
-  /** @returns {Promise<Array<{name: string}>>} Every template name this app owner has published (`dev.js`'s `createTemplate()` auto-registers - see `kinds.js`'s own `templateRegistryKind` doc comment) - for a CMS-style editor to list "every template," never for resolving one already-known name (see `resolveTemplate()`). Empty array if no registry exists yet. */
-  async resolveTemplateNames({ timeout } = {}) {
+  /** @param {{timeout?: number, forceRevalidate?: boolean}} [options] - see `resolvePage()`'s own doc comment on `forceRevalidate`. @returns {Promise<Array<{name: string}>>} Every template name this app owner has published (`dev.js`'s `createTemplate()` auto-registers - see `kinds.js`'s own `templateRegistryKind` doc comment) - for a CMS-style editor to list "every template," never for resolving one already-known name (see `resolveTemplate()`). Empty array if no registry exists yet. */
+  async resolveTemplateNames({ timeout, forceRevalidate = false } = {}) {
     const templateRegistryKind = this._kinds.templateRegistryKind;
     const id = await deriveOwnerNodeId(this._appAdminPub, templateRegistryKind.kind);
-    const { node, release } = await this._space.useNode(id, templateRegistryKind);
+    const { node, release } = await this._space.useNode(id, templateRegistryKind, { forceRevalidate });
     await waitFor(this._space, id, () => (node.field('templates').length > 0 ? true : null), { timeout: timeout ?? 500 });
     const templates = await node.field('templates').toArray();
     release();
     return templates.filter(Boolean);
   }
 
-  /** @returns {Promise<Array<{name: string}>>} Every style name this app owner has published - see `resolveTemplateNames()`'s own doc comment, identical shape. */
-  async resolveStyleNames({ timeout } = {}) {
+  /** @param {{timeout?: number, forceRevalidate?: boolean}} [options] - see `resolvePage()`'s own doc comment on `forceRevalidate`. @returns {Promise<Array<{name: string}>>} Every style name this app owner has published - see `resolveTemplateNames()`'s own doc comment, identical shape. */
+  async resolveStyleNames({ timeout, forceRevalidate = false } = {}) {
     const styleRegistryKind = this._kinds.styleRegistryKind;
     const id = await deriveOwnerNodeId(this._appAdminPub, styleRegistryKind.kind);
-    const { node, release } = await this._space.useNode(id, styleRegistryKind);
+    const { node, release } = await this._space.useNode(id, styleRegistryKind, { forceRevalidate });
     await waitFor(this._space, id, () => (node.field('styles').length > 0 ? true : null), { timeout: timeout ?? 500 });
     const styles = await node.field('styles').toArray();
     release();
     return styles.filter(Boolean);
   }
 
-  /** @param {string} name @param {{timeout?: number, hold?: boolean}} [options] - see `resolvePage()`'s own doc comment on `hold`. @returns {Promise<string|null>|Promise<{value: string|null, release: () => void}>} A template's HTML (`null` if unpublished/unsynced within `timeout`) when `hold` is falsy (default); `{value, release}` when `hold` is true. */
-  async resolveTemplate(name, { timeout, hold = false } = {}) {
+  /** @param {string} name @param {{timeout?: number, hold?: boolean, forceRevalidate?: boolean}} [options] - see `resolvePage()`'s own doc comment on `hold`/`forceRevalidate`. @returns {Promise<string|null>|Promise<{value: string|null, release: () => void}>} A template's HTML (`null` if unpublished/unsynced within `timeout`) when `hold` is falsy (default); `{value, release}` when `hold` is true. */
+  async resolveTemplate(name, { timeout, hold = false, forceRevalidate = false } = {}) {
     const templateKind = this._kinds.templateKind;
     const id = await deriveContentNodeId(this._appAdminPub, templateKind.kind, name);
-    const { node, release } = await this._space.useNode(id, templateKind);
+    const { node, release } = await this._space.useNode(id, templateKind, { forceRevalidate });
     const html = await waitFor(this._space, id, () => {
       // See resolvePage()'s own doc comment on gating on isNodeSynced() first - same reasoning,
       // applied here for an EDITED template's html (single field, but still re-write-able, still
@@ -318,12 +325,12 @@ export class ContentResolver {
     return html;
   }
 
-  /** @param {string} name @param {{timeout?: number, hold?: boolean}} [options] - see `resolvePage()`'s own doc comment on `hold`. @returns {Promise<string>|Promise<{value: string, release: () => void}>} A stylesheet's CSS (`''` if unpublished/unsynced within `timeout`) when `hold` is falsy (default); `{value, release}` when `hold` is true. */
-  async resolveStyle(name, { timeout, hold = false } = {}) {
+  /** @param {string} name @param {{timeout?: number, hold?: boolean, forceRevalidate?: boolean}} [options] - see `resolvePage()`'s own doc comment on `hold`/`forceRevalidate`. @returns {Promise<string>|Promise<{value: string, release: () => void}>} A stylesheet's CSS (`''` if unpublished/unsynced within `timeout`) when `hold` is falsy (default); `{value, release}` when `hold` is true. */
+  async resolveStyle(name, { timeout, hold = false, forceRevalidate = false } = {}) {
     if (!name) return hold ? { value: null, release: () => {} } : null;
     const styleKind = this._kinds.styleKind;
     const id = await deriveContentNodeId(this._appAdminPub, styleKind.kind, name);
-    const { node, release } = await this._space.useNode(id, styleKind);
+    const { node, release } = await this._space.useNode(id, styleKind, { forceRevalidate });
     // 2000ms, not the generic 4000ms other resolve*() methods fall back to (kinds.js's
     // ADMIN_KINDS/DEFAULT_KINDS resolveManifest()/resolvePage()/resolveTemplate() all share
     // waitFor()'s own default) - a missing/never-configured theme is common enough that a shorter
@@ -351,13 +358,13 @@ export class ContentResolver {
    * built-in ones. Only returns each item's own `path` (the registry's
    * `{name: path}` entries, `dev.js`'s `createCollectionItem()`) - call
    * `resolveCollectionItem()` for one item's actual field data.
-   * @param {{registryKind: object, registryField: string, ownerPub?: Uint8Array|string, timeout?: number}} params - `registryKind`/`registryField` come straight from `defineCollectionKind()`'s own return value. `ownerPub` defaults to this resolver's own configured `appAdminPub` (the common case, listing YOUR OWN collection) - pass a different one to read someone else's, if already known through some other channel.
+   * @param {{registryKind: object, registryField: string, ownerPub?: Uint8Array|string, timeout?: number, forceRevalidate?: boolean}} params - `registryKind`/`registryField` come straight from `defineCollectionKind()`'s own return value. `ownerPub` defaults to this resolver's own configured `appAdminPub` (the common case, listing YOUR OWN collection) - pass a different one to read someone else's, if already known through some other channel. `forceRevalidate` - see `resolvePage()`'s own doc comment.
    * @returns {Promise<Array<{name: string}>>}
    */
-  async resolveCollectionItems({ registryKind, registryField, ownerPub, timeout } = {}) {
+  async resolveCollectionItems({ registryKind, registryField, ownerPub, timeout, forceRevalidate = false } = {}) {
     const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
     const id = await deriveOwnerNodeId(owner, registryKind.kind);
-    const { node, release } = await this._space.useNode(id, registryKind);
+    const { node, release } = await this._space.useNode(id, registryKind, { forceRevalidate });
     await waitFor(this._space, id, () => (node.field(registryField).length > 0 ? true : null), { timeout: timeout ?? 500 });
     const items = await node.field(registryField).toArray();
     release();
@@ -374,13 +381,13 @@ export class ContentResolver {
    * `title`+`content` check, a Collection's field set is entirely
    * caller-defined, so there's no fixed field name to wait on specifically.
    * @param {string} path
-   * @param {{itemKind: object, ownerPub?: Uint8Array|string, timeout?: number}} params
+   * @param {{itemKind: object, ownerPub?: Uint8Array|string, timeout?: number, forceRevalidate?: boolean}} params
    * @returns {Promise<object|null>} every field's current value, keyed by field name; `null` if unpublished/unsynced within `timeout`.
    */
-  async resolveCollectionItem(path, { itemKind, ownerPub, timeout } = {}) {
+  async resolveCollectionItem(path, { itemKind, ownerPub, timeout, forceRevalidate = false } = {}) {
     const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
     const id = await deriveContentNodeId(owner, itemKind.kind, path);
-    const { node, release } = await this._space.useNode(id, itemKind);
+    const { node, release } = await this._space.useNode(id, itemKind, { forceRevalidate });
     const fieldNames = Object.keys(itemKind.fields);
     const item = await waitFor(this._space, id, async () => {
       const values = {};
@@ -398,13 +405,13 @@ export class ContentResolver {
 
   /**
    * @param {string} name
-   * @param {{ownerPub?: Uint8Array|string, timeout?: number}} [params] - `ownerPub` defaults to this resolver's own configured `appAdminPub` (the common case - a group owned by the SAME identity as the content it protects), same convention `resolveCollectionItems()` already uses.
+   * @param {{ownerPub?: Uint8Array|string, timeout?: number, forceRevalidate?: boolean}} [params] - `ownerPub` defaults to this resolver's own configured `appAdminPub` (the common case - a group owned by the SAME identity as the content it protects), same convention `resolveCollectionItems()` already uses. `forceRevalidate` - see `resolvePage()`'s own doc comment.
    * @returns {Promise<{name: string, members: Array<{pub: Uint8Array, xPub: Uint8Array}>}|null>} `null` if unpublished/unsynced within `timeout`. `members` are decoded back to raw bytes - the exact shape `createPrivatePage()`'s own `recipients` param expects (`members.map(m => m.xPub)`).
    */
-  async resolveGroup(name, { ownerPub, timeout } = {}) {
+  async resolveGroup(name, { ownerPub, timeout, forceRevalidate = false } = {}) {
     const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
     const id = await deriveContentNodeId(owner, groupKind.kind, name);
-    const { node, release } = await this._space.useNode(id, groupKind);
+    const { node, release } = await this._space.useNode(id, groupKind, { forceRevalidate });
     const group = await waitFor(this._space, id, async () => {
       // Unlike a brand-new Node's FIRST-ever write (where a field going from empty to non-empty IS
       // the "is it here yet" signal every other `waitFor()` caller in this file relies on), an EDIT
@@ -441,11 +448,12 @@ export class ContentResolver {
    * encrypted update in the first place, so from here it looks exactly
    * like nothing was ever published.
    * @param {string} route
+   * @param {{timeout?: number, forceRevalidate?: boolean}} [options] - see `resolvePage()`'s own doc comment on `forceRevalidate`.
    * @returns {Promise<{route, title, template, content, data}|null>}
    */
-  async resolvePrivatePage(route, { timeout } = {}) {
+  async resolvePrivatePage(route, { timeout, forceRevalidate = false } = {}) {
     const id = await deriveContentNodeId(this._appAdminPub, privatePageKind.kind, route);
-    const { node, release } = await this._space.useNode(id, privatePageKind);
+    const { node, release } = await this._space.useNode(id, privatePageKind, { forceRevalidate });
     const page = await waitFor(this._space, id, async () => {
       // Same "an EDIT to an already-existing value has no empty-to-non-empty tell" gap
       // `resolveGroup()`'s own doc comment above explains in full - `editPrivatePage()` can update
@@ -479,12 +487,13 @@ export class ContentResolver {
    * guestbook - waiting for the relay's sync-ack instead means an empty
    * result comes back as fast as a genuinely populated one does.
    * @param {string} name - see `pushToSharedList()`.
+   * @param {{timeout?: number, forceRevalidate?: boolean}} [options] - see `resolvePage()`'s own doc comment on `forceRevalidate`.
    * @returns {Promise<Array<object>>}
    */
-  async resolveSharedList(name, { timeout } = {}) {
+  async resolveSharedList(name, { timeout, forceRevalidate = false } = {}) {
     const anchor = await sharedListAnchor(name);
     const id = await deriveOwnerNodeId(anchor, sharedListKind.kind);
-    const { node, release } = await this._space.useNode(id, sharedListKind);
+    const { node, release } = await this._space.useNode(id, sharedListKind, { forceRevalidate });
     const entries = await waitFor(this._space, id, async () => {
       if (!this._space.isNodeSynced(id)) return null;
       return (await node.field('entries').toArray()).filter(Boolean);
@@ -505,15 +514,15 @@ export class ContentResolver {
    * lifecycle (`openLiveView()`'s own `close()`) this class's "every read
    * releases when done" contract was never designed for.
    * @param {string} name
-   * @param {{ownerPub?: Uint8Array|string, timeout?: number, hold?: boolean}} [options] - see `resolvePage()`'s own doc comment on `hold`.
+   * @param {{ownerPub?: Uint8Array|string, timeout?: number, hold?: boolean, forceRevalidate?: boolean}} [options] - see `resolvePage()`'s own doc comment on `hold`/`forceRevalidate`.
    * @returns {Promise<{sources: Array<object>, sortBy: string|null, sortOrder: string, limit: number|null, itemTemplate: string}|null>|Promise<{view: object|null, release: () => void}>}
    *   Bare `view` when `hold` is falsy (default); `{view, release}` when `hold` is true.
    */
-  async resolveView(name, { ownerPub, timeout, hold = false } = {}) {
+  async resolveView(name, { ownerPub, timeout, hold = false, forceRevalidate = false } = {}) {
     const owner = ownerPub ? (typeof ownerPub === 'string' ? QuCrypto.fromBase64(ownerPub) : ownerPub) : this._appAdminPub;
     const viewKindHere = this._kinds.viewKind ?? viewKind;
     const id = await deriveContentNodeId(owner, viewKindHere.kind, name);
-    const { node, release } = await this._space.useNode(id, viewKindHere);
+    const { node, release } = await this._space.useNode(id, viewKindHere, { forceRevalidate });
     const view = await waitFor(this._space, id, async () => {
       // See resolvePage()'s own doc comment on gating on isNodeSynced() first - identical reasoning.
       if (!this._space.isNodeSynced(id)) return null;

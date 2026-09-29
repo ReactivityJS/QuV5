@@ -90,6 +90,56 @@
  * existed - nothing is emitted, nothing else changes. Resync itself does
  * NOT depend on `bus` - it runs regardless, `bus` only reports it.
  *
+ * WARM-RELEASE CACHE (opt-in, default OFF - `warmNodeTTL: 0`, exactly
+ * today's behavior, unchanged): `useNode()`/`release()`'s reference count
+ * hitting zero has always meant "tear the local Y.Doc down and unsubscribe
+ * right now" (`_releaseNode()` below) - correct, but means EVERY later
+ * re-resolution of the SAME Node (a visitor navigating back to a page they
+ * were just on, a second `<div data-qu-view>` reading the same source a
+ * moment after the first) pays a full fresh `subscribe` + wait-for-
+ * `sync-ack` round trip again, even though nothing about that Node could
+ * possibly have gone stale in between (it was live-subscribed the whole
+ * time - see `resolver.js`'s `waitFor()`/`isNodeSynced()` own doc comments
+ * for why that round trip exists at all). Passing `warmNodeTTL > 0` changes
+ * ONLY what happens at refcount-zero: instead of unsubscribing immediately,
+ * the Node stays attached AND subscribed (still receiving live updates
+ * completely normally - nothing about "warm" means "paused") for up to
+ * `warmNodeTTL` ms, real teardown deferred until either that timer fires or
+ * `maxWarmNodes` is exceeded (oldest-warmed evicted first - insertion order
+ * into `_warmSince` IS recency order, since a warm entry, by definition,
+ * isn't touched again until either re-`useNode()`d or evicted/expired - see
+ * `_releaseNode()`'s own doc comment). A `useNode()` call for a still-warm
+ * id cancels the pending teardown and hands back the SAME already-synced
+ * handle - `waitFor()`'s own very first, synchronous `checkFn()` call
+ * (`resolver.js`) then resolves INSTANTLY, no network wait at all, for
+ * free, with ZERO changes needed in `resolver.js`/`ContentResolver` - this
+ * is deliberately not a second, parallel "resolved value" cache with its
+ * own invalidation rules (a real, previously-caught bug class in this exact
+ * codebase - see `resolver.js`'s own doc comments on stale-read races this
+ * project has already been bitten by): it is the EXISTING live subscription
+ * + `isNodeSynced()` state, simply kept a while longer before being thrown
+ * away, so staying correct is automatic (self-correcting via the ordinary
+ * live-update path) rather than something a cache invalidation scheme has
+ * to get right.
+ *
+ * `staleAfter` (ms, default `0` = disabled) is the DEFENSIVE belt-and-
+ * suspenders on top: even a warm, continuously-subscribed Node could in
+ * principle miss a write if a relay silently dropped its in-memory
+ * subscriber-list entry for this peer without the transport itself
+ * detecting a disconnect (`_handleTransportStatus()`'s own "RESYNC ON
+ * RECONNECT" doc comment already covers the ordinary "genuinely went
+ * offline" case for free - any Node still warm at reconnect time gets
+ * automatically re-subscribed then, no separate mechanism needed for that).
+ * `staleAfter` covers the narrower remaining gap: a `useNode()` reacquiring
+ * a warm Node whose last confirmed `sync-ack` is older than `staleAfter`
+ * clears `isNodeSynced()` for it and sends one fresh `subscribe` before
+ * returning - the SAME real round trip a cold resolve pays, just bounded to
+ * "at most once every `staleAfter` ms per Node," not every single
+ * re-resolution. `forceRevalidate: true` on `useNode()` does the identical
+ * thing unconditionally, regardless of age - the explicit "I want this
+ * proven fresh right now" escape hatch (a pull-to-refresh action, an
+ * editor's own "did my save actually land" check).
+ *
  * The SAME `bus` also gets a `debug.space.*` family, purely for optional
  * debugging/observability (see `@qu/events`' `createDebugLogger()`) - every
  * write-lifecycle step the two app-facing topics above only summarize:
@@ -195,6 +245,16 @@ export class Space {
    *     list, alongside the real recipients - see `seal-strategies.js`'s own doc comment and
    *     docs/routing-anonymity.md. Pass `sealStrategies.padToMembers` to hide a
    *     `{recipients}`-narrowed write's real audience from a relay/network observer.
+   *   `warmNodeTTL` = optional, default `0` (disabled - exactly today's behavior: `release()` at
+   *     refcount-zero unsubscribes immediately). See this file's own "WARM-RELEASE CACHE" doc
+   *     comment above for the full design; `use-node.test.js`'s own existing tests encode the
+   *     default-`0` behavior as a contract, so this default must never change.
+   *   `maxWarmNodes` = optional, default `100` - only consulted while `warmNodeTTL > 0`; bounds how
+   *     many refcount-zero Nodes stay warm at once (oldest-warmed evicted first), independent of how
+   *     long `warmNodeTTL` itself is - see this file's own "WARM-RELEASE CACHE" doc comment on why a
+   *     time budget alone isn't a sufficient scalability bound.
+   *   `staleAfter` = optional, default `0` (disabled) - see this file's own "WARM-RELEASE CACHE" doc
+   *     comment's own paragraph on this param.
    */
   constructor({
     identity,
@@ -205,6 +265,9 @@ export class Space {
     volatileStorage = createInMemoryVolatileStore(),
     bus = null,
     sealStrategy = sealStrategies.none,
+    warmNodeTTL = 0,
+    maxWarmNodes = 100,
+    staleAfter = 0,
   }) {
     this._identity = identity;
     this._members = [...members]; // own copy - addMember() (see below) must never mutate the caller's own array out from under them.
@@ -214,6 +277,9 @@ export class Space {
     this._volatileStorage = volatileStorage;
     this._bus = bus;
     this._sealStrategy = sealStrategy;
+    this._warmNodeTTL = warmNodeTTL;
+    this._maxWarmNodes = maxWarmNodes;
+    this._staleAfter = staleAfter;
     /** @type {Map<string, SpaceNode>} */
     this._nodes = new Map();
     /** @type {Map<string, Set<string>>} nodeId -> Set<base64 Ed25519 pubkey> - 'named'-mode write-ACL state, 100% derived from verified `grant` messages (see grant.js), never invented. */
@@ -222,6 +288,12 @@ export class Space {
     this._refCounts = new Map();
     /** @type {Set<string>} nodeIds a subscribed relay has explicitly confirmed (`sync-ack`, `_handleIncoming()`'s own doc comment) it has told us everything it currently has for - see `isNodeSynced()`'s own doc comment. Cleared on `unsubscribeNode()` (below) - this flag is only ever meaningful relative to the CURRENT local Y.Doc for that id, never across a teardown/resubscribe. */
     this._syncedNodes = new Set();
+    /** @type {Map<string, number>} nodeId -> Date.now() of the last confirmed `sync-ack` - see "WARM-RELEASE CACHE"'s own `staleAfter` paragraph. Cleared alongside `_syncedNodes`, same lifetime. */
+    this._lastSyncAckAt = new Map();
+    /** @type {Map<string, number>} nodeId -> Date.now() it went warm (refcount hit zero with `warmNodeTTL > 0`) - insertion order IS oldest-warmed-first order, see "WARM-RELEASE CACHE"'s own doc comment. Absence means "not currently warm" (either never released, or already torn down/re-acquired). */
+    this._warmSince = new Map();
+    /** @type {Map<string, ReturnType<typeof setTimeout>>} nodeId -> pending real-teardown timer for a warm Node - see `_releaseNode()`/`_teardownWarmNode()`. */
+    this._warmTimers = new Map();
     // Serialized (never overlapping) - see _handleIncoming()'s own doc comment on why processing
     // order must match ARRIVAL order for a 'content'-ACL Kind's grant-then-write sequence to be
     // race-free, and why relying on each _handleIncoming() call's own internal await timing to
@@ -554,6 +626,15 @@ export class Space {
     if (!this._nodes.has(id)) return;
     this._nodes.delete(id);
     this._syncedNodes.delete(id); // see isNodeSynced()'s own doc comment - stale relative to whatever NEW local Y.Doc a later subscribeNode()/useNode() for this SAME id builds.
+    this._lastSyncAckAt.delete(id); // same lifetime as _syncedNodes - see "WARM-RELEASE CACHE"'s own staleAfter paragraph.
+    // Defensive, not the normal path (a warm id's own _goWarm()/_teardownWarmNode() already clear
+    // these themselves): covers a direct unsubscribeNode() call for an id that happens to still be
+    // warm (e.g. test code, or a caller mixing raw subscribeNode()/unsubscribeNode() with useNode()
+    // for the same id despite useNode()'s own doc comment advising against it) - never leaves a
+    // stale timer pointed at a Node this call just tore down for real.
+    clearTimeout(this._warmTimers.get(id));
+    this._warmTimers.delete(id);
+    this._warmSince.delete(id);
     const sig = await QuCrypto.sign(new TextEncoder().encode(id), this._identity.signingKey);
     this._transport.send({ type: 'unsubscribe', nodeId: id, pub: this._identity.signingPub, sig });
     this._bus?.emit('debug.space.unsubscribe.sent', { nodeId: id });
@@ -733,16 +814,26 @@ export class Space {
    * components both interested in the same Node) can each `useNode()`/
    * `release()` independently without racing each other's unsubscribe -
    * the underlying Node stays subscribed until the LAST interested party
-   * releases it. Mixing this with a raw `subscribeNode()`/
-   * `unsubscribeNode()` call for the SAME id is not supported - pick one
-   * discipline per Node id (this one is the recommended default for any
-   * caller that doesn't have a specific reason to use the lower-level
-   * methods directly).
+   * releases it (and, with `warmNodeTTL > 0`, possibly a while longer still -
+   * see this file's own "WARM-RELEASE CACHE" doc comment). Mixing this with
+   * a raw `subscribeNode()`/`unsubscribeNode()` call for the SAME id is not
+   * supported - pick one discipline per Node id (this one is the
+   * recommended default for any caller that doesn't have a specific reason
+   * to use the lower-level methods directly).
    * @param {string} id
    * @param {object} kindSchema
+   * @param {{forceRevalidate?: boolean}} [options] `forceRevalidate` (default `false`) - see this
+   *   file's own "WARM-RELEASE CACHE" doc comment's own paragraph on it. Meaningless (and ignored)
+   *   for a genuinely cold `id` - a brand-new subscribe already IS a full revalidation.
    * @returns {Promise<{node: SpaceNode, release: () => void}>}
    */
-  async useNode(id, kindSchema) {
+  async useNode(id, kindSchema, { forceRevalidate = false } = {}) {
+    const wasWarm = this._warmSince.has(id);
+    if (wasWarm) {
+      this._warmSince.delete(id);
+      clearTimeout(this._warmTimers.get(id));
+      this._warmTimers.delete(id);
+    }
     this._refCounts.set(id, (this._refCounts.get(id) ?? 0) + 1);
 
     let node = this._nodes.get(id);
@@ -752,8 +843,24 @@ export class Space {
       if (this._storageFor(kindSchema)) await this._hydrateFromStorage(id, kindSchema, doc);
       node._skipReSeal = false;
       await this._sendSubscribeRequest(id); // awaited (unlike subscribeNode()'s own fire-and-forget) - useNode() already returns a Promise, so a caller awaiting it can rely on the subscribe request having actually left by the time it resolves.
+    } else if (forceRevalidate || this._isStale(id)) {
+      // Re-acquiring an EXISTING (warm or still actively in-use) handle, but this caller wants - or
+      // this Node's own age demands - proof it's still current: clear `isNodeSynced()` for it first
+      // (exactly what a genuine fresh subscribe starts from) so `resolver.js`'s own `waitFor()`
+      // genuinely waits for a NEW `sync-ack` instead of short-circuiting on the synchronous
+      // already-known value its own first `checkFn()` call would otherwise return - see this file's
+      // own "WARM-RELEASE CACHE" doc comment.
+      this._syncedNodes.delete(id);
+      await this._sendSubscribeRequest(id);
     }
     return { node, release: () => this._releaseNode(id) };
+  }
+
+  /** `true` once a warm (still-attached, refcount-zero) Node's last confirmed `sync-ack` is older than `staleAfter` (`0` = disabled, the default - always `false`) - see this file's own "WARM-RELEASE CACHE" doc comment. A Node with no recorded `sync-ack` at all (never actually confirmed synced) counts as stale, same "uncertain -> revalidate" posture. */
+  _isStale(id) {
+    if (this._staleAfter <= 0) return false;
+    const last = this._lastSyncAckAt.get(id);
+    return last === undefined || Date.now() - last >= this._staleAfter;
   }
 
   /**
@@ -778,7 +885,15 @@ export class Space {
     return this._syncedNodes.has(id);
   }
 
-  /** The other half of `useNode()`'s reference count - see that method's own doc comment. Fire-and-forget, same posture as every other control-message-sending method here. */
+  /**
+   * The other half of `useNode()`'s reference count - see that method's own
+   * doc comment. Fire-and-forget, same posture as every other
+   * control-message-sending method here. With `warmNodeTTL` disabled (`0`,
+   * the default), refcount-zero means exactly what it always has: tear down
+   * and unsubscribe right now. With `warmNodeTTL > 0`, refcount-zero instead
+   * hands the Node to `_goWarm()` - see this file's own "WARM-RELEASE CACHE"
+   * doc comment for the full design.
+   */
   _releaseNode(id) {
     const count = (this._refCounts.get(id) ?? 1) - 1;
     if (count > 0) {
@@ -786,6 +901,40 @@ export class Space {
       return;
     }
     this._refCounts.delete(id);
+    if (this._warmNodeTTL > 0) this._goWarm(id);
+    else this.unsubscribeNode(id);
+  }
+
+  /**
+   * Keeps `id` attached and subscribed past refcount-zero for up to
+   * `warmNodeTTL` ms instead of tearing it down immediately - see this
+   * file's own "WARM-RELEASE CACHE" doc comment. `_warmSince`'s own
+   * insertion order is what `_evictWarmOverCap()` reads as oldest-warmed-
+   * first - inserting here (never touched again while warm) is what keeps
+   * that order meaningful.
+   */
+  _goWarm(id) {
+    this._warmSince.set(id, Date.now());
+    this._evictWarmOverCap();
+    if (!this._warmSince.has(id)) return; // _evictWarmOverCap() may have just evicted THIS id (maxWarmNodes: 0) - nothing left to schedule a timer for.
+    const timer = setTimeout(() => this._teardownWarmNode(id), this._warmNodeTTL);
+    timer.unref?.(); // Node.js only (browsers' timer handles have no unref()) - a pending warm-teardown timer must never keep a process alive on its own.
+    this._warmTimers.set(id, timer);
+  }
+
+  /** Evicts the oldest-warmed Node(s) (real teardown, not just bookkeeping - see `_teardownWarmNode()`) until `_warmSince.size` is back within `maxWarmNodes` - the scalability bound `warmNodeTTL` alone doesn't provide, see this file's own "WARM-RELEASE CACHE" doc comment. */
+  _evictWarmOverCap() {
+    while (this._warmSince.size > this._maxWarmNodes) {
+      const oldestId = this._warmSince.keys().next().value;
+      this._teardownWarmNode(oldestId);
+    }
+  }
+
+  /** The real teardown a warm Node eventually gets, either its own `warmNodeTTL` timer firing or `_evictWarmOverCap()` forcing it early - clears this Node's warm bookkeeping, then defers to the ordinary `unsubscribeNode()` every non-warm release already used. */
+  _teardownWarmNode(id) {
+    clearTimeout(this._warmTimers.get(id));
+    this._warmTimers.delete(id);
+    this._warmSince.delete(id);
     this.unsubscribeNode(id);
   }
 
@@ -885,6 +1034,7 @@ export class Space {
       // stale synced-flag for whatever NEW local Y.Doc a later re-subscribe builds from scratch.
       if (this._nodes.has(message.nodeId)) {
         this._syncedNodes.add(message.nodeId);
+        this._lastSyncAckAt.set(message.nodeId, Date.now()); // see "WARM-RELEASE CACHE"'s own staleAfter paragraph - same lifetime as _syncedNodes.
         this._bus?.emit(`space.node.${message.nodeId}.sync-ack`, { nodeId: message.nodeId, count: message.count });
       }
       return;
