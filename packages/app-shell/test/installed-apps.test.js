@@ -42,7 +42,7 @@ import { createMemoryStore } from '@qu/space-storage';
 import { installGlobalAppBundle, registerApp, publishGlobalRoute, setAppMode, setAppBundleVersion } from '@qu/app-core';
 import { createLiveAppResolveKindSchema } from '../src/live-app-resolver.js';
 import { startPlatform } from '../src/boot.js';
-import { adminConsoleBundle } from '../admin-console-bundle.js';
+import { adminConsoleBundle, ADMIN_CONSOLE_VERSION } from '../admin-console-bundle.js';
 
 async function actor() {
   const kp = await QuCrypto.generateKeypair();
@@ -687,7 +687,7 @@ test('Admin console: once registered with appType:"admin-console" (the one-time 
 
     const apps = await platform.resolveApps({ timeout: 1000 });
     const admin = apps.find((a) => a.prefix === 'admin');
-    assert.equal(admin.bundleVersion, 1, 'setAppBundleVersion() recorded ADMIN_CONSOLE_VERSION after the update');
+    assert.equal(admin.bundleVersion, ADMIN_CONSOLE_VERSION, 'setAppBundleVersion() recorded ADMIN_CONSOLE_VERSION after the update');
 
     // The re-applied content is actually LIVE (not just bookkeeping), from a BRAND-NEW connection/
     // visit - same "check a fresh outsider, not the already-open session's own view" posture the
