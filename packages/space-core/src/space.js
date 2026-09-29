@@ -1077,8 +1077,30 @@ export class Space {
    * and unsubscribe right now. With `warmNodeTTL > 0`, refcount-zero instead
    * hands the Node to `_goWarm()` - see this file's own "WARM-RELEASE CACHE"
    * doc comment for the full design.
+   *
+   * A Group Node (`kind === GROUP_REF_KIND.kind`) is NEVER torn down here, at ANY refcount,
+   * regardless of `warmNodeTTL` - a real, previously-hit bug this Task fixes, not a hypothetical
+   * one: `_currentGroupMembers()`'s own cache (below) captures the SPECIFIC `SpaceNode` OBJECT a
+   * Group's `useNode()` call returned, the FIRST time any 'group'-ACL write ever needed verifying -
+   * if an ORDINARY, unrelated caller (`@qu/app-core`'s `ContentResolver.resolveGroup()`, the most
+   * natural thing an app does right after creating/editing a group) had ALREADY `useNode()`'d and
+   * `release()`d that SAME Group id earlier (its own refcount hitting zero FIRST, since
+   * `Space.createNode()` never itself increments it), this Node would be torn down and, on the
+   * FIRST 'group'-ACL write that ever needs it, `_currentGroupMembers()`'s own COLD `useNode()` call
+   * would have to `_attach()` a BRAND NEW, EMPTY Y.Doc - reading back an EMPTY membership set for
+   * THAT VERY write (this method never blocks/waits for real data to arrive - see that method's own
+   * doc comment), rejecting a genuinely authorized author's FIRST-EVER write to that Node - and,
+   * because Yjs never integrates a LATER update from an author once an EARLIER one in their own
+   * sequence was rejected (grant.js's own "WRITE-BEFORE-GRANT IS A TRAP" doc comment), EVERY
+   * subsequent write from that SAME author to that SAME Node would then ALSO be silently lost,
+   * permanently, even once the Group's real data caught up moments later. Groups are small and
+   * infrequently written - keeping one attached for this Space's own whole lifetime, once ANY code
+   * path has ever asked for it, is a deliberately cheap, unconditional guarantee against this exact
+   * class of race, not something worth threading a "was this a group-ACL-critical read" flag through
+   * every ordinary caller to avoid.
    */
   _releaseNode(id) {
+    if (this._nodes.get(id)?.kind === GROUP_REF_KIND.kind) return;
     const count = (this._refCounts.get(id) ?? 1) - 1;
     if (count > 0) {
       this._refCounts.set(id, count);
