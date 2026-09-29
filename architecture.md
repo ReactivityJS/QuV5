@@ -56,7 +56,7 @@ QuV5/
 │   ├── space-core/      @qu/space-core      - Space/Node/Field, envelopes, Kind-Schema, ACL, alias identities
 │   ├── space-storage/   @qu/space-storage   - storage adapters (memory/durable/file) a Space or relay mounts
 │   ├── space-transport/ @qu/space-transport - Transports (in-process/WebSocket), the Relay, federation, optional WebRTC (relay-piggybacked signaling + createWebRTCPeer())
-│   ├── space-plugins/   @qu/space-plugins   - OPTIONAL app helpers: delivery-status (write-ack + read receipts), upload outbox, auto-compact-on-join
+│   ├── space-plugins/   @qu/space-plugins   - OPTIONAL app helpers: delivery-status (write-ack + read/delivered receipts), upload outbox, sync-guard (wake lock), auto-compact-on-join
 │   ├── space-ui/        @qu/space-ui        - OPTIONAL vanilla-JS/DOM bindings: field bind, inline-edit, list-bind, upload-status
 │   ├── space-components/@qu/space-components- OPTIONAL declarative Custom Elements over @qu/space-ui: <qu-view>/<qu-bind>/<qu-list> - a CMS-authored template writes these as plain markup, no JS glue
 │   ├── app-core/        @qu/app-core        - App Runtime: Kind-Schemas for app content, content-addressed Node ids, ContentResolver, HashRouter, AppRuntime, Dev API
@@ -747,7 +747,8 @@ envelope).
 | File | Purpose |
 |---|---|
 | `src/delivery-status.js` | `awaitRelayAck()`, `readReceiptKind`, `markRead()`/`markDelivered()`/`watchReadReceipts()`/`ReadReceiptWatcher` — local/relay-synced/delivered/read lifecycle helpers (§3.5). |
-| `src/upload-outbox.js` | `uploadOutboxKind`, `UploadOutbox` — local-save-then-sync queue for (multiple) file uploads: caller supplies a local blob store + an `upload()` function; this class owns the pending→uploading→done/failed state machine, retry, and a reactive `watch()`. |
+| `src/upload-outbox.js` | `uploadOutboxKind`, `UploadOutbox` — local-save-then-sync queue for (multiple) file uploads: caller supplies a local blob store + an `upload()` function; this class owns the pending→uploading→done/failed state machine, retry, and a reactive `watch()`/`watchAll()`. |
+| `src/sync-guard.js` | `guardSync(outbox)` — holds a Screen Wake Lock (`navigator.wakeLock`) while `UploadOutbox` has `'pending'`/`'uploading'` entries, releases once all are settled; re-acquires on `visibilitychange`, degrades to a silent no-op where `wakeLock` is unsupported. |
 | `src/index.js` | Package's public export surface. |
 
 Built entirely on `@qu/space-core`'s public API — `Space` has zero
@@ -960,7 +961,8 @@ notice.
 | `ReadReceiptWatcher` | Reactive multi-reader cache — `.watch(pub)` / `.upToFor(pubB64, contentNodeId)` / `.deliveredUpToFor(pubB64, contentNodeId)`. |
 | `markFileReceived(space, fileId)` / `watchFileReceipts(space, pub)` | File-scoped aliases of `markDelivered()`/`watchReadReceipts()` — a file id works exactly like a `contentNodeId`; a file landing in the outbox is a delivery, not a read. |
 | `uploadOutboxKind` | Self-certifying `'owner'`-ACL Kind, `records: {shape:'atomic', visibility:'public'}` map. |
-| `UploadOutbox` | `.enqueue(meta, blob)` (fire-and-forget upload, resolves once locally saved+queued) / `.retry(id)` / `.statusOf(id)` / `.list()` / `.watch(id, cb)` (reactive). Constructor takes an optional 4th `bus` param — with it, `'done'` records advance to `'synced'` once the relay ack's the metadata write. |
+| `UploadOutbox` | `.enqueue(meta, blob)` (fire-and-forget upload, resolves once locally saved+queued) / `.retry(id)` / `.statusOf(id)` / `.list()` / `.watch(id, cb)` / `.watchAll(cb)` (reactive, all records at once). Constructor takes an optional 4th `bus` param — with it, `'done'` records advance to `'synced'` once the relay ack's the metadata write. |
+| `guardSync(outbox)` | Holds a Screen Wake Lock while `outbox` (any `{watchAll}`-shaped object, e.g. `UploadOutbox`) has `'pending'`/`'uploading'` entries; releases once settled, re-acquires on `visibilitychange`. Returns a `stop()` that unobserves and releases. No-ops silently where `navigator.wakeLock` is unavailable. |
 
 ### UI bindings (`@qu/space-ui`, OPTIONAL)
 

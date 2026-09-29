@@ -366,17 +366,21 @@ Punkte" oben zur Nicht-Rückwirkung, und §2a zum davon unabhängigen
    weiterhin die Historie bis zum Zeitpunkt des Entfernens"), damit keine
    Überraschung erst beim Chat-Bau auftaucht.
 6. **"Bildschirm an halten, bis synced" (Wake Lock).** Neue kleine
-   Client-Hilfsfunktion (Vorschlag: `packages/space-plugins/src/sync-
-   guard.js`) - hält per `navigator.wakeLock` (Screen Wake Lock API) das
-   Display an, SOLANGE `UploadOutbox` Einträge im Zustand
-   `pending`/`uploading` hat, gibt automatisch frei sobald alles
-   `synced`/`failed` ist. **Wichtige Grenze**: Wake Lock hält nur den
-   BILDSCHIRM an (verhindert Sperren/Standby) - sie kann eine Web-App
-   nicht dauerhaft "am Leben" halten, wenn der Tab/die App tatsächlich in
-   den Hintergrund/geschlossen wird (Browser/OS-Limits). Ein Service-
-   Worker mit Background-Sync ist ein sinnvoller, aber unabhängiger
+   Client-Hilfsfunktion (`packages/space-plugins/src/sync-guard.js`) - hält
+   per `navigator.wakeLock` (Screen Wake Lock API) das Display an, SOLANGE
+   `UploadOutbox` Einträge im Zustand `pending`/`uploading` hat, gibt
+   automatisch frei sobald alles `synced`/`failed` ist. **Wichtige Grenze**:
+   Wake Lock hält nur den BILDSCHIRM an (verhindert Sperren/Standby) - sie
+   kann eine Web-App nicht dauerhaft "am Leben" halten, wenn der Tab/die App
+   tatsächlich in den Hintergrund/geschlossen wird (Browser/OS-Limits). Ein
+   Service-Worker mit Background-Sync ist ein sinnvoller, aber unabhängiger
    Zusatzbaustein für "auch im Hintergrund irgendwann fertig hochladen",
-   ersetzt aber die Wake-Lock-Anzeige nicht.
+   ersetzt aber die Wake-Lock-Anzeige nicht. ✅ So gebaut: `guardSync(outbox)`
+   nutzt `UploadOutbox`s neue `.watchAll()` (reaktiv, alle Records auf
+   einmal), holt sich den Lock bei jedem in-flight-Übergang neu und legt
+   zusätzlich einen `visibilitychange`-Listener an, da der Browser einen
+   Wake Lock beim Hintergrundstellen des Tabs selbst freigibt - fehlende
+   `navigator.wakeLock`-Unterstützung degradiert zu einem stillen No-op.
 7. **Compaction für lange Nachrichten-Listen.** Bereits vorhandenes
    `compactIfNeeded()`/`autoCompactOnJoin()`-Muster (siehe
    `demo/chat.mjs`s eigene Nutzung) auf `chatKind.messages` anwenden,

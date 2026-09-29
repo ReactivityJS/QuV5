@@ -218,4 +218,21 @@ export class UploadOutbox {
     await notify();
     return unobserve;
   }
+
+  /**
+   * Reactive status for EVERY queued file at once - same reactive primitive
+   * as `watch(id, ...)`, just unfiltered. For a caller that needs the WHOLE
+   * queue's shape rather than one file's (e.g. `sync-guard.js`'s wake-lock
+   * helper, which needs to know the instant the LAST pending/uploading
+   * entry clears, not any one file in particular).
+   * @param {(records: object[]) => void} callback
+   * @returns {Promise<() => void>} unobserve function.
+   */
+  async watchAll(callback) {
+    const node = await this._ensureNode();
+    const notify = async () => callback(await this.list());
+    const unobserve = node.field('records').observe(notify);
+    await notify();
+    return unobserve;
+  }
 }
