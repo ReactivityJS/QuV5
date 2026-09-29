@@ -13,11 +13,47 @@ vorgeschlagenen Kind-Schemas/Erweiterungen ist bereits implementiert.
   `sharedListKind` wie im einfachen öffentlichen Beispiel in
   `docs/example-apps.md` §4) - einfacher, robust genug für v1.
 - **Umfang**: 1:1 UND Gruppen-Chats von Anfang an.
+- **Mitgliedschaft lebt in einer echten `groupKind`-Group, nicht in einem
+  privaten `participants`-Feld auf `chatKind` selbst** (Nachtrag - ursprünglich
+  war `participants` als eigenes verschlüsseltes Feld auf `chatKind` geplant,
+  siehe §2 für die Begründung des Wechsels: Mitglieder-ENTFERNEN braucht einen
+  lebendigen, widerrufbaren Mitgliedschafts-Check, den ein statisches Feld +
+  `grantWriter()` nicht bietet).
+- **Mitglieder hinzufügen UND entfernen, wirksam AB DEM ZEITPUNKT der
+  Änderung, OHNE bestehende Daten anzufassen** (Nachtrag, User-Entscheidung):
+  kein Neuverschlüsseln der Historie bei Mitgliederwechsel - deckt sich
+  1:1 mit dem bereits bestehenden, bereits getesteten `groupKind`/
+  `privatePageKind`-Verhalten (siehe nächster Punkt), erfordert also KEINE
+  neue Krypto-Arbeit, nur einen widerrufbaren Schreibzugriff (§2/Phase 2
+  Punkt 5).
 - **Verschlüsselung**: echtes Ende-zu-Ende, `recipients`-beschränkt auf die
   aktuellen Teilnehmer - inkl. der bewussten Einschränkung, dass ein
   später hinzugefügtes Gruppenmitglied die Historie davor NICHT
-  rückwirkend lesen kann (echtes E2E-Verhalten, keine zu behebende
-  Lücke).
+  rückwirkend lesen kann, UND dass ein entferntes Mitglied bereits
+  empfangene/entschlüsselte Nachrichten nicht "vergisst" (echtes
+  E2E-Verhalten, keine zu behebende Lücke - siehe `architecture.md`s
+  eigene "Not retroactive, by design" Passage zu `groupKind`/
+  `privatePageKind`, `group-private-content.test.js` beweist das bereits
+  Ende-zu-Ende).
+- **Freigabe alter Historie für ein NEUES (oder wieder-hinzugefügtes)
+  Mitglied - bewusst NICHT Teil dieses Konzepts, und bewusst NICHT
+  Framework/Core-Arbeit** (Nachtrag, User-Entscheidung): braucht keinen
+  neuen Framework-Mechanismus - ein bereits berechtigtes Mitglied kann die
+  Historie (die es ja selbst lesen kann) jederzeit als App-Feature erneut
+  mit einer erweiterten Empfängerliste "weiterreichen" (ein gewöhnlicher
+  Re-Write mit neuen `recipients`, dieselbe Grundoperation, die
+  `editPrivatePage()` heute schon anbietet - kein neues Primitiv). Ob/wie
+  eine App das für ehemalige Mitglieder anbietet, ist eine App-Policy-
+  Entscheidung, keine Core-Frage - siehe Phase 4/`@qu/extensions` für die
+  gleiche "App-Ebene, nicht Core" Haltung bei Reaktionen/Antworten.
+- **Raum-Adressierung**: `#/<app-prefix>/<raumId>/` (verschachtelt unter der
+  Chat-App, wie Forums `#/forum/topic/123`), NICHT eine neue flache
+  Top-Level-Route `#/<raumId>/` (wie der bestehende Bare-Pubkey-Fallback für
+  Nutzer/Apps) - siehe §2a für die Begründung. Ein Raum ist dabei technisch
+  KEINE zweite `Space`-Instanz (die bleibt 1:1 an eine Relay-Verbindung
+  gebunden) - "Raum" heißt hier: eine eigene, self-certifying Node-Adresse
+  innerhalb derselben, bereits verbundenen Space, exakt wie jede andere
+  App-eigene Route auch.
 - **Zugestellt-Status**: wird als eigener Zwischenzustand (zwischen
   "gesendet" und "gelesen") mit aufgenommen.
 - **Blob-Storage**: dreistufiges Modell - lokal → Relay (der Relay wirkt
@@ -70,7 +106,16 @@ Rad:
   `grantWriter()` an weitere Identitäten vergeben) + `visibility:
   'encrypted'` Felder + optional `recipients` beim Schreiben (verschlüsselt
   dann NUR für die genannten Empfänger, nicht die ganze Space). Das ist der
-  fehlende Baustein für **private 1:1-/Gruppen-Chats** (siehe Datenmodell).
+  fehlende Baustein für **private 1:1-/Gruppen-Chats** (siehe Datenmodell) -
+  `groupKind` ist dabei nicht nur die Empfänger-QUELLE fürs Verschlüsseln,
+  sondern (Nachtrag) auch die MITGLIEDSCHAFTS-Quelle des Raums selbst, siehe
+  §2a: `editGroup()` (bereits vorhanden, `dev.js`) ersetzt die ganze
+  Mitgliederliste wholesale - "jemanden entfernen" ist damit bereits ein
+  einziger, bestehender Aufruf; was NOCH fehlt, ist NICHT die
+  Mitgliederverwaltung selbst, sondern ein Weg, den Nachrichten-Schreibzugriff
+  LIVE gegen die jeweils aktuelle Gruppenmitgliedschaft zu prüfen, statt
+  gegen einen (laut `grant.js`s eigenem Doc-Kommentar bewusst NICHT
+  widerrufbaren) `grantWriter()`-Grant - siehe §2a.
 - **`ListField`** (`packages/space-core/src/field.js`) - Anhängen ist
   konfliktfrei per Yjs-CRDT, `observe()` liefert Live-Updates ohne Polling,
   `slice()` erlaubt "letzte N Nachrichten"-artiges Lesen. Passt gut als
@@ -95,14 +140,73 @@ profilweite Online-Sichtbarkeit, Relay-als-Blob-Mirror.
 
 ### `chatKind` (Konversation)
 ```
-acl: { write: 'content' }   // selbstzertifizierend + gezielte grantWriter()-Einladungen
+acl: { write: 'group' }     // NEU (§2a) - selbstzertifizierend wie 'content', aber Mitgliedschaft
+                             // wird LIVE gegen eine groupKind-Group geprüft, nicht per statischem
+                             // Grant - das ist, was "Mitglied entfernen" überhaupt möglich macht.
 fields:
   kind:         atomic, public      // '1:1' | 'group'
-  name:         atomic, encrypted   // nur bei Gruppen relevant
-  participants: atomic, encrypted   // Array<pubkey base64> - wer ist dabei
+  name:         atomic, encrypted   // nur bei Gruppen relevant - RAUM-DISPLAYNAME, nicht die Raum-ID
+  groupOwnerPub: atomic, public     // wer die zugehörige groupKind-Group besitzt (i.d.R. der Ersteller)
+  groupName:     atomic, public     // der Name/Pfad-Schlüssel dieser Group, siehe §2a - ZUSAMMEN mit
+                                     // groupOwnerPub die einzige Quelle der Wahrheit für "wer ist
+                                     // gerade dabei", nie ein eigenes participants-Feld hier
   messages:     list,   encrypted   // siehe unten
   createdAt:    atomic, public
 ```
+`participants` (ursprünglicher Entwurf) entfällt als eigenes Feld -
+Mitgliedschaft lebt ausschließlich in der referenzierten `groupKind`-Group
+(`ContentResolver.resolveGroup()` liest sie zurück), damit es genau EINE
+Quelle der Wahrheit gibt, die auch für Verschlüsselungs-`recipients` UND
+den neuen `'group'`-Schreibzugriffs-Check gleichermaßen genutzt wird.
+
+### §2a. Mitglieder hinzufügen/entfernen - der neue Baustein
+
+Der EINE Mechanismus, der noch nicht existiert (alles andere in diesem
+Dokument ist bereits vorhandenes Framework-Primitiv): ein Kind-Schema-ACL-
+Modus, dessen Schreibzugriff nicht gegen eine feste, boot-zeit-konfigurierte
+Liste (wie `'members'`/`'relay-admins'` heute) oder einen unwiderruflichen
+Grant (wie `'content'`/`'named'` heute, `grant.js`s eigener Kommentar:
+"Revocation is deliberately out of scope here") geprüft wird, sondern gegen
+die AKTUELLE Mitgliederliste einer benannten `groupKind`-Group:
+
+- **Neuer ACL-Modus `'group'`** (`kind-schema.js`s `ACL_MODES`, sechster
+  Eintrag neben `owner`/`named`/`content`/`members`/`relay-admins`).
+- **Scope-Deklaration bei Erstellung** - dieselbe Notwendigkeit, die
+  `'content'`-Modus bereits hat (ein `nodeId` lässt sich nicht zurück in
+  seinen `path` umkehren, siehe `kind-schema.js`s eigener Kommentar) - ein
+  `chatKind`-Node braucht beim Erstellen eine signierte, verifizierbare
+  Erklärung "dieser Node gehört zu Group `(groupOwnerPub, groupName)`",
+  analog zum bereits bestehenden transparenten Self-Grant, den
+  `Space.createNode()` für `'content'`-Kinds ausstellt (`space.js` Zeile
+  ~552). Relay UND Space (nie nur der Relay, gleiche "nie blind vertrauen"
+  Haltung wie überall sonst) halten das in einer neuen, zu `_grants`
+  parallelen Map (`nodeId -> {groupOwnerPub, groupName}`).
+- **Live-Mitgliedschafts-Cache statt Lookup pro Schreibvorgang** - ein
+  Membership-Check bei JEDEM Write direkt gegen die Group-Node zu lesen
+  wäre teurer als der heutige O(1)-Set-Check. Empfehlung: derselbe
+  "live-watched Registry"-Ansatz, den `live-app-resolver.js` für
+  `qu-platform-apps` bereits nutzt - eine referenzierte Group wird einmal
+  abonniert, ihr aktueller Mitgliederstand lokal gecacht, invalidiert über
+  ihr eigenes `changed`-Event. Explizit vom User bestätigt: ein gewisses
+  zeitliches Nachziehen beim Entfernen ist akzeptabel ("könnte eine Zeit
+  gecacht werden") - ein einfacherer periodischer Refresh (statt
+  Event-getrieben) ist als Fallback ausreichend, falls der Live-Watch-Ansatz
+  für v1 mehr Aufwand wäre als gerechtfertigt.
+- **Kein Einfluss auf bestehende Nachrichten-Verschlüsselung** - `recipients`
+  beim Schreiben einer Nachricht wird weiterhin aus der Group zum
+  Schreibzeitpunkt gelesen (bereits bestehendes `resolveGroup()`-Verhalten,
+  "nicht rückwirkend", siehe oben) - der neue ACL-Modus entscheidet NUR, WER
+  überhaupt schreiben darf, nicht FÜR WEN verschlüsselt wird. Beides bleibt
+  bewusst getrennt (derselbe Split, den `kind-schema.js` schon immer macht:
+  Schreib-ACL und Lese-Sichtbarkeit sind unabhängige Achsen).
+- **Umfang der Arbeit**: `kind-schema.js` (`ACL_MODES` + Doku),
+  `space.js`s `_isAuthorizedWriter()` (Client-Spiegel, inkl. Live-Watch
+  eigener referenzierter Groups), `relay.js`s `buildWriteAcl()`
+  (Server-Durchsetzung + Live-Cache), plus die neue Scope-Deklaration
+  selbst (ähnlich `grant.js`, eigene kleine Signaturnachricht). Reale,
+  nicht-triviale Framework-Arbeit, vergleichbar zur bereits bestehenden
+  `grant`/`'content'`-Mechanik - kein kleiner Zusatz, aber auch kein neues
+  Konzept (reine Erweiterung eines bereits fünfmal bewährten Musters).
 
 ### Nachrichtenform - bewusst robust/erweiterbar
 Jedes Element im `messages`-`ListField` ist ein flaches, offenes Objekt -
@@ -136,8 +240,11 @@ optionalen Felder verwenden, z.B. `platformAppsKind.config`):
 }
 ```
 **Verschlüsselung**: `messages` ist `visibility: 'encrypted'`, jeder
-`push()` mit `recipients: participants` (nur für die aktuellen
-Teilnehmer) - siehe "Entschiedene Punkte" oben zur Nicht-Rückwirkung.
+`push()` mit `recipients: (await resolveGroup(groupOwnerPub, groupName)).members`
+(nur für die zu diesem Zeitpunkt aktuellen Gruppenmitglieder, frisch
+aufgelöst bei JEDEM Push, nie gecacht/mitgeführt) - siehe "Entschiedene
+Punkte" oben zur Nicht-Rückwirkung, und §2a zum davon unabhängigen
+`'group'`-Schreibzugriffs-Check.
 
 ### Zugestellt/Gelesen
 - **Gelesen**: `readReceiptKind` direkt wiederverwenden -
@@ -196,11 +303,19 @@ Teilnehmer) - siehe "Entschiedene Punkte" oben zur Nicht-Rückwirkung.
    als Anker statt einer Nachrichten-`id`).
 4. **`readReceiptKind` um `deliveredUpTo` erweitern** (siehe oben) -
    kleine, additive Schema-Änderung.
-5. **Private Chat-ACL verifizieren.** `chatKind` (Vorschlag oben) nutzt
-   das bestehende `content`-ACL + `grantWriter()`-Muster - vor der
-   Implementierung einmal gezielt gegen ein 1:1- UND ein Gruppen-Szenario
-   durchgetestet werden (Einladung eines dritten Teilnehmers, Entzug),
-   damit keine Überraschung erst beim Chat-Bau auftaucht.
+5. **Neuer `'group'`-ACL-Modus (§2a) - der zentrale neue Baustein dieser
+   Phase.** `chatKind` (Vorschlag oben) nutzt NICHT das bestehende
+   `content`-ACL + `grantWriter()`-Muster (Nachtrag - ursprünglicher Plan,
+   verworfen: `grant.js`s eigener Kommentar "Revocation is deliberately out
+   of scope" macht Mitglieder-ENTFERNEN damit unmöglich), sondern einen neuen
+   sechsten ACL-Modus, dessen Schreibzugriff live gegen eine `groupKind`-
+   Group geprüft wird - siehe §2a für die volle Mechanik (Scope-Deklaration,
+   Live-Membership-Cache, betroffene Dateien). Vor der eigentlichen
+   Chat-Implementierung gezielt gegen ein 1:1- UND ein Gruppen-Szenario
+   durchtesten (Einladung UND Entfernen eines dritten Teilnehmers, inkl. der
+   Zusicherung "entfernt kann ab sofort nicht mehr schreiben, sieht aber
+   weiterhin die Historie bis zum Zeitpunkt des Entfernens"), damit keine
+   Überraschung erst beim Chat-Bau auftaucht.
 6. **"Bildschirm an halten, bis synced" (Wake Lock).** Neue kleine
    Client-Hilfsfunktion (Vorschlag: `packages/space-plugins/src/sync-
    guard.js`) - hält per `navigator.wakeLock` (Screen Wake Lock API) das
@@ -218,6 +333,18 @@ Teilnehmer) - siehe "Entschiedene Punkte" oben zur Nicht-Rückwirkung.
    `demo/chat.mjs`s eigene Nutzung) auf `chatKind.messages` anwenden,
    damit ein vielbeschriebener Chat nicht bei jedem Beitritt/Reconnect die
    komplette Historie neu repliziert.
+8. **Raum-Adressierung: `#/<app-prefix>/<raumId>/`.** Kein neuer Routing-
+   Mechanismus in `PlatformRuntime`/`AppRuntime` nötig - eine Chat-App
+   bekommt wie jede andere (Forum: `/topic/123`, Blog: `/post/<slug>`)
+   ihren `subPath` von `platform.js`s `resolveForPath()` einfach
+   durchgereicht und parst ihn selbst. Bewusst KEINE neue flache
+   Top-Level-Route `#/<raumId>/` (wie der bestehende Bare-Pubkey-Fallback
+   für Nutzer/Apps) - das würde eine Änderung an `resolveForPath()`s
+   Fallback-Kette selbst verlangen (jede Route, nicht nur Chat, betroffen)
+   für vergleichsweise wenig Gewinn (kürzere URLs). Die Raum-ID selbst ist
+   dieselbe, die als `groupKind`s `name`/Pfad-Parameter dient (§2a) - bewusst
+   NICHT der user-sichtbare, umbenennbare `chatKind.name`, damit Umbenennen
+   eines Raums nie dessen eigene Adresse verändert.
 
 ## 4. Phase 3 — der Chat selbst (Überblick, noch nicht gebaut)
 
