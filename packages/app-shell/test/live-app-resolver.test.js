@@ -40,6 +40,12 @@ import {
   adminPageKind,
   adminTemplateKind,
   globalAppAnchor,
+  groupKind,
+  chatKind,
+  chatNodeId,
+  sendMessage,
+  createGroup,
+  deriveContentNodeId,
 } from '@qu/app-core';
 import { createLiveAppResolveKindSchema } from '../src/live-app-resolver.js';
 
@@ -197,6 +203,70 @@ test('a relay-admin registers a brand-new GLOBAL app ("admin") at runtime, publi
 
   const template = await resolver.resolveTemplate('main', { timeout: 2000 });
   assert.ok(template?.includes('ADMIN'), 'the global app\'s "main" template resolves too - this is the part the regression actually broke');
+
+  wss.clients.forEach((ws) => ws.terminate());
+  await new Promise((resolve) => httpServer.close(resolve));
+});
+
+test("createLiveAppResolveKindSchema()'s own default groupKinds:[chatKind] classifies a 'group'-ACL chat Node correctly through the REAL relay-server.js resolver path - the exact gap apps/chat/ needs closed to work in any real deployment, not just a hand-rolled test harness", async () => {
+  // Two real, previously-missing fixes this test proves TOGETHER (either one alone still leaves
+  // apps/chat/ broken against a real relay): (1) relay-resolver.js's `groupKinds` param exists but
+  // does nothing unless a CALLER actually threads `groupRef` through to it - this file's own
+  // `resolveKindSchema` wrapper used to silently drop that third argument; (2) `createLiveAppResolveKindSchema()`
+  // ships NO groupKinds at all by default - without `chatKind` in it, `relay-server.js`'s own
+  // platform-mode deployment (what apps/chat/ actually runs under) would misclassify every chat
+  // write against the generic `pageKind` fallback regardless of how correct messenger.js/relay-
+  // resolver.js themselves are.
+  const owner = await actor();
+  const member = await actor();
+  const members = [
+    { pub: owner.signingPub, xPub: owner.xPublicKey },
+    { pub: member.signingPub, xPub: member.xPublicKey },
+  ];
+
+  const httpServer = createServer();
+  const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: true });
+  const hub = createWsServerHub(wss);
+  const { resolveKindSchema, start } = createLiveAppResolveKindSchema(); // NO groupKinds override - proves the DEFAULT alone is enough.
+  const relay = createRelayForwarder({ hub, members, resolveKindSchema, storage: createMemoryStore() });
+
+  await new Promise((resolve) => httpServer.listen(0, resolve));
+  const port = httpServer.address().port;
+  const url = `ws://127.0.0.1:${port}`;
+  await start({ url });
+
+  async function connect(identity) {
+    const transport = new WsClientTransport(url, { WebSocketImpl: WebSocket });
+    await transport.connect();
+    return new Space({ identity, members, transport });
+  }
+
+  const ownerSpace = await connect(owner);
+  const memberSpace = await connect(member);
+
+  const groupName = 'live-resolver-check';
+  await createGroup(ownerSpace, { name: groupName, members });
+  await ownerSpace.createNode(
+    chatKind,
+    { name: 'Live Resolver Check' },
+    { groupOwnerPub: owner.signingPub, groupName, recipients: members.map((m) => m.xPub) }
+  );
+
+  const groupId = await deriveContentNodeId(owner.signingPub, groupKind.kind, groupName);
+  const seenGroup = await waitUntil(() => relay.seen.some((e) => e.nodeId === groupId));
+  assert.ok(seenGroup, "the group's own creation write reached the relay (not rejected)");
+
+  memberSpace.subscribeNode(groupId, groupKind);
+  await waitUntil(() => memberSpace.isNodeSynced(groupId));
+
+  const chatId = await chatNodeId(owner.signingPub, groupName);
+  const groupRef = { groupOwnerPub: owner.signingPub, groupName };
+  const memberChatNode = memberSpace.subscribeNode(chatId, chatKind, { groupRef });
+
+  await sendMessage(ownerSpace, { groupOwnerPub: owner.signingPub, groupName }, { text: 'über den echten Live-Resolver' });
+  const got = await waitUntil(async () => (await memberChatNode.field('messages').toArray()).length === 1);
+  assert.ok(got, 'the message reached a DIFFERENT member through the real relay-server.js resolver path');
+  assert.equal((await memberChatNode.field('messages').toArray())[0].text, 'über den echten Live-Resolver');
 
   wss.clients.forEach((ws) => ws.terminate());
   await new Promise((resolve) => httpServer.close(resolve));

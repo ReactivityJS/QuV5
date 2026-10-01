@@ -60,7 +60,7 @@ import { QuCrypto } from '@qu/core';
 import { Space, deriveOwnerNodeId } from '@qu/space-core';
 import { WsClientTransport } from '@qu/space-transport';
 import WebSocket from 'ws';
-import { createAppResolveKindSchema, platformAppsKind, PLATFORM_REGISTRY_ANCHOR, adminRouteRegistryKind, globalAppAnchor } from '@qu/app-core';
+import { createAppResolveKindSchema, platformAppsKind, PLATFORM_REGISTRY_ANCHOR, adminRouteRegistryKind, globalAppAnchor, chatKind } from '@qu/app-core';
 
 /**
  * A REAL REGRESSION THIS ONCE HAD, fixed here: once this file starts
@@ -85,19 +85,23 @@ import { createAppResolveKindSchema, platformAppsKind, PLATFORM_REGISTRY_ANCHOR,
 const KNOWN_GLOBAL_TEMPLATE_NAMES = { admin: ['main'] };
 
 /**
- * @param {{collectionRegistryKinds?: object[]}} [params] - forwarded to every `createAppResolveKindSchema()` rebuild, see that function's own doc comment.
- * @returns {{resolveKindSchema: (nodeId: string, claimedPub?: Uint8Array) => Promise<object>, start: (params: {url: string, relayAdmins?: Array<Uint8Array>}) => Promise<void>}}
+ * @param {{collectionRegistryKinds?: object[], groupKinds?: object[]}} [params] - forwarded to every `createAppResolveKindSchema()` rebuild, see that function's own doc comment. `groupKinds` defaults to `[chatKind]` - `@qu/app-core`'s `messenger.js` own Kind, the first (and so far only) `'group'`-ACL Kind this framework ships, needed so a REAL relay deployment (this is `relay-server.js`'s own resolver, not a hand-rolled test harness) classifies a chat Node correctly at all - `relay-resolver.js`'s own "'GROUP'-ACL KINDS" doc comment has the full "why".
+ * @returns {{resolveKindSchema: (nodeId: string, claimedPub?: Uint8Array, groupRef?: {groupOwnerPub: Uint8Array, groupName: string}) => Promise<object>, start: (params: {url: string, relayAdmins?: Array<Uint8Array>}) => Promise<void>}}
  */
-export function createLiveAppResolveKindSchema({ collectionRegistryKinds = [] } = {}) {
+export function createLiveAppResolveKindSchema({ collectionRegistryKinds = [], groupKinds = [chatKind] } = {}) {
   let current = () => null; // replaced synchronously at the top of start(), before its first await - see this file's own "BOOTSTRAP WINDOW" doc comment.
-  // `claimedPub` passed straight through - see relay.js's own doc comment on `resolveKindSchema`'s
-  // second parameter (the "self-provisioned participant, never in appAdminPubs" fallback it
-  // unlocks) - `current` is `createAppResolveKindSchema()`'s own returned closure, already async.
-  const resolveKindSchema = (nodeId, claimedPub) => current(nodeId, claimedPub);
+  // `claimedPub`/`groupRef` both passed straight through - see relay.js's own doc comment on
+  // `resolveKindSchema`'s second/third parameters (the "self-provisioned participant" and
+  // "'group'-ACL Kind" dynamic-classification fallbacks they unlock, respectively). A REAL,
+  // previously-shipped bug this closes: this wrapper used to drop `groupRef` on the floor entirely
+  // (only ever forwarding `nodeId, claimedPub`), so EVERY 'group'-ACL write through this live
+  // resolver was permanently misclassified regardless of `groupKinds` below - `current` itself was
+  // already capable of using it (relay-resolver.js's own fix), nothing upstream ever handed it over.
+  const resolveKindSchema = (nodeId, claimedPub, groupRef) => current(nodeId, claimedPub, groupRef);
 
   /** @param {{url: string, relayAdmins?: Array<Uint8Array>}} params - `url` is this SAME relay's own address (e.g. `ws://127.0.0.1:<port>`), reached ONLY after it is actually listening - see this file's own "ORDERING" doc comment. */
   async function start({ url, relayAdmins = [] }) {
-    current = await createAppResolveKindSchema({ appAdminPubs: [], collectionRegistryKinds });
+    current = await createAppResolveKindSchema({ appAdminPubs: [], collectionRegistryKinds, groupKinds });
 
     const kp = await QuCrypto.generateKeypair(); // throwaway - this Space only ever reads (useNode()), never writes, so no real identity is needed.
     const identity = { signingKey: kp.privateKey, signingPub: kp.publicKey, xPrivateKey: kp.xPrivateKey, xPublicKey: kp.xPublicKey };
@@ -186,7 +190,7 @@ export function createLiveAppResolveKindSchema({ collectionRegistryKinds = [] } 
       // `realm: 'main'` Guestbook/Forum install needs this exactly as much as a hypothetical global
       // one would.
       const sharedListNames = [...new Set(apps.flatMap((a) => a.sharedLists ?? []))];
-      current = await createAppResolveKindSchema({ appAdminPubs, collectionRegistryKinds, globalApps, sharedListNames });
+      current = await createAppResolveKindSchema({ appAdminPubs, collectionRegistryKinds, globalApps, sharedListNames, groupKinds });
     }
     field.observe(rebuild);
     await rebuild(); // initial snapshot - covers a relay restart with an already-populated registry, not just apps registered AFTER this call.

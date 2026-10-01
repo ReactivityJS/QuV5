@@ -890,9 +890,42 @@ export class Space {
    * `'public'`-visibility field can never satisfy this check; such a
    * Kind's fields still sync/persist correctly, they simply can't be
    * compacted as one unit under this design.
+   *
+   * UPDATE - `recipients` OVERRIDE, for an `acl.write: 'group'`/`'content'`
+   * Kind whose real audience is NARROWER than this Space's own flat
+   * `members` list (the previous, only behavior - sealing for
+   * `this._recipientXPubKeys()` unconditionally - silently over-shared a
+   * compacted Group-content Node to every flat Space member, not just that
+   * Group's own current members, and is simply WRONG for a deployment with
+   * no meaningful flat `members` list configured at all, which every
+   * self-certifying/`'group'`-ACL Kind is designed to work without). Also
+   * the fix for a REAL correctness gap, not just a privacy one: a Group's
+   * own member list and a Space's own flat `members` are two independent
+   * axes (`kind-schema.js`'s own `'group'` doc comment) - a Group member
+   * freshly ADDED to an already-active, multi-author `'group'`-ACL Node
+   * (e.g. a group chat with existing messages) can otherwise never
+   * integrate ANY future write from an author whose own first update they
+   * weren't a decryption recipient of, even ones sent AFTER they joined -
+   * the same per-author Yjs causal-gap property `grant.js`'s own "WRITE-
+   * BEFORE-GRANT IS A TRAP" doc comment describes, just triggered by
+   * Group membership growth instead of a missed grant. Compacting with
+   * `recipients` set to the Group's own CURRENT members (right after the
+   * membership-growing `editGroup()` call) reseals the Node's whole state
+   * as ONE envelope for exactly that new member list, giving a newly-added
+   * member a gap-free baseline to subscribe fresh from - the exact
+   * "reseals for whoever is a member NOW" mechanism this function's own
+   * top doc comment already describes, now usable for a narrower-than-
+   * Space-wide audience too. Omitting `recipients` keeps the prior
+   * behavior unchanged (seals for the full flat Space membership).
+   * `sealStrategy` padding is applied ONLY when `recipients` narrows the
+   * audience below the Space's own full membership - sealing for the
+   * UNNARROWED default has no wider list left to pad against (same
+   * reasoning this function already gave for skipping padding entirely,
+   * now scoped to exactly the case where it still holds).
    * @param {string} id
+   * @param {{recipients?: Array<Uint8Array>}} [options] - `recipients`: X25519 pubkeys to seal the compacted snapshot for, overriding the default (this Space's own full flat membership).
    */
-  async compactNode(id) {
+  async compactNode(id, { recipients } = {}) {
     const node = this._nodes.get(id);
     if (!node) throw new Error(`Space.compactNode: Node "${id}" is not attached - subscribe/create/use it first`);
     const kindSchema = node.kindSchema;
@@ -910,18 +943,24 @@ export class Space {
     const snapshotBytes = Y.encodeStateAsUpdate(gcDoc);
     gcDoc.destroy();
 
-    // No sealStrategy/padding here (unlike _handleLocalUpdate() above) - a compaction snapshot
-    // always seals for this Space's FULL current membership (this._recipientXPubKeys()), never a
-    // {recipients}-narrowed subset, so there is no "real audience smaller than the member list" to
-    // hide in the first place - sealStrategies.padToMembers would compute an empty padding set here
-    // anyway.
+    // sealStrategy/padding only enters the picture when `recipients` genuinely narrows the audience
+    // below this Space's own full flat membership - see this method's own "UPDATE" doc comment.
+    // Sealing for the UNNARROWED default (this._recipientXPubKeys()) has no wider list left to pad
+    // against, same as before this option existed.
+    const effectiveRecipients = recipients ?? this._recipientXPubKeys();
+    const paddingXPubKeys = visibility === 'public' || !recipients ? [] : this._sealStrategy({ recipientXPubKeys: effectiveRecipients, memberXPubKeys: this._recipientXPubKeys() });
     const envelope =
       visibility === 'public'
         ? await sealPublicUpdate(snapshotBytes, this._identity, null, true)
-        : await sealUpdate(snapshotBytes, this._identity, this._recipientXPubKeys(), null, true);
+        : await sealUpdate(snapshotBytes, this._identity, effectiveRecipients, null, true, paddingXPubKeys);
 
     await this._storageFor(kindSchema)?.replace(id, [envelope]);
-    this._transport.send({ nodeId: id, envelope });
+    // Same `groupRef` rule `_handleLocalUpdate()` already follows (this file's own comment there):
+    // an `acl.write: 'group'` Kind's relay-side ACL check (relay.js's `buildWriteAcl()`) REQUIRES
+    // `groupRef` on the wire message itself - omitting it here (unlike every other write path) would
+    // make the relay reject this snapshot outright (`bad-signature`, same as "no groupRef at all"),
+    // defeating the one thing `addGroupChatMembers()` relies on this method for.
+    this._transport.send(node.groupRef ? { nodeId: id, envelope, groupRef: node.groupRef } : { nodeId: id, envelope });
     this._bus?.emit('debug.space.compact.sent', { nodeId: id, bytes: snapshotBytes.length });
   }
 
