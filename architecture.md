@@ -969,7 +969,7 @@ notice.
 | `.unsubscribeNode(id)` | Inverse of the above — drops the local handle, tells the relay to stop forwarding. |
 | `.useNode(id, kindSchema)` | **Recommended default.** Local-first, lazy, reference-counted — see `-> {node, release}`. |
 | `.loadNode(id, kindSchema)` | Local storage only, zero network — the "durable, no live sync" tier. |
-| `.compactNode(id)` | Replace a Node's entire stored history with one GC'd snapshot envelope. |
+| `.compactNode(id, {recipients?})` | Replace a Node's entire stored history with one GC'd snapshot envelope. `recipients` (optional X25519 pubkeys) seals for a narrower audience than this Space's flat membership — e.g. a `'group'`-ACL Kind's own current Group members — and, when given, the snapshot carries the Node's own `groupRef` on the wire so a `'group'`-ACL relay check still passes (`docs/chat-app-concept.md`'s own `messenger.js` `addGroupChatMembers()` is the reference consumer: without this, a member added to an active group chat could never read any future message from an author who posted before they joined). |
 | `.grantWriter(nodeId, kind, granteePub)` | `'named'`-ACL: authorize one more pubkey to write this Node. |
 | `.getNode(id)` | Synchronous lookup of an already-attached Node, or `undefined`. |
 
@@ -2966,6 +2966,55 @@ grants anything a genuine signature check wouldn't also grant on its own.
 Every `resolveKindSchema` implementation may now be `async` (existing
 synchronous ones keep working - `await`ing a non-Promise value resolves
 immediately) - all four relay.js call sites `await` it.
+
+**`'group'`-ACL Kinds and `userKind` had the exact same class of gap,
+found while building the real messenger (`docs/chat-app-concept.md`,
+`@qu/app-core`'s `messenger.js`) - the first real consumer of either
+through the ACTUAL relay deployment path, not a hand-rolled test
+`idToKind` map.** Three separate, previously-unexercised holes in the same
+resolver, all fixed together:
+1. `createAppResolveKindSchema()` had no notion of `'group'`-ACL Kinds at
+   all - any `chatKind` write fell through to the generic `pageKind`
+   fallback and was rejected. Fixed with a new `groupKinds` param (a small,
+   static list of Kind-Schema objects, analogous to
+   `collectionRegistryKinds` - never per-conversation data, since a
+   `'group'`-ACL Node's own `{groupOwnerPub, groupName}` already
+   self-certifies, the same "unverified claim for CLASSIFICATION ONLY is
+   safe" reasoning `claimedPub` above already established, just keyed off
+   `groupRef` instead): `deriveContentNodeId(groupRef.groupOwnerPub,
+   kind.kind, groupRef.groupName) === nodeId` for each configured kind.
+2. `createLiveAppResolveKindSchema()`'s own `resolveKindSchema` wrapper -
+   the one `relay-server.js` actually runs in platform mode - silently
+   DROPPED the `groupRef` argument entirely (`(nodeId, claimedPub) =>
+   current(nodeId, claimedPub)`), so fix #1 above did nothing in a real
+   deployment until this was also fixed to forward it. It now also defaults
+   `groupKinds` to `[chatKind]`, so the built-in messenger works with zero
+   configuration, the same "built-in surface needs no setup" posture
+   `globalApps`'s own admin-console default already has.
+3. The SAME dynamic `claimedPub` fallback never covered `@qu/space-core`'s
+   `userKind` (`qu-user` - any identity's own self-certifying profile,
+   `epub` included) - there is no "owners" list to enumerate it from, any
+   more than there is for a self-provisioned multiuser participant above,
+   so every profile write/read through the real resolver was misclassified
+   too, invisible from the writer's own Space for the same reason #1 in
+   this section already explains. Now one more line in the same
+   `claimedPub` block, `deriveOwnerNodeId(claimedPub, userKind.kind) ===
+   nodeId`.
+
+Also found in the same pass: `wireInstalledApps()`/`boot.js` never
+threaded a discovered `/apps/*` app's own route `subPath` into its
+`wire()` call - fine for Gästebuch/Blog/Forum (purely CMS-Page-driven,
+never needed it) but a hard requirement for a code-driven app with real
+per-room client-side routes (`#/<prefix>/room/<id>`, apps/chat/'s own
+`actions.js`). Now threaded at all 5 `wireInstalledApps()` call sites in
+`boot.js`. The `/apps/*` descriptor shape also gained an optional
+`templateNames` field (mirroring `viewNames`/`sharedLists`, threaded
+through `admin-actions.js`'s `registerApp()` call) - needed because
+`apps/chat/` is the first file-based app that installs its OWN global root
+Template (`createGlobalApp()`/`createGlobalTemplate()`) instead of relying
+on `@qu/app-renderer`'s framework-default wrapper, so its sidebar+room
+chrome survives every one of its own client-side subroutes, including ones
+with no matching CMS Page at all.
 
 **Reading this as a CMS, not just a router:** the admin console proves the
 general shape - "UI legt sich selbst innerhalb des Storage an und hat

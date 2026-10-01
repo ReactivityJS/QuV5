@@ -435,11 +435,20 @@ Punkte" oben zur Nicht-Rückwirkung, und §2a zum davon unabhängigen
    NICHT der user-sichtbare, umbenennbare `chatKind.name`, damit Umbenennen
    eines Raums nie dessen eigene Adresse verändert.
 
-## 4. Phase 3 — der Chat selbst (Überblick, noch nicht gebaut)
+## 4. Phase 3 — der Chat selbst
 
-Neues Referenz-App-Bundle `chat-bundle.js` (gleiches Muster wie
-Guestbook/Blog/Forum), plus neue UI-Bausteine in `@qu/space-ui`/
-`@qu/space-components`:
+**Status: Stufe 1 (Text-Kern: 1:1 + Gruppen, Haken, Typing, Online,
+Konversationsliste) fertig implementiert** (`@qu/app-core`s
+`messenger.js`, `apps/chat/`). Bild-/Datei-/Sprachnachrichten-Anhänge,
+Lightbox, Player, Standort statisch/live - bewusste, vom Nutzer
+entschiedene Folge-Stufen, hier noch NICHT gebaut (siehe §4b). Die
+folgenden Absätze sind der ursprüngliche Vorab-Entwurf; mehrere Stellen
+sind beim tatsächlichen Bauen bewusst ANDERS gelandet - siehe §4a für den
+finalen Stand.
+
+Referenz-App `apps/chat/` (gleiches `/apps/*`-Entdeckungs-Muster wie
+Guestbook/Blog/Forum, aber - anders als die drei - KEIN CMS-Page-
+gestütztes Bundle, siehe §4a), geplante UI-Bausteine:
 - Konversationsliste (eigene Chats, ungelesen-Zähler)
 - Message-Bubble-Liste mit Datumstrennern, Auto-Scroll
 - Composer mit Typing-Trigger + Datei-Anhang-Button
@@ -450,6 +459,124 @@ Guestbook/Blog/Forum), plus neue UI-Bausteine in `@qu/space-ui`/
   nur einbinden)
 - Online-Punkt + "zuletzt online" (Phase 2, Punkt 1 vorausgesetzt)
 - Haken-Symbole gesendet/zugestellt/gelesen
+
+### §4a. Stufe 1 (Text-Kern) - umgesetzt, was anders lief als hier skizziert
+
+> **❌ Anders gelandet: EIN Datenmodell für 1:1 UND Gruppen, keine
+> Besitzer-Asymmetrie zu lösen.** Dieses Dokument (§2) ließ offen, WER die
+> `chatKind`/`groupKind`-Nodes für ein 1:1-Gespräch anlegen darf. Die
+> Auflösung (Nutzer-Korrektur, bestätigt): es gibt gar kein echtes
+> Asymmetrie-Problem - genau wie bei Matrix ist ein 1:1 einfach ein Raum
+> mit zwei Mitgliedern. WER AUCH IMMER ein Gespräch beginnt, legt die
+> `groupKind`-Group + den `chatKind`-Node unter der EIGENEN Pubkey an und
+> nennt die Gegenseite sofort als Mitglied - exakt wie beim
+> Gruppen-Erstellen, nur mit einem Mitglied weniger. Die verbleibende
+> Frage "wo lebt dieses Gespräch" löst `directChatGroupName()`
+> (`messenger.js`): ein deterministischer Hash BEIDER Pubkeys, sortiert -
+> jede Seite berechnet denselben `groupName`, ohne vorherigen
+> Roundtrip. `getOrCreateDirectChat()` prüft beide möglichen
+> Besitzer-Slots (eigene Pubkey zuerst, dann die der Gegenseite) über
+> `resolveGroup()`, bevor es ein neues Gespräch anlegt - wer zuerst
+> beginnt, wird von der Gegenseite gefunden, nie dupliziert. Akzeptiertes
+> Restrisiko (dokumentiert, nicht gelöst): starten beide Seiten im exakt
+> selben Moment, bevor eine der beiden Group-Nodes synced ist, können
+> theoretisch zwei getrennte Gesprächs-Paare entstehen - dieselbe
+> "last write wins"-Abwägung, die `createGroup()` ohnehin schon akzeptiert.
+>
+> **❌ Anders gelandet: `chatKind` trägt NUR `name`/`messages`, kein
+> `kind`/`groupOwnerPub`/`groupName`/`createdAt`-Feld.** §2s ursprünglicher
+> Entwurf wiederholte die Routing-Information (`groupOwnerPub`/`groupName`)
+> auch auf `chatKind` selbst. Tatsächlich ist die referenzierte
+> `groupKind`-Group bereits die vollständige Existenz-/Mitgliedschafts-
+> Quelle - jeder Aufrufer adressiert `chatKind` ohnehin immer explizit über
+> genau dieses Paar (`chatNodeId(groupOwnerPub, groupName)`), eine zweite
+> Kopie auf `chatKind` selbst wäre nur eine redundante zweite
+> Wahrheitsquelle. Nebeneffekt mit echtem technischem Gewinn: `chatKind`s
+> Felder sind dadurch ALLE `'encrypted'` (einheitliche Sichtbarkeit) - das
+> ist, was es `Space.compactNode()` überhaupt erlaubt, den gesamten Node zu
+> kompaktieren (siehe nächster Punkt).
+>
+> **➕ Zusätzlich gebaut (im Entwurf nicht bedacht): `compactNode()` um ein
+> `recipients`-Override erweitert - schließt eine echte Yjs-Kausallücke
+> beim Mitglieder-Hinzufügen.** Yjs integriert die Updates EINES Autors pro
+> Node als strikt geordnete, lückenlose Sequenz - ein neu hinzugefügtes
+> Gruppenmitglied, das ein FRÜHERES Update eines Autors nicht entschlüsseln
+> kann (weil es damals noch kein Empfänger war), kann dadurch NIE wieder
+> irgendein SPÄTERES Update desselben Autors integrieren, selbst nach dem
+> Beitritt nicht (bereits bestehendes, von `group-private-content.test.js`
+> bewiesenes Framework-Verhalten). `addGroupChatMembers()` behebt das: nach
+> `editGroup()` ruft es `space.compactNode(chatId, {recipients:
+> updatedMembers.map(m => m.xPub)})` - versiegelt den gesamten aktuellen
+> Node-Zustand als EIN Envelope für die neue Mitgliederliste, gibt jedem
+> (auch dem gerade beigetretenen Mitglied) eine lückenfreie Basis für
+> ZUKÜNFTIGE Nachrichten. Alte Nachrichten (vor dem Beitritt) bleiben
+> bewusst unerreichbar - echtes E2E-Verhalten, keine zu schließende Lücke
+> (siehe "Entschiedene Punkte" oben). `compactNode()` selbst musste dafür
+> zweifach erweitert werden: (1) ein optionales `recipients`-Override statt
+> immer der flachen Space-Mitgliederliste zu versiegeln (sonst Leck an
+> Space-Mitglieder außerhalb der Gruppe, oder harter Fehlschlag ohne
+> konfigurierte flache Mitgliederliste), (2) das versiegelte Envelope muss
+> auf dem Wire denselben `groupRef` tragen wie jeder andere `'group'`-ACL-
+> Write auch - ohne das lehnt der Relay die Kompaktions-Snapshot genauso ab
+> wie jeden anderen `groupRef`-losen `'group'`-Write.
+>
+> **➕ Zusätzlich gebaut: Kontakte-first statt Push/Notify.** Vom Nutzer
+> explizit entschieden (gegen einen neuen Push-Mechanismus): ein Gespräch
+> wird erst erreichbar, sobald BEIDE Seiten die Pubkey der Gegenseite schon
+> kennen - ein geteilter Profil-Link, das bestehende opt-in
+> `listed`-Nutzerverzeichnis, oder `contactsKind` (neu, `'owner'`-ACL,
+> rein lokal/privat pro Identität, `addContact()`/`listContacts()`).
+> `conversationsKind` (ebenfalls neu, gleiches ACL) ist der dazu passende,
+> rein lokale Index "meine offenen Chats" - es gibt keine andere Möglichkeit,
+> "meine Chats" aufzuzählen, da jeder Chat ein unabhängig adressierter,
+> `'group'`-ACL-Node ohne gemeinsames Register ist. Konsequenz: wer ein
+> 1:1-Gespräch beginnt, sieht es sofort in der eigenen Konversationsliste -
+> die Gegenseite erst, NACHDEM sie selbst (unabhängig) denselben Kontakt
+> hinzugefügt und das Gespräch gestartet hat (`getOrCreateDirectChat()`s
+> "gefunden, nicht dupliziert"-Zusicherung sorgt dafür, dass beide dann im
+> selben Raum landen).
+>
+> **➕ Zusätzlich gefunden und behoben (Framework-Lücken, erst durch den
+> echten Messenger als ersten `'group'`-ACL-Konsumenten sichtbar
+> geworden):** `createAppResolveKindSchema()` (`@qu/app-core`s
+> `relay-resolver.js`) kannte `'group'`-ACL-Kinds überhaupt nicht - jede
+> `chatKind`-Node wäre über den ECHTEN Relay-Deployment-Pfad (nicht nur
+> handgebaute Test-Resolver) fälschlich als `'content'`-ACL klassifiziert
+> und abgelehnt worden. Neuer `groupKinds`-Parameter (analog zu
+> `collectionRegistryKinds`) + `createLiveAppResolveKindSchema()`
+> (`@qu/app-shell`) liefert jetzt standardmäßig `[chatKind]` mit aus - ihr
+> eigener `resolveKindSchema`-Wrapper gab zusätzlich den `groupRef`
+> überhaupt nie weiter, ein separater, ebenfalls behobener Bug. Derselbe
+> dynamische Klassifikations-Mechanismus kannte außerdem
+> `@qu/space-core`s `userKind` (Nutzerprofile/`epub`) nicht - jeder
+> Kontakt-Hinzufügen-Lookup (siehe oben: `epub` auflösen statt die
+> Signatur-Pubkey fälschlich wiederzuverwenden) schlug deshalb über den
+> echten Relay fehl, bis ergänzt.
+>
+> **➕ Zusätzlich gebaut: `subPath`-Durchreichung + `templateNames`-
+> Deskriptorfeld für `/apps/*`-Apps.** `wireInstalledApps()`/`boot.js`
+> reichten den aktuellen Route-Teilpfad bisher an keine entdeckte
+> `/apps/*`-App weiter - für Gästebuch/Blog/Forum nie nötig (rein
+> CMS-Page-getrieben), für einen code-getriebenen Messenger mit echten
+> Unterrouten (`#/<prefix>/room/<roomId>`) zwingend. Jetzt threaded.
+> Zusätzlich kann ein `/apps/*`-Deskriptor jetzt `templateNames` angeben
+> (wie `viewNames`/`sharedLists` schon konnten) - nötig, weil `apps/chat/`
+> als ERSTE Datei-App ein eigenes globales Root-Template braucht (die
+> Sidebar+Hauptbereich-Chrome, siehe §4b), das über JEDE eigene Unterroute
+> hinweg bestehen bleiben muss, nicht nur über CMS-Page-Routen.
+
+### §4b. Route-Adressierung und Chrome - konkrete Umsetzung von §3 Punkt 8
+
+`roomId` = `base64url(groupOwnerPub) + '.' + groupName` (trivial
+umkehrbar, NIE die rohe `chatKind`-Node-Id selbst) - die Route lautet
+`#/<prefix>/room/<roomId>`, exakt das in §3 Punkt 8 skizzierte Muster
+(`subPath` von `AppRuntime.resolveRoute()` durchgereicht, selbst
+geparst). `apps/chat/bundle.js` installiert dafür ein eigenes globales
+Root-Template (`chat-shell`, via `createGlobalApp()`/
+`createGlobalTemplate()`) statt einer einzelnen CMS-Page - die
+Sidebar+Hauptbereich-Chrome bleibt dadurch über JEDEN `subPath` hinweg
+bestehen (auch für Routen ohne passende CMS-Page), `apps/chat/actions.js`s
+`wireChat()` füllt den Hauptbereich rein code-/reaktiv-getrieben.
 
 ## 5. Phase 4 (später, nicht Teil dieser Umsetzung) - Reaktionen/Antworten/Pin
 
