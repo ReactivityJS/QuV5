@@ -78,3 +78,18 @@ export {
 } from './dev.js';
 export { createAppResolveKindSchema } from './relay-resolver.js';
 export { openLiveView, VIEW_SOURCE_ADAPTERS } from './view-sources.js';
+export {
+  chatKind,
+  chatNodeId,
+  getOrCreateDirectChat,
+  createGroupChat,
+  addGroupChatMembers,
+  removeGroupChatMember,
+  sendMessage,
+  contactsKind,
+  addContact,
+  listContacts,
+  conversationsKind,
+  recordConversation,
+  listConversations,
+} from './messenger.js';

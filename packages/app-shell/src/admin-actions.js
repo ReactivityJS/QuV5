@@ -505,6 +505,17 @@ export function wireAdminConsole({ mountEl, doc, mainSpace, platform }) {
             name: installer.label,
             sharedLists: installer.sharedLists?.(prefix) ?? [],
             globalViewNames: installer.viewNames?.(prefix) ?? [],
+            // `templateNames` - same "declared, not guessed" reasoning `viewNames`/`sharedLists`
+            // already get here (and `apps/README.md`'s own descriptor doc comment covers in full) -
+            // previously MISSING entirely: every `/apps/*` app until now relied solely on
+            // `@qu/app-renderer`'s own framework-default NOT_FOUND_TEMPLATE wrapper (never declaring
+            // a root Template of its own), so this gap went unnoticed. A code-driven app whose OWN
+            // chrome (e.g. a persistent sidebar around a dynamically-addressed `subPath`) must
+            // survive every one of its own sub-routes - including ones with no matching CMS Page at
+            // all - needs a REAL global Template (`createGlobalApp()`'s own `rootTemplate`), which the
+            // relay only classifies correctly once this list is here (`createAppResolveKindSchema()`'s
+            // own doc comment on "Getting a registry Kind's id WRONG... is not cosmetic").
+            globalTemplateNames: installer.templateNames?.(prefix) ?? [],
             personalBundle: installer.personalBundle,
             appType,
             bundleVersion: installer.version,

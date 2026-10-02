@@ -187,8 +187,10 @@ import * as Y from 'yjs';
 import { QuCrypto } from '@qu/core';
 import { SpaceNode, stampMeta } from './node.js';
 import { sealUpdate, sealPublicUpdate, verifyEnvelope, openUpdate } from './envelope.js';
-import { deriveOwnerNodeId, deriveContentNodeId } from './kind-schema.js';
+import { deriveOwnerNodeId, deriveContentNodeId, defineKind } from './kind-schema.js';
 import { signGrant, verifyGrant } from './grant.js';
+import { signGroupMembership } from './group-membership.js';
+import { signPresenceVisibility } from './presence-visibility.js';
 import { sealStrategies } from './seal-strategies.js';
 
 const REMOTE_ORIGIN = Symbol('space-core:remote-update');
@@ -224,6 +226,30 @@ function createInMemoryVolatileStore() {
     },
   };
 }
+
+/**
+ * The MINIMAL shape `_isAuthorizedWriter()`'s own `'group'`-ACL branch below
+ * needs to read a Group's CURRENT membership (kind-schema.js's own doc
+ * comment on that mode) - deliberately NOT an import of `@qu/app-core`'s
+ * real `groupKind` (`packages/app-core/src/kinds.js`): `@qu/space-core` is
+ * the lower framework layer and must never depend on the App layer above
+ * it, the exact same "stays blind to app-level Kinds" boundary
+ * `@qu/space-transport`'s relay.js already holds for its own
+ * `resolveKindSchema` callback, and the same "can't import the real thing,
+ * keep a minimal local echo" posture `createInMemoryVolatileStore()` right
+ * above already takes for an unrelated circular-dependency reason. MUST
+ * stay wire-compatible with `groupKind` - same `kind: 'qu-group'` string,
+ * same `members` field shape (`Array<{pub, xPub}>`, base64 strings,
+ * `shape: 'atomic'`, `visibility: 'public'` - `groupKind`'s own doc comment
+ * on why membership is deliberately public) - built via this file's own
+ * `defineKind()` rather than hand-rolled, so it gets the exact same
+ * normalization/`metaVisibility` `groupKind` itself gets. Omits `name` -
+ * this reader never needs it, only `members`.
+ */
+const GROUP_REF_KIND = defineKind('qu-group', {
+  fields: { members: { shape: 'atomic', visibility: 'public' } },
+  acl: { write: 'content' },
+});
 
 export class Space {
   /**
@@ -294,6 +320,10 @@ export class Space {
     this._warmSince = new Map();
     /** @type {Map<string, ReturnType<typeof setTimeout>>} nodeId -> pending real-teardown timer for a warm Node - see `_releaseNode()`/`_teardownWarmNode()`. */
     this._warmTimers = new Map();
+    /** @type {Map<string, {members: Set<string>, release: () => void, offChanged: (() => void)|undefined}>} `"<groupOwnerPub-b64>:<groupName>" -> live-cached state - see `_currentGroupMembers()`'s own doc comment (kind-schema.js's own `'group'` ACL mode). Grows lazily, only for a Group actually referenced by a `'group'`-ACL write this Space had to verify - never all Groups this Space happens to know about. */
+    this._groupMembershipCache = new Map();
+    /** @type {Map<string, boolean>} pubB64 -> last known REAL connection state from `watchLivePresence()` - see that method's own doc comment. Distinct from `presenceKind`'s self-reported `online` field (`presence.js`): this is the relay's own ground truth, pushed via `presence-online`/`presence-offline`. */
+    this._livePresence = new Map();
     // Serialized (never overlapping) - see _handleIncoming()'s own doc comment on why processing
     // order must match ARRIVAL order for a 'content'-ACL Kind's grant-then-write sequence to be
     // race-free, and why relying on each _handleIncoming() call's own internal await timing to
@@ -460,13 +490,40 @@ export class Space {
    *     (the constructor's own `relayAdmins` param), completely independent
    *     of `this._members` - see kind-schema.js's own doc comment on this
    *     mode and this file's own constructor doc comment.
+   *   - `'group'` - `'content'`'s REVOCABLE counterpart (kind-schema.js's own
+   *     doc comment on this mode in full) - `groupRef` (the SECOND argument
+   *     here, carried on the incoming write message itself, see
+   *     `_handleLocalUpdate()`/`_handleIncoming()`) is REQUIRED: no
+   *     `groupRef` at all means never authorized, same "nothing to check it
+   *     against" fail-closed posture every other mode already takes for its
+   *     own missing-state case. Two checks, both must pass: (1)
+   *     self-certifying - `nodeId` must actually equal
+   *     `deriveContentNodeId(groupRef.groupOwnerPub, kindSchema.kind,
+   *     groupRef.groupName)`, exactly the same "recompute and compare"
+   *     `'content'` mode already relies on, just committing to the
+   *     REFERENCED GROUP's identity instead of a Node-owning identity of its
+   *     own - a mismatched claim here is rejected outright, regardless of
+   *     what it claims; (2) the signer is a CURRENT member of that Group,
+   *     via `_currentGroupMembers()`'s own live cache.
    * @param {object} kindSchema
    * @param {string} nodeId
+   * @param {{groupOwnerPub: Uint8Array, groupName: string}|null|undefined} [groupRef] - ONLY consulted
+   *   for `acl.write: 'group'` - see this method's own doc comment above and kind-schema.js's own
+   *   "'group'" doc comment. Ignored for every other mode.
    */
-  _isAuthorizedWriter(kindSchema, nodeId) {
+  _isAuthorizedWriter(kindSchema, nodeId, groupRef) {
     const mode = kindSchema?.acl?.write;
     if (mode === 'relay-admins') {
       return (pubB64) => this._relayAdmins.has(pubB64);
+    }
+    if (mode === 'group') {
+      if (!groupRef) return () => false;
+      return async (pubB64) => {
+        const expectedId = await deriveContentNodeId(groupRef.groupOwnerPub, kindSchema.kind, groupRef.groupName);
+        if (expectedId !== nodeId) return false; // self-certifying check failed - this write's own nodeId does not actually commit to the group it claims.
+        const members = await this._currentGroupMembers(groupRef);
+        return members.has(pubB64);
+      };
     }
     if (mode !== 'owner' && mode !== 'named' && mode !== 'content') {
       const writerPubs = new Set(this._members.map((m) => QuCrypto.toBase64(m.pub)));
@@ -481,6 +538,68 @@ export class Space {
       if (mode === 'named') return this._grants.get(nodeId)?.has(pubB64) ?? false;
       return false;
     };
+  }
+
+  /**
+   * Live-cached, event-invalidated CURRENT membership for a Group referenced by a `'group'`-ACL
+   * write (`_isAuthorizedWriter()`'s own doc comment, kind-schema.js's own "'group'" doc comment) -
+   * the SAME "live-watched registry" pattern `@qu/app-shell`'s `live-app-resolver.js` already
+   * established for `qu-platform-apps`, generalized here to whichever Groups a `'group'`-ACL write
+   * actually references - grows lazily (never every Group this Space happens to know about), never
+   * evicted (a deliberate v1 simplification - see `docs/chat-app-concept.md` §2a: the user's own
+   * explicit "a cache for some time is fine" allowance covers this too; an LRU-style cap, mirroring
+   * this file's own "WARM-RELEASE CACHE" `maxWarmNodes`, is real future work if this ever needs
+   * bounding). The underlying Group Node is `useNode()`'d and never released - lives for this
+   * Space's own lifetime, same posture `live-app-resolver.js`'s own registry watch already takes.
+   *
+   * NEVER blocks on network I/O, deliberately - this is the one thing this method's own doc comment
+   * must get right: it is called from `_isAuthorizedWriter()`'s `'group'` branch, itself called from
+   * `verifyEnvelope()` while VERIFYING an incoming write - i.e. from INSIDE `_handleIncoming()`,
+   * chained onto this Space's own single, fully serial `_incomingQueue` (this file's own top doc
+   * comment on why that chain is serial at all: grant-before-write safety for 'content'-ACL Kinds).
+   * The Group Node's OWN catch-up data (its creation write, a later membership edit, even its
+   * `sync-ack`) arrives over that EXACT SAME queue, as ordinary later messages - so a version of
+   * this method that AWAITED "until the Group is confirmed synced" (an earlier draft of this method
+   * did exactly that, via a since-removed `_waitForNodeSynced()` helper) would deadlock: the queued
+   * message this call itself is part of can never finish, and so can never let the queue advance to
+   * the very later message this call is waiting on. Confirmed by hand while building this Task - see
+   * git history for the exact symptom: a 'group'-ACL write to a not-yet-locally-known Group timing
+   * out after 4s, every single time, even when the Group's own data demonstrably arrived moments
+   * later on the wire.
+   *
+   * Instead: `readMembers()` reads whatever this Space ALREADY has locally for the Group RIGHT NOW,
+   * synchronously correct or not - a genuinely not-yet-synced Group simply reads back an empty Set
+   * (fail closed: nobody authorized YET, same posture every other "don't know" case in this file
+   * already takes), and the `space.node.<groupId>.changed` subscription (fires on EVERY accepted
+   * write for that Node, per this file's own top doc comment - the Group's own FIRST creation write
+   * included, no `sync-ack`-specific mechanism needed) refreshes the cached `Set` the moment real
+   * data lands, whether that arrives while THIS message is still being verified or ten writes later.
+   * Consequence worth being explicit about: a 'group'-ACL write that reaches a peer who has never
+   * independently seen that Group before (no relay-side ordering guarantee ties the two together)
+   * can be dropped even from a genuine member, if the Group's own data hasn't arrived yet - Yjs does
+   * not retroactively replay a discarded update once a LATER one has been accepted; only a
+   * SUBSEQUENT write from that author recovers. In practice this is rarely reachable: any real
+   * reader of a 'group'-ACL room (`ContentResolver.resolveGroup()`) already reads the Group's own
+   * membership before ever caring about its messages, which warms this exact cache first.
+   * @param {{groupOwnerPub: Uint8Array, groupName: string}} groupRef
+   * @returns {Promise<Set<string>>} base64 Ed25519 pubkeys of the Group's CURRENTLY KNOWN members -
+   *   never awaited to be complete/fresh, see this method's own doc comment above.
+   */
+  async _currentGroupMembers({ groupOwnerPub, groupName }) {
+    const key = `${QuCrypto.toBase64(groupOwnerPub)}:${groupName}`;
+    const cached = this._groupMembershipCache.get(key);
+    if (cached) return cached.members;
+
+    const groupId = await deriveContentNodeId(groupOwnerPub, GROUP_REF_KIND.kind, groupName);
+    const { node, release } = await this.useNode(groupId, GROUP_REF_KIND);
+    const readMembers = async () => new Set(((await node.field('members').get()) ?? []).map((m) => m.pub));
+
+    const entry = { members: await readMembers(), release, offChanged: undefined };
+    this._groupMembershipCache.set(key, entry);
+    entry.offChanged = this._bus?.on(`space.node.${groupId}.changed`, async () => {
+      entry.members = await readMembers();
+    });
+    return entry.members;
   }
 
   /**
@@ -518,38 +637,121 @@ export class Space {
   }
 
   /**
+   * Tells this Space's relay who CURRENTLY belongs to a Group this identity owns, so the relay can
+   * enforce a `'group'`-ACL write's live membership check itself (relay.js's own `buildWriteAcl()` -
+   * its `groupMemberships` map is 100% derived from this exact message, never invented) WITHOUT ever
+   * having to decode that Group's own Yjs content - group-membership.js's own top doc comment has the
+   * full "why a signed declaration, not relay-side Yjs decoding" reasoning. Only meaningful for THIS
+   * identity's own Groups (`groupName` under `this._identity.signingPub` as owner) - there is no way
+   * to declare membership on someone else's behalf, by construction (the message is self-certifying,
+   * signed by the exact `groupOwnerPub` it carries).
+   *
+   * Callers should send this ALONGSIDE every write to a Group's own `members` field (see
+   * `@qu/app-core`'s `createGroup()`/`editGroup()`) - same "self-grant before any field write"
+   * discipline `createNode()`'s own `'content'`-ACL branch already establishes for `grantWriter()`,
+   * just for a REVOCABLE fact instead of a permanent one. Skipping this call for a given Group is
+   * safe for CLIENT-side enforcement (every client already reads the Group's real field content
+   * directly - `_currentGroupMembers()`'s own doc comment) but leaves the RELAY unable to enforce
+   * that Group's writes at all until the first declaration arrives - relay-side rejection is
+   * fail-closed (kind-schema.js's own "'group'" doc comment), so an undeclared Group's writes are
+   * simply dropped by the relay, never silently over-permitted.
+   * @param {{groupName: string, members: Array<Uint8Array>}} params - `members`: every CURRENT
+   *   member's signing pubkey (raw bytes) - see group-membership.js's own doc comment on why only
+   *   the signing pubkey half is needed here.
+   */
+  async declareGroupMembership({ groupName, members }) {
+    const message = await signGroupMembership({ groupName, members }, this._identity);
+    this._transport.send(message);
+  }
+
+  /**
+   * Tells this Space's relay who may see THIS identity's REAL, live connection state (the relay's
+   * own `PresenceTracker`, not `presenceKind`'s self-reported `online` field - see `presence.js`'s
+   * own doc comment on that split) - a signed, self-certifying declaration for the exact same
+   * reason `declareGroupMembership()` above is one: the relay never decodes ANY Node's Yjs content,
+   * not even a `'public'`-visibility field, so `presenceKind.onlineVisibility` alone (however it's
+   * set) is invisible to it - see `presence-visibility.js`'s own top doc comment. Undeclared
+   * defaults CLOSED at the relay (fail-closed, same posture as an undeclared `'group'`).
+   * @param {'public'|'private'} onlineVisibility
+   */
+  async declareOnlineVisibility(onlineVisibility) {
+    const message = await signPresenceVisibility(onlineVisibility, this._identity);
+    this._transport.send(message);
+  }
+
+  /**
+   * Starts watching `pub`'s REAL live connection state through this Space's relay - see
+   * `declareOnlineVisibility()`'s own doc comment for what gates whether anything is ever actually
+   * told back. The relay replies with the CURRENT state right away (if visible) and pushes every
+   * future transition from then on, as `presence-online`/`presence-offline` (`_handleIncoming()`'s
+   * own doc comment) - read the running result via `isLiveOnline(pub)`, or react to changes via
+   * `presence.js`'s `LivePresenceWatcher`/the `space.presence.live.changed` bus topic.
+   * @param {Uint8Array|string} pub
+   */
+  async watchLivePresence(pub) {
+    const pubBytes = typeof pub === 'string' ? QuCrypto.fromBase64(pub) : pub;
+    this._transport.send({ type: 'watch-presence', pub: pubBytes });
+  }
+
+  /** The exact inverse of `watchLivePresence()` - stops future pushes for `pub`; does not clear any already-cached `isLiveOnline()` value. @param {Uint8Array|string} pub */
+  async unwatchLivePresence(pub) {
+    const pubBytes = typeof pub === 'string' ? QuCrypto.fromBase64(pub) : pub;
+    this._transport.send({ type: 'unwatch-presence', pub: pubBytes });
+  }
+
+  /** @param {string} pubB64 @returns {boolean|undefined} the last `presence-online`/`presence-offline` this Space received for `pubB64`, or `undefined` if never watched/never heard back (not yet arrived, or the relay never considered it visible). */
+  isLiveOnline(pubB64) {
+    return this._livePresence.get(pubB64);
+  }
+
+  /**
    * @param {object} kindSchema - From defineKind()/KindRegistry.
    * @param {Record<string, *>} initialFields - Only 'atomic-encrypted'/'text' fields (list fields start empty; use `.field(name).push()`).
-   * @param {{id?: string, path?: string}} [options] - `id` is IGNORED for an `'owner'`/`'named'`/
-   *   `'content'`-ACL kindSchema: its Node id is never a caller's choice. `'owner'`/`'named'` derive
-   *   it as `deriveOwnerNodeId(this._identity.signingPub, kindSchema.kind)` (see kind-schema.js) -
+   * @param {{id?: string, path?: string, groupOwnerPub?: Uint8Array, groupName?: string}} [options] -
+   *   `id` is IGNORED for an `'owner'`/`'named'`/`'content'`/`'group'`-ACL kindSchema: its Node id is
+   *   never a caller's choice. `'owner'`/`'named'` derive it as
+   *   `deriveOwnerNodeId(this._identity.signingPub, kindSchema.kind)` (see kind-schema.js) -
    *   self-certifying by construction. `'content'` REQUIRES `path` instead and derives
    *   `deriveContentNodeId(this._identity.signingPub, kindSchema.kind, path)` - see that function's
    *   own doc comment - then issues itself a SELF-grant (`grantWriter(id, kindSchema.kind,
    *   this._identity.signingPub, {path})`) BEFORE attaching/writing anything, so the creating
    *   identity is immediately an authorized writer without any extra call of its own (see
-   *   grant.js's own "WRITE-BEFORE-GRANT IS A TRAP" - this ordering is what avoids it). For
-   *   `'members'`/`'relay-admins'`-ACL kinds, `id` is used exactly as given (a random one if
-   *   omitted) - NEITHER mode derives an id from the caller's own identity, since authorization
-   *   under both is a flat list lookup, never self-certification (see kind-schema.js's own doc
-   *   comment) - `'relay-admins'` content typically passes a fixed, precomputed anchor id instead
-   *   (e.g. `@qu/app-core`'s `platformAppsKind`, always created at the same well-known id).
+   *   grant.js's own "WRITE-BEFORE-GRANT IS A TRAP" - this ordering is what avoids it). `'group'`
+   *   REQUIRES `groupOwnerPub`/`groupName` instead (see kind-schema.js's own doc comment on this
+   *   mode) and derives `deriveContentNodeId(groupOwnerPub, kindSchema.kind, groupName)` - committing
+   *   to the REFERENCED GROUP's own identity, never this Node's own creator - no self-grant needed
+   *   (the resulting `node.groupRef` is what `_handleLocalUpdate()` reads to attach `{groupOwnerPub,
+   *   groupName}` to every write message this Node makes, so a verifier can check membership live
+   *   instead of consulting a permanent grant). For `'members'`/`'relay-admins'`-ACL kinds, `id` is
+   *   used exactly as given (a random one if omitted) - NEITHER mode derives an id from the caller's
+   *   own identity, since authorization under both is a flat list lookup, never self-certification
+   *   (see kind-schema.js's own doc comment) - `'relay-admins'` content typically passes a fixed,
+   *   precomputed anchor id instead (e.g. `@qu/app-core`'s `platformAppsKind`, always created at the
+   *   same well-known id).
    * @returns {Promise<SpaceNode>}
    */
   /**
    * @param {object} kindSchema
    * @param {object} [initialFields]
-   * @param {{id?: string, path?: string, recipients?: Array<Uint8Array>}} [options] - `recipients`
-   *   (`'content'`-ACL Kinds with `visibility: 'encrypted'` fields only) narrows this Node's
+   * @param {{id?: string, path?: string, groupOwnerPub?: Uint8Array, groupName?: string, recipients?: Array<Uint8Array>}} [options] - `recipients`
+   *   (`'content'`/`'group'`-ACL Kinds with `visibility: 'encrypted'` fields only) narrows this Node's
    *   audience below the Space's own full member list, for EVERY write this call makes (meta
    *   included) - see field.js's own doc comment on it. Omit for the ordinary, unchanged
-   *   "every Space member" behavior.
+   *   "every Space member" behavior. For a `'group'`-ACL Kind, a caller almost always wants this
+   *   narrowed to the referenced Group's OWN current members (`ContentResolver.resolveGroup()`) -
+   *   this method never does that automatically, since "the Group's current membership" is a live
+   *   read this Node's own Kind-Schema has no way to express as a fixed default.
    */
-  async createNode(kindSchema, initialFields = {}, { id = crypto.randomUUID(), path, recipients } = {}) {
+  async createNode(kindSchema, initialFields = {}, { id = crypto.randomUUID(), path, groupOwnerPub, groupName, recipients } = {}) {
+    let groupRef = null;
     if (kindSchema.acl.write === 'content') {
       if (!path) throw new Error(`createNode: kind "${kindSchema.kind}" is 'content'-ACL - "path" is required`);
       id = await deriveContentNodeId(this._identity.signingPub, kindSchema.kind, path);
       await this.grantWriter(id, kindSchema.kind, this._identity.signingPub, { path });
+    } else if (kindSchema.acl.write === 'group') {
+      if (!groupOwnerPub || !groupName) throw new Error(`createNode: kind "${kindSchema.kind}" is 'group'-ACL - "groupOwnerPub"/"groupName" are required`);
+      id = await deriveContentNodeId(groupOwnerPub, kindSchema.kind, groupName);
+      groupRef = { groupOwnerPub, groupName };
     } else if (kindSchema.acl.write !== 'members' && kindSchema.acl.write !== 'relay-admins') {
       id = await deriveOwnerNodeId(this._identity.signingPub, kindSchema.kind);
     }
@@ -558,7 +760,7 @@ export class Space {
     // why doing this the other way round permanently breaks sync for
     // every later update on this Node.
     const doc = new Y.Doc();
-    const node = this._attach(id, kindSchema, doc);
+    const node = this._attach(id, kindSchema, doc, { groupRef });
     // A relay only ever forwards a write to a Node's SUBSCRIBERS (see @qu/space-transport's
     // relay.js "SUBSCRIBER-TRACKING" doc comment) - without this, the creator of a Node would
     // never see anyone ELSE's later, otherwise-authorized write to it (e.g. a 'named'-ACL
@@ -586,11 +788,19 @@ export class Space {
    * own seal/send (see `_handleLocalUpdate`): the returned Node is usable
    * immediately either way, catch-up (if any) arrives asynchronously as
    * ordinary incoming envelopes.
+   * @param {{groupRef?: {groupOwnerPub: Uint8Array, groupName: string}}} [options] - REQUIRED (and,
+   *   per the self-certifying check below, must match this exact `id`) for any caller that intends
+   *   to WRITE to an `acl.write: 'group'` Kind's Node via this method rather than `useNode()` - see
+   *   `useNode()`'s/`loadNode()`'s own doc comments on why: `node.groupRef` is what
+   *   `_handleLocalUpdate()` reads back to attach `{groupOwnerPub, groupName}` to THIS peer's own
+   *   outgoing writes (node.js's own doc comment on `groupRef` - never needed just to READ, since an
+   *   INCOMING write's own `groupRef` arrives on that write's wire message itself, not from this
+   *   peer's local Node state). Ignored for every other ACL mode.
    */
-  subscribeNode(id, kindSchema) {
+  subscribeNode(id, kindSchema, { groupRef = null } = {}) {
     if (this._nodes.has(id)) return this._nodes.get(id);
     const doc = new Y.Doc(); // meta/content arrive via sync, not stamped locally - this peer did not create this Node.
-    const node = this._attach(id, kindSchema, doc);
+    const node = this._attach(id, kindSchema, doc, { groupRef });
     this._sendSubscribeRequest(id);
     return node;
   }
@@ -680,9 +890,42 @@ export class Space {
    * `'public'`-visibility field can never satisfy this check; such a
    * Kind's fields still sync/persist correctly, they simply can't be
    * compacted as one unit under this design.
+   *
+   * UPDATE - `recipients` OVERRIDE, for an `acl.write: 'group'`/`'content'`
+   * Kind whose real audience is NARROWER than this Space's own flat
+   * `members` list (the previous, only behavior - sealing for
+   * `this._recipientXPubKeys()` unconditionally - silently over-shared a
+   * compacted Group-content Node to every flat Space member, not just that
+   * Group's own current members, and is simply WRONG for a deployment with
+   * no meaningful flat `members` list configured at all, which every
+   * self-certifying/`'group'`-ACL Kind is designed to work without). Also
+   * the fix for a REAL correctness gap, not just a privacy one: a Group's
+   * own member list and a Space's own flat `members` are two independent
+   * axes (`kind-schema.js`'s own `'group'` doc comment) - a Group member
+   * freshly ADDED to an already-active, multi-author `'group'`-ACL Node
+   * (e.g. a group chat with existing messages) can otherwise never
+   * integrate ANY future write from an author whose own first update they
+   * weren't a decryption recipient of, even ones sent AFTER they joined -
+   * the same per-author Yjs causal-gap property `grant.js`'s own "WRITE-
+   * BEFORE-GRANT IS A TRAP" doc comment describes, just triggered by
+   * Group membership growth instead of a missed grant. Compacting with
+   * `recipients` set to the Group's own CURRENT members (right after the
+   * membership-growing `editGroup()` call) reseals the Node's whole state
+   * as ONE envelope for exactly that new member list, giving a newly-added
+   * member a gap-free baseline to subscribe fresh from - the exact
+   * "reseals for whoever is a member NOW" mechanism this function's own
+   * top doc comment already describes, now usable for a narrower-than-
+   * Space-wide audience too. Omitting `recipients` keeps the prior
+   * behavior unchanged (seals for the full flat Space membership).
+   * `sealStrategy` padding is applied ONLY when `recipients` narrows the
+   * audience below the Space's own full membership - sealing for the
+   * UNNARROWED default has no wider list left to pad against (same
+   * reasoning this function already gave for skipping padding entirely,
+   * now scoped to exactly the case where it still holds).
    * @param {string} id
+   * @param {{recipients?: Array<Uint8Array>}} [options] - `recipients`: X25519 pubkeys to seal the compacted snapshot for, overriding the default (this Space's own full flat membership).
    */
-  async compactNode(id) {
+  async compactNode(id, { recipients } = {}) {
     const node = this._nodes.get(id);
     if (!node) throw new Error(`Space.compactNode: Node "${id}" is not attached - subscribe/create/use it first`);
     const kindSchema = node.kindSchema;
@@ -700,18 +943,24 @@ export class Space {
     const snapshotBytes = Y.encodeStateAsUpdate(gcDoc);
     gcDoc.destroy();
 
-    // No sealStrategy/padding here (unlike _handleLocalUpdate() above) - a compaction snapshot
-    // always seals for this Space's FULL current membership (this._recipientXPubKeys()), never a
-    // {recipients}-narrowed subset, so there is no "real audience smaller than the member list" to
-    // hide in the first place - sealStrategies.padToMembers would compute an empty padding set here
-    // anyway.
+    // sealStrategy/padding only enters the picture when `recipients` genuinely narrows the audience
+    // below this Space's own full flat membership - see this method's own "UPDATE" doc comment.
+    // Sealing for the UNNARROWED default (this._recipientXPubKeys()) has no wider list left to pad
+    // against, same as before this option existed.
+    const effectiveRecipients = recipients ?? this._recipientXPubKeys();
+    const paddingXPubKeys = visibility === 'public' || !recipients ? [] : this._sealStrategy({ recipientXPubKeys: effectiveRecipients, memberXPubKeys: this._recipientXPubKeys() });
     const envelope =
       visibility === 'public'
         ? await sealPublicUpdate(snapshotBytes, this._identity, null, true)
-        : await sealUpdate(snapshotBytes, this._identity, this._recipientXPubKeys(), null, true);
+        : await sealUpdate(snapshotBytes, this._identity, effectiveRecipients, null, true, paddingXPubKeys);
 
     await this._storageFor(kindSchema)?.replace(id, [envelope]);
-    this._transport.send({ nodeId: id, envelope });
+    // Same `groupRef` rule `_handleLocalUpdate()` already follows (this file's own comment there):
+    // an `acl.write: 'group'` Kind's relay-side ACL check (relay.js's `buildWriteAcl()`) REQUIRES
+    // `groupRef` on the wire message itself - omitting it here (unlike every other write path) would
+    // make the relay reject this snapshot outright (`bad-signature`, same as "no groupRef at all"),
+    // defeating the one thing `addGroupChatMembers()` relies on this method for.
+    this._transport.send(node.groupRef ? { nodeId: id, envelope, groupRef: node.groupRef } : { nodeId: id, envelope });
     this._bus?.emit('debug.space.compact.sent', { nodeId: id, bytes: snapshotBytes.length });
   }
 
@@ -746,12 +995,23 @@ export class Space {
     return kindSchema?.persistence === 'volatile' ? this._volatileStorage : this._storage;
   }
 
-  /** Replays a Node's envelope history from storage (see @qu/space-storage) - the "durable persistence survives a reload" path. */
-  async loadNode(id, kindSchema) {
+  /**
+   * Replays a Node's envelope history from storage (see @qu/space-storage) - the "durable
+   * persistence survives a reload" path.
+   * @param {string} id @param {object} kindSchema
+   * @param {{groupRef?: {groupOwnerPub: Uint8Array, groupName: string}}} [options] - REQUIRED for an
+   *   `acl.write: 'group'` `kindSchema` (kind-schema.js's own doc comment on the mode) - stored
+   *   envelope history for a `'group'`-ACL Node still needs it to re-verify each envelope on replay,
+   *   same as a live incoming write does (this Space's own storage never persists `groupRef` itself,
+   *   only ever the envelope - see `_handleLocalUpdate()`'s own doc comment on why that's enough:
+   *   the caller who already knows `id` for a `'group'`-ACL Kind necessarily already knows the
+   *   `groupRef` that derives it).
+   */
+  async loadNode(id, kindSchema, { groupRef = null } = {}) {
     if (!this._storageFor(kindSchema)) throw new Error('Space.loadNode: no storage adapter mounted');
     const doc = new Y.Doc();
-    const node = this._attach(id, kindSchema, doc, { skipReSeal: true });
-    await this._hydrateFromStorage(id, kindSchema, doc);
+    const node = this._attach(id, kindSchema, doc, { skipReSeal: true, groupRef });
+    await this._hydrateFromStorage(id, kindSchema, doc, groupRef);
     node._skipReSeal = false;
     return node;
   }
@@ -769,10 +1029,11 @@ export class Space {
    * over possibly many envelopes) matters more than at `_handleIncoming()`'s own single-envelope
    * call site below: an uncaught throw here would abort hydrating every envelope AFTER the
    * unreadable one too, not just that one - a real, previously-unhandled bug this Task fixes.
+   * @param {{groupRef?: {groupOwnerPub: Uint8Array, groupName: string}}} [groupRef] - see `loadNode()`'s own doc comment.
    */
-  async _hydrateFromStorage(id, kindSchema, doc) {
+  async _hydrateFromStorage(id, kindSchema, doc, groupRef = null) {
     const envelopes = await this._storageFor(kindSchema).load(id);
-    const isAuthorized = this._isAuthorizedWriter(kindSchema, id);
+    const isAuthorized = this._isAuthorizedWriter(kindSchema, id, groupRef);
     let skipped = 0;
     for (const envelope of envelopes) {
       if (!(await verifyEnvelope(envelope, isAuthorized))) continue;
@@ -822,12 +1083,17 @@ export class Space {
    * to use the lower-level methods directly).
    * @param {string} id
    * @param {object} kindSchema
-   * @param {{forceRevalidate?: boolean}} [options] `forceRevalidate` (default `false`) - see this
-   *   file's own "WARM-RELEASE CACHE" doc comment's own paragraph on it. Meaningless (and ignored)
-   *   for a genuinely cold `id` - a brand-new subscribe already IS a full revalidation.
+   * @param {{forceRevalidate?: boolean, groupRef?: {groupOwnerPub: Uint8Array, groupName: string}}} [options]
+   *   `forceRevalidate` (default `false`) - see this file's own "WARM-RELEASE CACHE" doc comment's
+   *   own paragraph on it. Meaningless (and ignored) for a genuinely cold `id` - a brand-new
+   *   subscribe already IS a full revalidation. `groupRef` - ONLY for an `acl.write: 'group'`
+   *   `kindSchema` (see that mode's own doc comment, kind-schema.js) a caller intends to WRITE to
+   *   (never needed for a purely read-only `useNode()` call, nor for a re-acquire of an
+   *   already-attached/warm handle, which already has it from its own creation) - stored on the
+   *   returned `SpaceNode` so `_handleLocalUpdate()` can attach it to this Node's own later writes.
    * @returns {Promise<{node: SpaceNode, release: () => void}>}
    */
-  async useNode(id, kindSchema, { forceRevalidate = false } = {}) {
+  async useNode(id, kindSchema, { forceRevalidate = false, groupRef = null } = {}) {
     const wasWarm = this._warmSince.has(id);
     if (wasWarm) {
       this._warmSince.delete(id);
@@ -839,8 +1105,8 @@ export class Space {
     let node = this._nodes.get(id);
     if (!node) {
       const doc = new Y.Doc();
-      node = this._attach(id, kindSchema, doc, { skipReSeal: true });
-      if (this._storageFor(kindSchema)) await this._hydrateFromStorage(id, kindSchema, doc);
+      node = this._attach(id, kindSchema, doc, { skipReSeal: true, groupRef });
+      if (this._storageFor(kindSchema)) await this._hydrateFromStorage(id, kindSchema, doc, groupRef);
       node._skipReSeal = false;
       await this._sendSubscribeRequest(id); // awaited (unlike subscribeNode()'s own fire-and-forget) - useNode() already returns a Promise, so a caller awaiting it can rely on the subscribe request having actually left by the time it resolves.
     } else if (forceRevalidate || this._isStale(id)) {
@@ -893,8 +1159,30 @@ export class Space {
    * and unsubscribe right now. With `warmNodeTTL > 0`, refcount-zero instead
    * hands the Node to `_goWarm()` - see this file's own "WARM-RELEASE CACHE"
    * doc comment for the full design.
+   *
+   * A Group Node (`kind === GROUP_REF_KIND.kind`) is NEVER torn down here, at ANY refcount,
+   * regardless of `warmNodeTTL` - a real, previously-hit bug this Task fixes, not a hypothetical
+   * one: `_currentGroupMembers()`'s own cache (below) captures the SPECIFIC `SpaceNode` OBJECT a
+   * Group's `useNode()` call returned, the FIRST time any 'group'-ACL write ever needed verifying -
+   * if an ORDINARY, unrelated caller (`@qu/app-core`'s `ContentResolver.resolveGroup()`, the most
+   * natural thing an app does right after creating/editing a group) had ALREADY `useNode()`'d and
+   * `release()`d that SAME Group id earlier (its own refcount hitting zero FIRST, since
+   * `Space.createNode()` never itself increments it), this Node would be torn down and, on the
+   * FIRST 'group'-ACL write that ever needs it, `_currentGroupMembers()`'s own COLD `useNode()` call
+   * would have to `_attach()` a BRAND NEW, EMPTY Y.Doc - reading back an EMPTY membership set for
+   * THAT VERY write (this method never blocks/waits for real data to arrive - see that method's own
+   * doc comment), rejecting a genuinely authorized author's FIRST-EVER write to that Node - and,
+   * because Yjs never integrates a LATER update from an author once an EARLIER one in their own
+   * sequence was rejected (grant.js's own "WRITE-BEFORE-GRANT IS A TRAP" doc comment), EVERY
+   * subsequent write from that SAME author to that SAME Node would then ALSO be silently lost,
+   * permanently, even once the Group's real data caught up moments later. Groups are small and
+   * infrequently written - keeping one attached for this Space's own whole lifetime, once ANY code
+   * path has ever asked for it, is a deliberately cheap, unconditional guarantee against this exact
+   * class of race, not something worth threading a "was this a group-ACL-critical read" flag through
+   * every ordinary caller to avoid.
    */
   _releaseNode(id) {
+    if (this._nodes.get(id)?.kind === GROUP_REF_KIND.kind) return;
     const count = (this._refCounts.get(id) ?? 1) - 1;
     if (count > 0) {
       this._refCounts.set(id, count);
@@ -938,8 +1226,8 @@ export class Space {
     this.unsubscribeNode(id);
   }
 
-  _attach(id, kindSchema, doc, { skipReSeal = false } = {}) {
-    const node = new SpaceNode({ id, kindSchema, doc, identity: this._identity, recipientXPubKeys: () => this._recipientXPubKeys() });
+  _attach(id, kindSchema, doc, { skipReSeal = false, groupRef = null } = {}) {
+    const node = new SpaceNode({ id, kindSchema, doc, identity: this._identity, recipientXPubKeys: () => this._recipientXPubKeys(), groupRef });
     node._skipReSeal = skipReSeal;
     this._nodes.set(id, node);
     doc.on('update', (update, origin) => this._handleLocalUpdate(id, node, update, origin));
@@ -989,7 +1277,11 @@ export class Space {
         ? await sealPublicUpdate(update, this._identity, notify)
         : await sealUpdate(update, this._identity, effectiveRecipients, notify, false, paddingXPubKeys);
     await this._storageFor(node.kindSchema)?.append(nodeId, envelope);
-    this._transport.send({ nodeId, envelope });
+    // `groupRef` (kind-schema.js's own "'group'" ACL mode doc comment) - carried on the OUTER wire
+    // message, never inside `envelope` itself (which stays identical in shape to every other Kind's) -
+    // `node.groupRef` is `null` for every Kind except `acl.write: 'group'`, so this is a no-op
+    // additional field for every existing write path.
+    this._transport.send(node.groupRef ? { nodeId, envelope, groupRef: node.groupRef } : { nodeId, envelope });
     this._bus?.emit('debug.space.write.local', { nodeId, kind: node.kind, bytes: update.length, notify });
     this._emitChangeEvents(nodeId, node, { origin: 'local', notify, authorPub: this._identity.signingPub });
   }
@@ -1013,8 +1305,20 @@ export class Space {
    * safe for ANY remote reader, not just the creator's own local state.
    */
   async _handleIncoming(message) {
-    const { nodeId, envelope, type, pub, xPub, name } = message;
+    const { nodeId, envelope, type, pub, xPub, name, groupRef } = message;
     if (type === 'subscribe' || type === 'unsubscribe' || type === 'hello') return; // all three are relay-bound, not peer-bound (see _sendSubscribeRequest/unsubscribeNode/_sendHello) - defensive no-op if one ever reaches here anyway.
+    if (type === 'presence-visibility' || type === 'watch-presence' || type === 'unwatch-presence') return; // also relay-bound, not peer-bound - see declareOnlineVisibility()/watchLivePresence()/unwatchLivePresence() and presence-visibility.js's own doc comment.
+    if (type === 'presence-online' || type === 'presence-offline') {
+      // The relay's reply to watchLivePresence() (both the immediate current-state reply and every
+      // later push) - see that method's own doc comment. Recorded regardless of whether ANYTHING
+      // ever called watchLivePresence() for this exact pub (a stray push is simply redundant, never
+      // harmful) - same "cheap to just accept" posture 'member-joined' takes above.
+      const pubB64 = QuCrypto.toBase64(pub);
+      const online = type === 'presence-online';
+      this._livePresence.set(pubB64, online);
+      this._bus?.emit('space.presence.live.changed', { pub: pubB64, online });
+      return;
+    }
     if (type === 'write-ack') {
       // See @qu/space-transport's relay.js "WRITE-ACK" doc comment - `seq` is this Node's mirror
       // size after the ack-triggering write landed, a cheap, storage-derived "your write reached
@@ -1080,7 +1384,7 @@ export class Space {
       this._bus?.emit('debug.space.write.remote.ignored', { nodeId }); // not subscribed to this Node - ordinary relay fan-out, not an error, see this file's own doc comment.
       return;
     }
-    const isAuthorized = this._isAuthorizedWriter(node.kindSchema, nodeId);
+    const isAuthorized = this._isAuthorizedWriter(node.kindSchema, nodeId, groupRef);
     if (!(await verifyEnvelope(envelope, isAuthorized))) {
       // envelope.pub is guaranteed well-formed here: verifyEnvelope() already base64-encoded it internally without throwing.
       this._bus?.emit('debug.space.write.remote.rejected', { nodeId, authorPub: QuCrypto.toBase64(envelope.pub) });

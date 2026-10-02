@@ -328,7 +328,7 @@ async function renderMultiUserRoute({ space, mountEl, window, styleId, resolveTi
   // `wireInstalledApps()` goes FIRST, before `wireViews()` - see its own call in `startApp()`'s
   // doc comment on why: `wireViews()` does real async work (resolving + opening each View's live
   // sources) that a form-attaching call must never be stalled behind.
-  await wireInstalledApps({ mountEl, doc: window.document, space });
+  await wireInstalledApps({ mountEl, doc: window.document, space, subPath: routeNamespace + userSubPath });
   // Wired regardless of whose `ref` this is, same posture #/<prefix>/cms already has for an
   // ordinary app: write-ACL (self-owned, or an explicit grantContentWriter()) is what actually
   // gates a save, never this UI - a visitor viewing someone ELSE's page sees the same editor,
@@ -369,7 +369,7 @@ async function renderGlobalShell({ space, mountEl, window, styleId, resolveTimeo
   renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
   mountEl.quSelfNodeId = plan.page?.nodeId ?? null; // `self`-node context - see `startApp()`'s own doc comment on this pair.
   mountEl.quSelfKind = plan.page?.kindSchema ?? null;
-  await wireInstalledApps({ mountEl, doc: window.document, space });
+  await wireInstalledApps({ mountEl, doc: window.document, space, subPath });
   await wireCms({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), global: true, prefix });
   await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
   wireRichText({ mountEl, bind: richTextBind });
@@ -462,7 +462,7 @@ export function startApp({ space, appAdminPub, mountEl, window, styleId, resolve
       // would leave a real window where a fast visitor's `submit` fires on a form with no listener
       // yet, silently lost (confirmed the hard way - `installed-apps.test.js` caught exactly this
       // before this reordering fixed it).
-      await wireInstalledApps({ mountEl, doc: window.document, space });
+      await wireInstalledApps({ mountEl, doc: window.document, space, subPath: route });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub });
       await wireViews({ mountEl, doc: window.document, space, appAdminPub });
       wireRichText({ mountEl, bind: richTextBind });
@@ -615,7 +615,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout,
         renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
         mountEl.quSelfNodeId = plan.page?.nodeId ?? null; // `self`-node context - see `startApp()`'s own doc comment on this pair.
         mountEl.quSelfKind = plan.page?.kindSchema ?? null;
-        await wireInstalledApps({ mountEl, doc: window.document, space });
+        await wireInstalledApps({ mountEl, doc: window.document, space, subPath: match.subPath });
         wireAdminConsole({ mountEl, doc: window.document, mainSpace: space, platform });
         await wireViews({ mountEl, doc: window.document, space, appAdminPub: await globalAppAnchor('admin'), kinds: GLOBAL_KINDS });
         wireRichText({ mountEl, bind: effectiveRichTextBind });
@@ -686,7 +686,7 @@ export function startPlatform({ space, mountEl, window, styleId, resolveTimeout,
       renderPage({ mountEl, doc: window.document, templateHtml: plan.templateHtml, page: plan.page, css: plan.css, styleId });
       mountEl.quSelfNodeId = plan.page?.nodeId ?? null; // `self`-node context - see `startApp()`'s own doc comment on this pair.
       mountEl.quSelfKind = plan.page?.kindSchema ?? null;
-      await wireInstalledApps({ mountEl, doc: window.document, space });
+      await wireInstalledApps({ mountEl, doc: window.document, space, subPath: match.subPath });
       await wireCms({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
       await wireViews({ mountEl, doc: window.document, space, appAdminPub: match.appAdminPub });
       wireRichText({ mountEl, bind: effectiveRichTextBind });

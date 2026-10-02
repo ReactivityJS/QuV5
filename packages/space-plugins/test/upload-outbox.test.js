@@ -76,6 +76,45 @@ test('enqueue() saves locally, then transitions pending -> uploading -> done, an
   assert.equal(uploaded[0].blob, 'fake-bytes');
 });
 
+test('a resolved upload() result is merged into the record on "done" - available via statusOf()/list()', async () => {
+  const alice = await actor();
+  const space = new Space({ identity: alice, members: [], transport: silentTransport() });
+  const localStore = memoryLocalStore();
+  const outbox = new UploadOutbox(space, localStore, async () => ({ url: 'https://relay.example/files/cat.png' }));
+
+  const id = await outbox.enqueue({ name: 'cat.png', size: 1234, mimeType: 'image/png' }, 'fake-bytes');
+  await waitUntil(async () => (await outbox.statusOf(id))?.status === 'done');
+  const status = await outbox.statusOf(id);
+  assert.equal(status.url, 'https://relay.example/files/cat.png');
+  assert.equal(status.name, 'cat.png'); // the original metadata is untouched, not replaced.
+
+  const [listed] = await outbox.list();
+  assert.equal(listed.url, 'https://relay.example/files/cat.png');
+});
+
+test("upload()'s own result can never clobber this class's own lifecycle fields, even if it resolves with keys named the same", async () => {
+  const alice = await actor();
+  const space = new Space({ identity: alice, members: [], transport: silentTransport() });
+  const outbox = new UploadOutbox(space, memoryLocalStore(), async () => ({ status: 'hacked', error: 'not-a-real-error' }));
+
+  const id = await outbox.enqueue({ name: 'x.bin', size: 1, mimeType: 'application/octet-stream' }, 'x');
+  await waitUntil(async () => (await outbox.statusOf(id))?.status !== 'pending' && (await outbox.statusOf(id))?.status !== 'uploading');
+  const status = await outbox.statusOf(id);
+  assert.equal(status.status, 'done'); // never 'hacked' - status/error are applied AFTER the spread.
+  assert.equal(status.error, null);
+});
+
+test('an upload() that resolves with no value (undefined) leaves the record exactly as before - no stray fields added', async () => {
+  const alice = await actor();
+  const space = new Space({ identity: alice, members: [], transport: silentTransport() });
+  const outbox = new UploadOutbox(space, memoryLocalStore(), async () => {}); // resolves undefined, same as every other test in this file.
+
+  const id = await outbox.enqueue({ name: 'plain.bin', size: 1, mimeType: 'application/octet-stream' }, 'x');
+  await waitUntil(async () => (await outbox.statusOf(id))?.status === 'done');
+  const status = await outbox.statusOf(id);
+  assert.deepEqual(Object.keys(status).sort(), ['addedAt', 'error', 'id', 'mimeType', 'name', 'size', 'status']);
+});
+
 test('a throwing upload() leaves the record "failed" (with the error message) and keeps the local blob for retry()', async () => {
   const alice = await actor();
   const space = new Space({ identity: alice, members: [], transport: silentTransport() });
@@ -200,5 +239,6 @@ test('markFileReceived()/watchFileReceipts() let a recipient confirm receipt of 
   await markFileReceived(bobSpace, fileId);
   await waitUntil(async () => (await watchFileReceipts(aliceSpace, bob.signingPub)).marks[fileId] !== undefined);
   const { marks } = await watchFileReceipts(aliceSpace, bob.signingPub);
-  assert.ok(marks[fileId].at > 0);
+  assert.equal(marks[fileId].deliveredUpTo, true);
+  assert.ok(marks[fileId].deliveredAt > 0);
 });

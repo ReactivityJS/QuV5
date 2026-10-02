@@ -90,8 +90,29 @@
  * no relay restart either; TEMPLATES/STYLES stay a smaller, more static
  * set for now, a deliberate, separate scope boundary - see that file's own
  * doc comment.)
+ *
+ * `'group'`-ACL KINDS (e.g. `@qu/app-core`'s own `messenger.js` `chatKind`):
+ * unlike every other Kind here, a `'group'`-ACL Node's id is NOT
+ * owner-singleton (`deriveOwnerNodeId`) - it's content-addressed by a
+ * `{groupOwnerPub, groupName}` pair NEITHER of which this function is ever
+ * told in advance (a chat's `groupName` is a per-conversation secret, often
+ * never shared with the relay operator at all). relay.js's own
+ * `resolveKindSchema(nodeId, claimedPub?, groupRef?)` doc comment names this
+ * file as the "reference consumer" for its THIRD argument for exactly this
+ * reason: pass every `'group'`-ACL Kind this deployment uses via
+ * `groupKinds` (default `[]`, matching `collectionRegistryKinds`'s own
+ * shape), and the returned resolver re-derives `deriveContentNodeId(
+ * groupRef.groupOwnerPub, kind.kind, groupRef.groupName)` for each one and
+ * compares it to `nodeId` - the SAME "unverified claim for CLASSIFICATION
+ * ONLY is safe" reasoning `claimedPub` already gets below (a forged
+ * `groupRef` still fails `buildWriteAcl()`'s own independent re-derivation
+ * and signer-membership check regardless of what it got classified as).
+ * Omitting `groupKinds` (the default) is NOT a correctness regression for
+ * any EXISTING caller (none of the Kinds this file otherwise classifies are
+ * `'group'`-ACL), only a hard requirement for a NEW one that is - exactly
+ * `messenger.js`'s own `chatKind`.
  */
-import { deriveOwnerNodeId } from '@qu/space-core';
+import { deriveOwnerNodeId, userKind } from '@qu/space-core';
 import { deriveContentNodeId } from './content-id.js';
 import {
   appManifestKind,
@@ -113,7 +134,7 @@ import {
 } from './kinds.js';
 
 /**
- * @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], collectionRegistryKinds?: object[], globalApps?: Array<{prefix: string, templateNames?: string[], pageRoutes?: string[], styleNames?: string[], viewNames?: string[]}>, sharedListNames?: string[]}} params
+ * @param {{appAdminPub?: Uint8Array, appAdminPubs?: Uint8Array[], collectionRegistryKinds?: object[], globalApps?: Array<{prefix: string, templateNames?: string[], pageRoutes?: string[], styleNames?: string[], viewNames?: string[]}>, sharedListNames?: string[], groupKinds?: object[]}} params
  *   `appAdminPub` (singular) is a convenience alias for `appAdminPubs: [appAdminPub]`.
  *   `collectionRegistryKinds` - every Collection's `registryKind` this relay
  *   should recognize (see this file's own top doc comment on "COLLECTIONS") -
@@ -137,8 +158,9 @@ import {
  *   name must be told here explicitly too - `dev.js`'s `registerApp()` own
  *   `globalViewNames` param is where a caller supplies it,
  *   `@qu/app-shell`'s `live-app-resolver.js` threading it through from
- *   there into this same `globalApps` shape.
- * @returns {Promise<(nodeId: string) => object>}
+ *   there into this same `globalApps` shape. `groupKinds` - see this file's
+ *   own top doc comment on "'GROUP'-ACL KINDS".
+ * @returns {Promise<(nodeId: string, claimedPub?: Uint8Array, groupRef?: {groupOwnerPub: Uint8Array, groupName: string}) => object>}
  */
 export async function createAppResolveKindSchema({
   appAdminPub,
@@ -146,6 +168,7 @@ export async function createAppResolveKindSchema({
   collectionRegistryKinds = [],
   globalApps = [{ prefix: 'admin', templateNames: ['main'], pageRoutes: ['/'], styleNames: [] }],
   sharedListNames = [],
+  groupKinds = [],
 } = {}) {
   const owners = [...(appAdminPubs ?? []), ...(appAdminPub ? [appAdminPub] : [])];
   const manifestIds = new Set(await Promise.all(owners.map((pub) => deriveOwnerNodeId(pub, appManifestKind.kind))));
@@ -181,7 +204,12 @@ export async function createAppResolveKindSchema({
     await Promise.all(sharedListNames.map(async (name) => deriveOwnerNodeId(await sharedListAnchor(name), sharedListKind.kind)))
   );
 
-  return async (nodeId, claimedPub) => {
+  return async (nodeId, claimedPub, groupRef) => {
+    if (groupRef) {
+      for (const kind of groupKinds) {
+        if ((await deriveContentNodeId(groupRef.groupOwnerPub, kind.kind, groupRef.groupName)) === nodeId) return kind;
+      }
+    }
     if (globalManifestIds.has(nodeId)) return adminAppManifestKind;
     if (globalRouteRegistryIds.has(nodeId)) return adminRouteRegistryKind;
     if (globalTemplateIds.has(nodeId)) return adminTemplateKind;
@@ -218,6 +246,17 @@ export async function createAppResolveKindSchema({
       if ((await deriveOwnerNodeId(claimedPub, routeRegistryKind.kind)) === nodeId) return routeRegistryKind;
       if ((await deriveOwnerNodeId(claimedPub, templateRegistryKind.kind)) === nodeId) return templateRegistryKind;
       if ((await deriveOwnerNodeId(claimedPub, styleRegistryKind.kind)) === nodeId) return styleRegistryKind;
+      // `@qu/space-core`'s own `userKind` ('qu-user', 'owner'-ACL) - the SAME self-certifying,
+      // no-enumeration-needed shape as the app-registry Kinds above, just not one of THIS package's
+      // own. A REAL, previously-unnoticed gap this closes: literally ANY identity may publish its own
+      // profile (`ensureUserProfile()`, called automatically for every real boot - `@qu/app-shell`'s
+      // own `shell.js`) - there is no "owners" list to enumerate it from, exactly like a self-
+      // provisioned `mode: 'multiuser'` participant above - so every profile write/read through this
+      // resolver's REAL deployment path (not a hand-rolled test-only `idToKind` map) was silently
+      // misclassified against the generic `pageKind` fallback and rejected, invisible from the
+      // writer's own already-connected Space, only surfacing for a DIFFERENT peer looking it up (e.g.
+      // `messenger.js`'s own "contacts-first" flow resolving a contact's `epub`).
+      if ((await deriveOwnerNodeId(claimedPub, userKind.kind)) === nodeId) return userKind;
       for (const registryKind of collectionRegistryKinds) {
         if ((await deriveOwnerNodeId(claimedPub, registryKind.kind)) === nodeId) return registryKind;
       }

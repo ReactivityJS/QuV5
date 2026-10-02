@@ -1,79 +1,104 @@
 /**
- * THE CHAT APP, AS A PLAIN BUNDLE — the FIRST genuinely file-based app
- * (repo root's own `apps/README.md` doc comment on the dividing line: this
- * one can't yet be reduced to a Template + `qu-list`/`qu-view` data source
- * alone, not because ITS OWN v1 content here is complex - it deliberately
- * isn't - but because the planned direction (location-sharing, reactions,
- * an "Action-Slots" extension point other apps register into - see the
- * project's own architecture notes) needs real per-message behavior no
- * generic CMS module offers yet).
+ * THE CHAT APP, AS A PLAIN BUNDLE — v2, the real Messenger (Signal/
+ * WhatsApp/Telegram-style: 1:1 + group chats, delivery/read ticks, typing,
+ * online status, a real conversation list). v1 (kept in git history) was a
+ * deliberately throwaway, fully PUBLIC, unencrypted, single-channel demo
+ * proving the `/apps/*` discovery mechanism alone - this is a structural
+ * replacement, not an incremental update (hence `CHAT_VERSION` resets the
+ * "Update verfügbar" story: an already-installed v1 instance upgrades to
+ * this exact same way any other bundle version bump works, see
+ * `updateChat()` below).
  *
- * v1 IS, on purpose, structurally almost identical to `packages/app-shell`'s
- * own `guestbook-bundle.js` (`realm: 'global'`, one shared list, one live
- * View) - proving the `/apps/*` discovery mechanism end-to-end with a real,
- * useful app came first; the message-list/View plumbing underneath is
- * exactly the same "just Kinds + a shared list" story either way. What's
- * DIFFERENT, and the reason this lives here instead of next to Gästebuch:
- * a chat message is the thing everything else (reactions, a shared
- * location, a read receipt, ...) will eventually need to attach BEHAVIOR
- * to per-message, in-page, without a page reload - real code, not a
- * bigger CMS Template.
+ * UNLIKE Gästebuch/Blog/Forum, this app's own actual content is NEVER a CMS
+ * Page: every real conversation is a private, per-identity `qu-chat` Node
+ * (`@qu/app-core`'s `messenger.js`), addressed by `{groupOwnerPub,
+ * groupName}`, never by a route this relay-admin's own global Page registry
+ * could ever enumerate (`apps/README.md`'s own dividing line: this is
+ * exactly the "needs real behavior, not a Template + data source" case).
+ * What THIS bundle installs is purely the static CHROME every visitor sees
+ * regardless of which conversation (if any) they have open - a sidebar +
+ * main-area shell, as this app's own global root TEMPLATE (`chat-shell`),
+ * not a Page. A Template, unlike a Page, is NEVER route-specific
+ * (`AppRuntime.resolveRoute()`'s own doc comment: a Page's `template` falls
+ * back to the Manifest's `rootTemplate` whenever no Page matches the
+ * current route at all) - so this SAME chrome renders for every one of this
+ * app's own code-driven `subPath`s (`#/<prefix>/`, `#/<prefix>/room/<id>`,
+ * ...), none of which this bundle ever registers as a Page. `actions.js`'s
+ * own `wireChat()` is what actually fills `[data-qu-chat-main]` per
+ * `subPath`, reactively, no reload. See `apps/README.md`'s own
+ * `templateNames` doc comment on why a `/apps/*` app needs to declare this
+ * upfront at all (a real, previously-missing gap this app is the first to
+ * need closed).
  */
-import { createGlobalPage, publishGlobalRoute, createGlobalView } from '@qu/app-core';
-import { upsertGlobalPage, upsertGlobalView } from '@qu/app-shell/bundle-upsert';
+import { createGlobalApp, publishGlobalRoute, ContentResolver, globalAppAnchor, adminAppManifestKind, adminPageKind, adminTemplateKind, adminStyleKind, adminRouteRegistryKind, adminViewKind } from '@qu/app-core';
+import { upsertGlobalTemplate } from '@qu/app-shell/bundle-upsert';
 
-export const CHAT_VERSION = 1;
+export const CHAT_VERSION = 2;
 
-const ITEM_TEMPLATE = '<p><strong><qu-slot name="title"></qu-slot>:</strong> <qu-slot name="excerpt"></qu-slot></p>';
+export const CHAT_TEMPLATE_NAME = 'chat-shell';
 
-function pageFields(prefix) {
-  return {
-    route: '/',
-    title: 'Chat',
-    content: `<h1>Chat</h1>
-<div data-qu-view="${prefix}-feed" data-qu-chat-feed></div>
-<form data-qu-action="chat-form" data-qu-list="${prefix}">
-  <!-- Field names "name"/"message" (not "author"/"text") are the 'shared-list' View source
-       adapter's own fixed convention (@qu/app-core's view-sources.js: normalize()'s "name ->
-       title, message -> excerpt" mapping is a hardcoded field-name contract, not app-specific -
-       a chat message's "sender"/"text" is exactly what that adapter's own doc comment names as
-       one of the shapes "name"/"message" are meant to stand in for). actions.js pushes under
-       these SAME keys. -->
-  <label>Name: <input name="name" required></label><br>
-  <label>Nachricht: <input name="message" required></label>
-  <button type="submit">Senden</button>
-  <p data-qu-status></p>
-</form>`,
-  };
-}
+const GLOBAL_KINDS = {
+  appManifestKind: adminAppManifestKind,
+  pageKind: adminPageKind,
+  templateKind: adminTemplateKind,
+  styleKind: adminStyleKind,
+  routeRegistryKind: adminRouteRegistryKind,
+  viewKind: adminViewKind,
+};
 
-function viewFields(prefix) {
-  return {
-    name: `${prefix}-feed`,
-    sources: [{ type: 'shared-list', name: prefix }],
-    sortBy: 'timestamp',
-    sortOrder: 'asc', // oldest first - a chat log reads top-to-bottom, unlike Gästebuch's "newest first" feed.
-    itemTemplate: ITEM_TEMPLATE,
-  };
+const SHELL_HTML = `<div data-qu-chat-app>
+  <aside data-qu-chat-sidebar>
+    <div data-qu-chat-sidebar-header>
+      <strong>Chats</strong>
+      <button type="button" data-qu-chat-new-toggle>+ Neu</button>
+    </div>
+    <div data-qu-chat-new-panel hidden>
+      <p><strong>Kontakt hinzufügen</strong></p>
+      <input type="text" data-qu-chat-contact-pub placeholder="Pubkey (base64)">
+      <input type="text" data-qu-chat-contact-alias placeholder="Name (optional)">
+      <button type="button" data-qu-chat-contact-add>Hinzufügen</button>
+      <p><strong>Kontakte</strong></p>
+      <ul data-qu-chat-contacts></ul>
+      <p><strong>Neue Gruppe</strong></p>
+      <input type="text" data-qu-chat-group-name placeholder="Gruppenname">
+      <div data-qu-chat-group-members></div>
+      <button type="button" data-qu-chat-group-create>Gruppe erstellen</button>
+      <p data-qu-chat-new-status></p>
+    </div>
+    <ul data-qu-chat-conversations></ul>
+  </aside>
+  <main data-qu-chat-main>
+    <p data-qu-chat-empty>Wähle links eine Unterhaltung oder starte eine neue.</p>
+  </main>
+</div>`;
+
+/**
+ * Creates this app's own global Manifest (`rootTemplate: CHAT_TEMPLATE_NAME`)
+ * only if it doesn't already exist - `createGlobalApp()` must never be
+ * called twice for the same id (`bundle-upsert.js`'s own top doc comment:
+ * a second `createNode()` silently clobbers the first's local Y.Doc), and
+ * there is nothing here worth EDITING once created (the Manifest's own
+ * fields never change across `CHAT_VERSION` bumps, only the Template's
+ * CONTENT does - `updateChat()` below upserts that separately).
+ */
+async function ensureGlobalApp(space, prefix) {
+  const resolver = new ContentResolver(space, { appAdminPub: await globalAppAnchor(prefix), kinds: GLOBAL_KINDS });
+  const existing = await resolver.resolveManifest({ timeout: 800 });
+  if (existing) return;
+  await createGlobalApp(space, prefix, { name: 'Chat', rootTemplate: CHAT_TEMPLATE_NAME });
 }
 
 /** @param {import('@qu/space-core').Space} space @param {{prefix: string}} params */
 export async function installChat(space, { prefix }) {
   await publishGlobalRoute(space, prefix, { route: '/', title: 'Chat' });
   await new Promise((resolve) => setTimeout(resolve, 400));
-  await createGlobalPage(space, prefix, pageFields(prefix));
-  await createGlobalView(space, prefix, viewFields(prefix));
+  await ensureGlobalApp(space, prefix);
+  await upsertGlobalTemplate(space, prefix, { name: CHAT_TEMPLATE_NAME, html: SHELL_HTML });
 }
 
-/**
- * Re-applies this bundle's own content in place - see `guestbook-bundle.js`'s
- * `updateGuestbook()` own doc comment for the full "why upsert, why never
- * routed through installX()" reasoning, identical here. Never touches any
- * already-sent message (those live in the shared list, untouched by this -
- * only the page/View DEFINITIONS this bundle itself owns).
- */
+/** Re-applies this bundle's own shipped CHROME in place - see `bundle-upsert.js`'s own doc comment. Never touches any real conversation (those are private `qu-chat` Nodes this app's registration never had write access to at all). */
 export async function updateChat(space, { prefix }) {
   await publishGlobalRoute(space, prefix, { route: '/', title: 'Chat' });
-  await upsertGlobalPage(space, prefix, pageFields(prefix));
-  await upsertGlobalView(space, prefix, viewFields(prefix));
+  await ensureGlobalApp(space, prefix);
+  await upsertGlobalTemplate(space, prefix, { name: CHAT_TEMPLATE_NAME, html: SHELL_HTML });
 }

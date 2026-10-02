@@ -404,6 +404,48 @@ export class ContentResolver {
   }
 
   /**
+   * Resolves ONE `'group'`-ACL Node's own field data by the Group it's scoped to
+   * (`groupOwnerPub`/`groupName`) - the `acl.write: 'group'` counterpart to
+   * `resolveCollectionItem()`'s `'content'`-ACL one (same generic "any caller-defined field set,
+   * read every declared field, `null` if genuinely unpublished/unsynced" shape), for a Kind like a
+   * future chat room's own message-list Node (kind-schema.js's own "'group'" doc comment: id =
+   * `deriveContentNodeId(groupOwnerPub, itemKind.kind, groupName)`, self-certifying against the
+   * REFERENCED Group's identity, not this resolver's own `appAdminPub`). Passes `{groupOwnerPub,
+   * groupName}` through to `Space.useNode()` as `groupRef` - REQUIRED for `Space._isAuthorizedWriter()`
+   * to attach it to this identity's own later writes to the SAME Node (see that method's own doc
+   * comment) - omitting it here would silently leave a caller who only ever READS through this
+   * method unable to also WRITE via the same `useNode()`-cached handle later.
+   *
+   * Same "list-shaped fields aren't read here" limitation `resolveCollectionItem()` already has -
+   * `field.get()` doesn't exist on a `shape: 'list'` field (`@qu/space-core`'s field.js); a Kind
+   * whose main content IS a list (e.g. a chat room's own `messages`) is read via the raw node this
+   * method's own `useNode()` call would otherwise release - call `Space.useNode()` directly instead
+   * (with the SAME `groupRef`) for that case, same as any other list-shaped field elsewhere in this
+   * codebase.
+   * @param {string} groupName
+   * @param {{itemKind: object, groupOwnerPub: Uint8Array, timeout?: number, forceRevalidate?: boolean}} params
+   * @returns {Promise<object|null>} every non-list declared field's current value, keyed by field name; `null` if unpublished/unsynced within `timeout`.
+   */
+  async resolveGroupContent(groupName, { itemKind, groupOwnerPub, timeout, forceRevalidate = false } = {}) {
+    const groupRef = { groupOwnerPub, groupName };
+    const id = await deriveContentNodeId(groupOwnerPub, itemKind.kind, groupName);
+    const { node, release } = await this._space.useNode(id, itemKind, { forceRevalidate, groupRef });
+    const fieldNames = Object.keys(itemKind.fields).filter((name) => itemKind.fields[name].shape !== 'list');
+    const item = await waitFor(this._space, id, async () => {
+      const values = {};
+      let anySet = false;
+      for (const name of fieldNames) {
+        const value = await node.field(name).get();
+        values[name] = value;
+        if (value !== null && value !== undefined && value !== '') anySet = true;
+      }
+      return anySet ? values : null;
+    }, { timeout });
+    release();
+    return item;
+  }
+
+  /**
    * @param {string} name
    * @param {{ownerPub?: Uint8Array|string, timeout?: number, forceRevalidate?: boolean}} [params] - `ownerPub` defaults to this resolver's own configured `appAdminPub` (the common case - a group owned by the SAME identity as the content it protects), same convention `resolveCollectionItems()` already uses. `forceRevalidate` - see `resolvePage()`'s own doc comment.
    * @returns {Promise<{name: string, members: Array<{pub: Uint8Array, xPub: Uint8Array}>}|null>} `null` if unpublished/unsynced within `timeout`. `members` are decoded back to raw bytes - the exact shape `createPrivatePage()`'s own `recipients` param expects (`members.map(m => m.xPub)`).
