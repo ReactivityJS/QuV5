@@ -21,7 +21,8 @@
     "demo:legacy-chat-alice": "node demo/chat.mjs alice",
     "demo:legacy-chat-bob": "node demo/chat.mjs bob",
     "build:web": "node demo/web/build.mjs",
-    "build:app-shell-web": "node demo/app-shell-web/build.mjs"
+    "build:app-shell-web": "node demo/app-shell-web/build.mjs",
+    "lite:mirror": "node --no-warnings packages/lite/bin/mirror.mjs"
   },
   "engines": {
     "node": ">=20"
