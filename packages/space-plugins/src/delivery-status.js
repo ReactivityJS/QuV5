@@ -23,10 +23,21 @@
  *      `@qu/space-core`'s `presenceKind` - a read marker is meaningful
  *      history worth surviving a reload, not ephemeral churn) `'owner'`-ACL
  *      Node per reader, holding an ENCRYPTED map `{ [contentNodeId]:
- *      {upTo, at} }` - `upTo` is caller-defined (a message index, an id, a
- *      timestamp - whatever "read up to here" means for your own content
- *      Kind). Same "Space stays unaware this is a concept" shape as
+ *      {upTo, at, deliveredUpTo, deliveredAt} }` - `upTo`/`deliveredUpTo` are
+ *      caller-defined (a message index, an id, a timestamp - whatever "read
+ *      up to here"/"received up to here" means for your own content Kind).
+ *      Same "Space stays unaware this is a concept" shape as
  *      `@qu/space-core`'s `alias.js`/`presence.js`.
+ *
+ * UPDATE - `deliveredUpTo`/`deliveredAt`. A SEPARATE pair alongside
+ * `upTo`/`at`, same per-`contentNodeId` entry: written as soon as the
+ * client has RECEIVED and locally stored the content, independent of the
+ * user actually having read it - the "delivered" tick vs. the "read" tick a
+ * chat UI typically shows separately. `markRead()` and `markDelivered()`
+ * both go through `_patchMark()`, which MERGES into the existing entry
+ * rather than replacing it wholesale, so marking one never clobbers the
+ * other. `markFileReceived()` (below) uses `markDelivered()`, not
+ * `markRead()` - a file landing in `UploadOutbox` is a delivery, not a read.
  */
 import { QuCrypto } from '@qu/core';
 import { defineKind, deriveOwnerNodeId } from '@qu/space-core';
@@ -40,7 +51,7 @@ export function awaitRelayAck(bus, nodeId) {
   return new Promise((resolve) => bus.once(`space.node.${nodeId}.write-ack`, resolve));
 }
 
-/** One per reader: `marks` is an encrypted `{ [contentNodeId]: {upTo, at} }` map - see this file's own doc comment. */
+/** One per reader: `marks` is an encrypted `{ [contentNodeId]: {upTo, at, deliveredUpTo, deliveredAt} }` map - see this file's own doc comment. */
 export const readReceiptKind = defineKind('qu-read-receipts', {
   fields: { marks: { shape: 'atomic', visibility: 'encrypted' } },
   acl: { write: 'owner' },
@@ -52,20 +63,45 @@ export function readReceiptNodeId(pub) {
 }
 
 /**
- * Marks THIS Space's identity as having read `contentNodeId` up to `upTo`
- * (creates its read-receipts Node on first call, updates thereafter).
+ * Merges `patch` into THIS Space's identity's existing `marks[contentNodeId]`
+ * entry (creating its read-receipts Node on first call) - shared by
+ * `markRead()`/`markDelivered()` so setting one never wipes out the other.
+ * @param {import('@qu/space-core').Space} space
+ * @param {string} contentNodeId
+ * @param {object} patch
+ * @returns {Promise<import('@qu/space-core').SpaceNode>}
+ */
+async function _patchMark(space, contentNodeId, patch) {
+  const nodeId = await readReceiptNodeId(space.identity.signingPub);
+  const node = space.getNode(nodeId) ?? (await space.createNode(readReceiptKind, {}, { id: nodeId }));
+  const marks = (await node.field('marks').get()) ?? {};
+  marks[contentNodeId] = { ...marks[contentNodeId], ...patch };
+  await node.field('marks').set(marks);
+  return node;
+}
+
+/**
+ * Marks THIS Space's identity as having READ `contentNodeId` up to `upTo`.
  * @param {import('@qu/space-core').Space} space
  * @param {string} contentNodeId
  * @param {*} upTo - caller-defined "read up to here" marker.
  * @returns {Promise<import('@qu/space-core').SpaceNode>}
  */
-export async function markRead(space, contentNodeId, upTo) {
-  const nodeId = await readReceiptNodeId(space.identity.signingPub);
-  const node = space.getNode(nodeId) ?? (await space.createNode(readReceiptKind, {}, { id: nodeId }));
-  const marks = (await node.field('marks').get()) ?? {};
-  marks[contentNodeId] = { upTo, at: Date.now() };
-  await node.field('marks').set(marks);
-  return node;
+export function markRead(space, contentNodeId, upTo) {
+  return _patchMark(space, contentNodeId, { upTo, at: Date.now() });
+}
+
+/**
+ * Marks THIS Space's identity as having RECEIVED (locally stored)
+ * `contentNodeId` up to `deliveredUpTo` - independent of whether it has
+ * been read yet. See this file's own "UPDATE" doc comment.
+ * @param {import('@qu/space-core').Space} space
+ * @param {string} contentNodeId
+ * @param {*} deliveredUpTo - caller-defined "received up to here" marker.
+ * @returns {Promise<import('@qu/space-core').SpaceNode>}
+ */
+export function markDelivered(space, contentNodeId, deliveredUpTo) {
+  return _patchMark(space, contentNodeId, { deliveredUpTo, deliveredAt: Date.now() });
 }
 
 /**
@@ -73,7 +109,7 @@ export async function markRead(space, contentNodeId, upTo) {
  * marked, not just one) - subscribes if not already (see `Space.useNode()`).
  * @param {import('@qu/space-core').Space} space
  * @param {Uint8Array|string} pub
- * @returns {Promise<{marks: Record<string, {upTo: *, at: number}>, release: () => void}>}
+ * @returns {Promise<{marks: Record<string, {upTo: *, at: number, deliveredUpTo: *, deliveredAt: number}>, release: () => void}>}
  */
 export async function watchReadReceipts(space, pub) {
   const pubBytes = typeof pub === 'string' ? QuCrypto.fromBase64(pub) : pub;
@@ -84,20 +120,23 @@ export async function watchReadReceipts(space, pub) {
 }
 
 /**
- * File-scoped aliases of `markRead()`/`watchReadReceipts()` - see this
+ * File-scoped aliases of `markDelivered()`/`watchReadReceipts()` - see this
  * file's own doc comment: `contentNodeId` is caller-defined, so an
  * `UploadOutbox` file id works exactly the same way a chat message id
  * does. No new Kind/state - `@qu/space-plugins`'s `upload-outbox.js` uses
  * these for "received, confirmed by the recipient peer" rather than
  * re-implementing the same durable-per-reader-receipt shape a second time.
+ * A file landing in the outbox is a DELIVERY, not a read, so this goes
+ * through `markDelivered()` (sets `deliveredUpTo`/`deliveredAt`), not
+ * `markRead()`.
  */
 
 /** @param {import('@qu/space-core').Space} space @param {string} fileId - an `UploadOutbox` file id. @returns {Promise<import('@qu/space-core').SpaceNode>} */
 export function markFileReceived(space, fileId) {
-  return markRead(space, fileId, { at: Date.now() });
+  return markDelivered(space, fileId, true);
 }
 
-/** @param {import('@qu/space-core').Space} space @param {Uint8Array|string} pub - the RECIPIENT's pubkey. @returns {Promise<{marks: Record<string, {upTo: *, at: number}>, release: () => void}>} */
+/** @param {import('@qu/space-core').Space} space @param {Uint8Array|string} pub - the RECIPIENT's pubkey. @returns {Promise<{marks: Record<string, {upTo: *, at: number, deliveredUpTo: *, deliveredAt: number}>, release: () => void}>} */
 export function watchFileReceipts(space, pub) {
   return watchReadReceipts(space, pub);
 }
@@ -109,7 +148,7 @@ export class ReadReceiptWatcher {
     this._space = space;
     /** @type {Map<string, string>} read-receipt nodeId -> the reader's pubB64 - see presence.js's identical reasoning (deriveOwnerNodeId is one-way). */
     this._pubByNodeId = new Map();
-    /** @type {Map<string, Record<string, {upTo: *, at: number}>>} pubB64 -> their full marks map. */
+    /** @type {Map<string, Record<string, {upTo: *, at: number, deliveredUpTo: *, deliveredAt: number}>>} pubB64 -> their full marks map. */
     this._map = new Map();
     bus.on('space.node.*.changed', (payload) => {
       if (payload.kind === readReceiptKind.kind && this._pubByNodeId.has(payload.nodeId)) this._absorb(payload.nodeId);
@@ -136,5 +175,10 @@ export class ReadReceiptWatcher {
   /** @param {string} readerPubB64 @param {string} contentNodeId @returns {*|undefined} the last `upTo` this reader marked for `contentNodeId`. */
   upToFor(readerPubB64, contentNodeId) {
     return this._map.get(readerPubB64)?.[contentNodeId]?.upTo;
+  }
+
+  /** @param {string} readerPubB64 @param {string} contentNodeId @returns {*|undefined} the last `deliveredUpTo` this reader marked for `contentNodeId`. */
+  deliveredUpToFor(readerPubB64, contentNodeId) {
+    return this._map.get(readerPubB64)?.[contentNodeId]?.deliveredUpTo;
   }
 }

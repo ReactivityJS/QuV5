@@ -18,20 +18,36 @@
  * (this Task) extends it to exactly this case for free, without growing
  * the relay's wire vocabulary at all.
  *
- * ONLINE/OFFLINE LIVENESS is deliberately NOT part of this file - that
- * stays the pre-existing `hello`/`PresenceTracker` mechanism
- * (`@qu/space-transport`'s relay.js, push-routing only, unchanged by this
- * Task), because it is genuinely connection-lifecycle, not data: nothing
- * can SIGN a "went offline" fact after its own connection already dropped.
- * `presenceKind`'s own `online` field is a best-effort, SELF-REPORTED
- * signal instead (set `true` on publish, `false` only via an explicit
- * graceful `publishPresence(space, {online: false})` before disconnecting)
- * - a crash/lost-network never sends that, so a reader wanting to treat a
- * long-silent `online: true` as effectively offline should compare
- * `updatedAt` against its own staleness threshold (how stale is "too
- * stale" is an app/UI policy, not something this framework hardcodes) -
- * the same honest tradeoff any purely peer-signed liveness scheme has
- * without a trusted server participating.
+ * ONLINE/OFFLINE LIVENESS is deliberately NOT part of the `presenceKind`
+ * Node above - that stays the pre-existing `hello`/`PresenceTracker`
+ * mechanism (`@qu/space-transport`'s relay.js), because it is genuinely
+ * connection-lifecycle, not data: nothing can SIGN a "went offline" fact
+ * after its own connection already dropped. `presenceKind`'s own `online`
+ * field is a best-effort, SELF-REPORTED signal instead (set `true` on
+ * publish, `false` only via an explicit graceful `publishPresence(space,
+ * {online: false})` before disconnecting) - a crash/lost-network never
+ * sends that, so a reader wanting to treat a long-silent `online: true` as
+ * effectively offline should compare `updatedAt` against its own staleness
+ * threshold (how stale is "too stale" is an app/UI policy, not something
+ * this framework hardcodes) - the same honest tradeoff any purely
+ * peer-signed liveness scheme has without a trusted server participating.
+ *
+ * UPDATE - `onlineVisibility` + the RELAY's own live connection, made
+ * client-readable. `PresenceTracker` (the relay's REAL ground truth, not
+ * the self-reported field above) was previously push-routing-only - never
+ * told to any client. `onlineVisibility: 'public'|'private'` is a
+ * profile-wide setting (independent of how many Spaces/chats this identity
+ * shares with a viewer - deliberately no relay-computed `'contacts'` tier;
+ * see `presence-visibility.js`'s own doc comment on why) that controls
+ * whether the relay will ever disclose that ground truth to a subscriber at
+ * all. `declareOnlineVisibility()` below sets BOTH this field (so a fellow
+ * Space member can read the setting like any other presence data) AND
+ * signs+sends the separate relay declaration the ACTUAL enforcement runs
+ * on (`presence-visibility.js`) - the relay never decodes this field
+ * itself, same "signed declaration, not relay-side Yjs decoding" reasoning
+ * `group-membership.js` already established for `'group'`-ACL mode.
+ * `Space.watchLivePresence(pub)`/`LivePresenceWatcher` (below) are the
+ * READING half.
  */
 import { QuCrypto } from '@qu/core';
 import { defineKind, deriveOwnerNodeId } from './kind-schema.js';
@@ -41,10 +57,15 @@ import { defineKind, deriveOwnerNodeId } from './kind-schema.js';
  * comment), `status` (any app-defined string, `null` = none), `updatedAt`
  * (ms epoch, refreshed on every publish), `typingIn` (a Node id this member
  * is currently typing into, or `null`), `typingAt` (ms epoch of the last
- * typing-state change). All `'atomic'`+`'public'` - an `'owner'`-ACL Kind's
- * meta is already public (see kind-schema.js), so keeping the fields
- * public too avoids needing every watcher to also be a Space member; this
- * is low-sensitivity, inherently short-lived data by design.
+ * typing-state change), `onlineVisibility` (`'public'|'private'`, unset =
+ * `'private'` - privacy-first default, same posture `user.js`'s own
+ * `listed` field takes; see this file's own "UPDATE" doc comment - this
+ * field is the APP-READABLE mirror of a setting the RELAY separately
+ * enforces via a signed declaration, never derived FROM this field by the
+ * relay itself). All `'atomic'`+`'public'` - an `'owner'`-ACL Kind's meta
+ * is already public (see kind-schema.js), so keeping the fields public too
+ * avoids needing every watcher to also be a Space member; this is
+ * low-sensitivity, inherently short-lived data by design.
  */
 export const presenceKind = defineKind('qu-presence', {
   fields: {
@@ -53,6 +74,7 @@ export const presenceKind = defineKind('qu-presence', {
     updatedAt: { shape: 'atomic', visibility: 'public' },
     typingIn: { shape: 'atomic', visibility: 'public' },
     typingAt: { shape: 'atomic', visibility: 'public' },
+    onlineVisibility: { shape: 'atomic', visibility: 'public' },
   },
   acl: { write: 'owner' },
   persistence: 'volatile',
@@ -104,6 +126,22 @@ export const setStatus = (space, status) => publishPresence(space, { status });
 
 /** Convenience: marks this Space's identity as (not) typing into `nodeId` - see this file's own doc comment; NOT a `Field`/CRDT concept from the caller's perspective, just a presence field like any other. @param {import('./space.js').Space} space @param {string} nodeId @param {boolean} typing */
 export const setTyping = (space, nodeId, typing) => publishPresence(space, { typingIn: typing ? nodeId : null });
+
+/**
+ * Sets THIS Space's identity's profile-wide `onlineVisibility` - see this file's own "UPDATE" doc
+ * comment on the split this covers: publishes the app-readable `presenceKind.onlineVisibility`
+ * field (`publishPresence()`, ordinary CRDT write) AND, in the SAME call, signs+sends the separate
+ * relay declaration (`Space.declareOnlineVisibility()`) the relay's own enforcement actually runs
+ * on - the two are kept in sync by construction rather than left for the caller to remember both.
+ * @param {import('./space.js').Space} space
+ * @param {'public'|'private'} onlineVisibility
+ * @returns {Promise<import('./node.js').SpaceNode>}
+ */
+export async function declareOnlineVisibility(space, onlineVisibility) {
+  const node = await publishPresence(space, { onlineVisibility });
+  await space.declareOnlineVisibility(onlineVisibility);
+  return node;
+}
 
 /**
  * Starts (or continues) locally tracking one Node id's `useNode()`
@@ -177,6 +215,45 @@ export class PresenceWatcher {
 
   /** @param {string} pubB64 @returns {{online, status, updatedAt, typingIn, typingAt}|undefined} `undefined` until `watch()` has resolved at least once for this pubkey. */
   of(pubB64) {
+    return this._map.get(pubB64);
+  }
+}
+
+/**
+ * A live, multi-identity cache for the RELAY's own real connection state -
+ * see this file's own "UPDATE" doc comment for how this differs from
+ * `PresenceWatcher` above (that one reads the self-reported `online` field
+ * off an ordinary Node; this one reads `Space.watchLivePresence()`'s
+ * relay-pushed ground truth off the bus). Same "opt-in watcher, Space stays
+ * unaware" shape as `PresenceWatcher`/`alias.js`'s `AliasRegistry`.
+ */
+export class LivePresenceWatcher {
+  /** @param {import('./space.js').Space} space @param {import('@qu/events').EventBus} bus - the SAME bus given to `space`'s own constructor. */
+  constructor(space, bus) {
+    this._space = space;
+    /** @type {Map<string, boolean|undefined>} pubB64 -> last known live online state - `undefined` until the relay's first reply arrives (current state, or a later push), present at all only once `watch()` has been called for it. */
+    this._map = new Map();
+    bus.on('space.presence.live.changed', ({ pub, online }) => {
+      if (this._map.has(pub)) this._map.set(pub, online);
+    });
+  }
+
+  /** Starts watching `pub`'s REAL live connection state - see `Space.watchLivePresence()`'s own doc comment on what gates whether anything is ever actually reported back. @param {Uint8Array|string} pub */
+  async watch(pub) {
+    const pubBytes = typeof pub === 'string' ? QuCrypto.fromBase64(pub) : pub;
+    const pubB64 = QuCrypto.toBase64(pubBytes);
+    if (!this._map.has(pubB64)) this._map.set(pubB64, this._space.isLiveOnline(pubB64));
+    await this._space.watchLivePresence(pubBytes);
+  }
+
+  /** Stops watching `pub` - does not clear the last-known value from `isOnline()`. @param {Uint8Array|string} pub */
+  async unwatch(pub) {
+    const pubBytes = typeof pub === 'string' ? QuCrypto.fromBase64(pub) : pub;
+    await this._space.unwatchLivePresence(pubBytes);
+  }
+
+  /** @param {string} pubB64 @returns {boolean|undefined} the last known live online state, `undefined` until the relay has replied at least once (or `watch()` was never called for this pubkey). */
+  isOnline(pubB64) {
     return this._map.get(pubB64);
   }
 }

@@ -104,6 +104,15 @@
  * chat client `demo/relay.mjs` serves - bundled at DOCKER BUILD TIME (see
  * the Dockerfile) so the runtime image needs no bundler.
  *
+ * SERVES A BLOB MIRROR on this SAME HTTP server/port too - `PUT`/`GET
+ * /blob/<blobId>` (see `relay-blob-server.js`'s own doc comment for the
+ * full "why"/authorization mechanics). A DURABLE mirror of raw file bytes
+ * (`@qu/space-plugins`'s `UploadOutbox` upload results), the same reason
+ * structured CRDT data gets mirrored at all: so a fellow Space member can
+ * download a file even if the original uploader is offline by then.
+ * Reuses `QU_RELAY_DATA_DIR/blobs` - no second volume to mount, disabled
+ * together with the envelope mirror whenever `QU_RELAY_DATA_DIR` is empty.
+ *
  * This file stays exactly that: a relay for the chat demo. The generic,
  * "loads whatever app a Qu Space defines" successor
  * (docs/app-shell-arbeitsauftrag.md, architecture.md §7) is `@qu/app-shell`
@@ -132,19 +141,24 @@ import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { QuCrypto } from '@qu/core';
 import { EventBus } from '@qu/events';
-import { createFileStore } from '@qu/space-storage';
+import { createFileStore, createBlobFileStore } from '@qu/space-storage';
 import { createWsServerHub } from './ws-server-hub.js';
 import { WsClientTransport } from './ws-client-transport.js';
 import { createRelayForwarder } from './relay.js';
 import { federateRelay } from './federation.js';
 import { loadOrCreateIdentity, describeIdentity } from './relay-identity.js';
 import { createAppRequestHandler } from './relay-app-server.js';
+import { createBlobRequestHandler } from './relay-blob-server.js';
 
 const PORT = Number(process.env.QU_RELAY_PORT || 8081);
 const DATA_DIR = process.env.QU_RELAY_DATA_DIR ?? '/data';
 const IDENTITY_FILE = process.env.QU_RELAY_IDENTITY_FILE || (DATA_DIR ? `${DATA_DIR}/relay-identity.json` : null);
 const FEDERATE_UPSTREAM_URL = process.env.QU_FEDERATE_UPSTREAM_URL || null;
 const ALLOW_JOIN = process.env.QU_ALLOW_JOIN !== 'false';
+// See "SERVES A BLOB MIRROR" below. Reuses QU_RELAY_DATA_DIR's own volume (a "<dir>/blobs"
+// subdirectory) - no second volume to remember to mount, same posture app-shell's relay-server.js
+// already takes for ITS OWN bootstrap-admin identity file. Empty QU_RELAY_DATA_DIR disables both.
+const BLOB_DIR = DATA_DIR ? join(DATA_DIR, 'blobs') : null;
 // packages/space-transport/src/relay-server.js -> up 3 -> repo root -> demo/web. See this file's
 // own "SERVES AN APP" doc comment on why THIS specific app for now.
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'demo', 'web');
@@ -217,6 +231,9 @@ async function main() {
   // createRelayForwarder() above, so a successful /join updates both this relay's own ACL/
   // encryption-recipient list AND what /members.json reports, not just one of them.
   const handleAppRequest = createAppRequestHandler({ webDir: WEB_DIR, members, relay, allowJoin: ALLOW_JOIN, log: console.log });
+  // See this file's own "SERVES A BLOB MIRROR" doc comment - `blobStore: null` (BLOB_DIR empty)
+  // makes every /blob/* request answer 503 rather than this route not existing at all.
+  const handleBlobRequest = createBlobRequestHandler({ blobStore: BLOB_DIR ? createBlobFileStore(BLOB_DIR) : null, log: console.log });
 
   function handleRequest(req, res) {
     if (req.url === '/healthz') {
@@ -224,6 +241,7 @@ async function main() {
       res.end('ok');
       return;
     }
+    if (handleBlobRequest(req, res)) return;
     if (handleAppRequest(req, res)) return;
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
@@ -243,7 +261,8 @@ async function main() {
       members.length > 0
         ? `${members.length} authorized 'members'-mode member(s)`
         : `no 'members'-mode members configured (owner/named-ACL Kinds work regardless - see this file's own doc comment)`;
-    console.log(`[qu-relay] listening on :${PORT} - ${membersNote}, blind relay (no plaintext ever decrypted), ${mirrorNote}`);
+    const blobNote = BLOB_DIR ? `blob mirror at ${BLOB_DIR}` : 'NO blob mirror (QU_RELAY_DATA_DIR is empty)';
+    console.log(`[qu-relay] listening on :${PORT} - ${membersNote}, blind relay (no plaintext ever decrypted), ${mirrorNote}, ${blobNote}`);
     console.log(`[qu-relay] app: open http://localhost:${PORT}/ in a browser - join is ${ALLOW_JOIN ? 'OPEN to anyone (QU_ALLOW_JOIN=false to lock it down)' : 'DISABLED (QU_ALLOW_JOIN=false)'}`);
   });
 }

@@ -21,8 +21,9 @@ export default {
   version: 1,            // optional - bumped when install/update's own content changes
   sharedLists: (prefix) => [...],   // optional - shared-list names this app's Kinds use (dev.js's registerApp() own doc comment on why the relay needs to know these upfront)
   viewNames: (prefix) => [...],     // optional - adminViewKind names this app's global content uses
+  templateNames: (prefix) => [...], // optional - adminTemplateKind names this app's own global root Template(s) use - only needed if the app calls createGlobalApp()/createGlobalTemplate() itself (most don't: a bare createGlobalPage() alone works fine via @qu/app-renderer's own framework-default wrapper template). A code-driven app whose chrome must survive EVERY one of its own subPath routes - including ones with no matching CMS Page at all (apps/chat/'s own sidebar+room shell is the reference consumer) - needs one.
   personalBundle: undefined,        // optional - see guestbook-bundle.js's own doc comment; only for apps with a personal-instance story
-  wire,                  // optional - ({mountEl, doc, space}) => Promise<void> - the app's own framework-provided interactivity (installed-apps-actions.js's own "content stays inert markup" posture), called after every render regardless of which page is showing (a correct no-op on any page that isn't its own)
+  wire,                  // optional - ({mountEl, doc, space, subPath}) => Promise<void> - the app's own framework-provided interactivity (installed-apps-actions.js's own "content stays inert markup" posture), called after every render regardless of which page is showing (a correct no-op on any page that isn't its own). `subPath` is the current route's own portion past this app's mount point (e.g. `/room/<id>` for a `/chat/room/<id>` route) - for a code-driven, dynamically-addressed UI (apps/chat/'s own actions.js is the reference consumer); a purely static single-route app can ignore it.
 };
 ```
 

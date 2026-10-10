@@ -5,7 +5,7 @@
  * elsewhere needed - the admin console lists/installs it exactly like
  * Gästebuch/Blog/Forum the moment this file exists.
  */
-import { installChat, updateChat, CHAT_VERSION } from './bundle.js';
+import { installChat, updateChat, CHAT_VERSION, CHAT_TEMPLATE_NAME } from './bundle.js';
 import { wireChat } from './actions.js';
 
 export default {
@@ -14,7 +14,6 @@ export default {
   install: installChat,
   update: updateChat,
   version: CHAT_VERSION,
-  sharedLists: (prefix) => [prefix],
-  viewNames: (prefix) => [`${prefix}-feed`],
+  templateNames: () => [CHAT_TEMPLATE_NAME],
   wire: wireChat,
 };

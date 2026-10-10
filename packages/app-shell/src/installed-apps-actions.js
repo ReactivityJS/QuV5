@@ -41,14 +41,23 @@ import { REFERENCE_APP_BUNDLES_BY_KEY } from '../reference-apps.js';
 import { ContentResolver } from '@qu/app-core';
 import { discoveredApps } from '../apps-registry.generated.js';
 
-/** @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space}} params */
-export async function wireInstalledApps({ mountEl, doc, space }) {
+/**
+ * @param {{mountEl: Element, doc: Document, space: import('@qu/space-core').Space, subPath?: string}} params
+ *   `subPath` (optional, omitted/`undefined` unless a caller has one) - the CURRENT route's own
+ *   portion past this app's own mount point (e.g. `/room/<chatId>` for a `/chat/room/<chatId>` route),
+ *   passed straight through to every discovered `/apps/*` app's own `wire()` - `apps/README.md`'s own
+ *   descriptor shape already documents this, `boot.js` just didn't thread it through yet. The three
+ *   hardcoded reference apps (`wireGuestbook`/`wireBlog`/`wireForum`) have no use for it - none of them
+ *   are addressed by a dynamic sub-route the way a code-driven `/apps/*` app can be - so it is NOT
+ *   passed to them, only to `app.wire()` below.
+ */
+export async function wireInstalledApps({ mountEl, doc, space, subPath }) {
   wireGenericWrite({ mountEl, doc, space });
   await Promise.all([
     wireGuestbook({ mountEl, doc, space }),
     wireBlog({ mountEl, doc, space }),
     wireForum({ mountEl, doc, space }),
-    ...discoveredApps.filter((app) => app.wire).map((app) => app.wire({ mountEl, doc, space })),
+    ...discoveredApps.filter((app) => app.wire).map((app) => app.wire({ mountEl, doc, space, subPath })),
   ]);
 }
 

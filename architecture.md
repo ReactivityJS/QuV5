@@ -56,7 +56,7 @@ QuV5/
 │   ├── space-core/      @qu/space-core      - Space/Node/Field, envelopes, Kind-Schema, ACL, alias identities
 │   ├── space-storage/   @qu/space-storage   - storage adapters (memory/durable/file) a Space or relay mounts
 │   ├── space-transport/ @qu/space-transport - Transports (in-process/WebSocket), the Relay, federation, optional WebRTC (relay-piggybacked signaling + createWebRTCPeer())
-│   ├── space-plugins/   @qu/space-plugins   - OPTIONAL app helpers: delivery-status (write-ack + read receipts), upload outbox, auto-compact-on-join
+│   ├── space-plugins/   @qu/space-plugins   - OPTIONAL app helpers: delivery-status (write-ack + read/delivered receipts), upload outbox, sync-guard (wake lock), auto-compact-on-join
 │   ├── space-ui/        @qu/space-ui        - OPTIONAL vanilla-JS/DOM bindings: field bind, inline-edit, list-bind, upload-status
 │   ├── space-components/@qu/space-components- OPTIONAL declarative Custom Elements over @qu/space-ui: <qu-view>/<qu-bind>/<qu-list> - a CMS-authored template writes these as plain markup, no JS glue
 │   ├── app-core/        @qu/app-core        - App Runtime: Kind-Schemas for app content, content-addressed Node ids, ContentResolver, HashRouter, AppRuntime, Dev API
@@ -110,7 +110,7 @@ private key to attempt decryption with (`verifyEnvelope()` needs only a
 public key; `openUpdate()` needs the private key and the relay never gets
 one).
 
-### 3.2 Kind-Schema: shape × visibility, and FIVE ACL modes
+### 3.2 Kind-Schema: shape × visibility, and SIX ACL modes
 
 A field declares two INDEPENDENT properties (`kind-schema.js`):
 
@@ -151,6 +151,87 @@ A field declares two INDEPENDENT properties (`kind-schema.js`):
   `removeRelayAdmin()` for how that list is grown/shrunk without a relay
   restart, the same reactive shape `addMember()`/`removeMember()` already
   give `'members'`).
+- **`'group'`** — `'content'`'s REVOCABLE counterpart: write access tracks
+  a referenced Group's CURRENT membership live, instead of a permanent
+  per-Node grant (`grant.js`'s own doc comment: "revocation is deliberately
+  out of scope" for `'named'`/`'content'` grants) — the primitive
+  `docs/chat-app-concept.md`'s chat rooms are designed around (a room's own
+  message history stays `'group'`-ACL, referencing a `'content'`-ACL Group
+  for its member list), and any other Qu-level content that needs "remove
+  someone's write access starting now, without re-encrypting history."
+  `nodeId = deriveContentNodeId(groupOwnerPub, kind, groupName)` —
+  self-certifying against the REFERENCED GROUP's identity, not the writing
+  peer's own, so a verifier who only has `nodeId` can never recover
+  `(groupOwnerPub, groupName)` from it alone: every write for a `'group'`-
+  ACL Node carries an explicit `groupRef: {groupOwnerPub, groupName}`
+  alongside `{nodeId, envelope}` on the wire (never inside the envelope
+  itself, which stays byte-identical in shape to every other Kind's) — a
+  verifier recomputes `deriveContentNodeId()` from the CLAIMED `groupRef`
+  and compares it to `nodeId`; a mismatched claim is rejected outright,
+  regardless of what it claims. No separate grant/scope-declaration message
+  is needed for THIS check — the self-certifying recompute-and-compare on
+  every single write already proves the claimed scope is genuine.
+
+  CLIENT-side, `Space._currentGroupMembers()` answers "who belongs to this
+  Group right now" the same way any other read does — by decoding the
+  Group's own `members` field directly (trivial for a client, which already
+  decrypts/decodes everything it subscribes to) — live-cached per Group,
+  invalidated by the ordinary `space.node.<groupId>.changed` event a later
+  membership edit already fires, never a separate polling mechanism. That
+  method is written to NEVER block/wait for network I/O, on purpose: it is
+  called from inside `_isAuthorizedWriter()`, itself called while VERIFYING
+  an incoming write — i.e. from inside `Space`'s own single, fully
+  serialized incoming-message queue (§3.2's own closing paragraph on why
+  that queue is serial at all). A Group's own catch-up data arrives over
+  that SAME queue as an ordinary later message, so a version of this check
+  that awaited "until the Group is confirmed synced" would deadlock the
+  queue outright — confirmed by hand while building this: a `'group'`-ACL
+  write to a not-yet-locally-known Group timed out every single time, even
+  when the Group's own data demonstrably arrived moments later on the wire.
+  Instead it reads whatever this Space already has locally RIGHT NOW —
+  fail-closed (nobody authorized yet) if genuinely nothing has arrived —
+  and the `changed` subscription catches it up the moment real data lands,
+  whether that is before or after the write it's gating. One real
+  consequence worth being explicit about: a `'group'`-ACL write reaching a
+  peer who has never independently seen that Group before can be dropped
+  even from a genuine member, since Yjs never retroactively replays a
+  discarded update once a later one from the same author has been accepted
+  — in practice unreachable for a real reader, who resolves a room's own
+  membership (`ContentResolver.resolveGroup()`) before ever caring about
+  its messages, warming this exact cache first. A Group Node, once ANY code
+  path has ever attached one, is never torn down by `Space._releaseNode()`
+  for that Space's own remaining lifetime (regardless of ordinary
+  reference-counting/Warm-Release-Cache rules — this file's own "WARM-
+  RELEASE CACHE" update, further down) — a real bug this otherwise hits: an
+  unrelated, perfectly ordinary read (`ContentResolver.resolveGroup()`'s
+  own `useNode()`+`release()`) can release a Group's refcount to zero
+  before `_currentGroupMembers()` ever gets a chance to run, and tearing it
+  down at that moment would silently and permanently strand every future
+  write from whichever author's verification happened to race that exact
+  moment (same Yjs "no retroactive integration" property as the paragraph
+  above).
+
+  RELAY-side, the relay never decodes ANY Yjs content — not even a
+  `visibility: 'public'` field, which the relay could technically read
+  losslessly since it isn't encrypted, but never bothers to Yjs-decode
+  either — so it has no way to learn a Group's current membership from the
+  Group's own writes the way a client does. `Space.declareGroupMembership()`
+  closes this with a SEPARATE, explicitly signed control message (self-
+  certifying like `grant`, verified by `@qu/space-core`'s
+  `group-membership.js`) that a Group owner sends ALONGSIDE their ordinary
+  field write — `@qu/app-core`'s `createGroup()`/`editGroup()` do this
+  automatically now. A `ts` field guards a reordered delivery from
+  regressing the relay's own view of current membership. `relay.js`'s
+  `buildWriteAcl()` mirrors the client-side check exactly (self-certifying
+  recompute, then a live lookup into its own `groupMemberships` map) — a
+  Group with no declaration at all is fail-closed, rejecting even its own
+  owner's writes, same as kind-schema.js's own posture everywhere else. A
+  separate `nodeGroupRefs` map closes one more gap: mirrored storage holds
+  only the bare envelope (same shape every other mode's mirror already
+  uses), never the outer wire message's own `groupRef` — without
+  remembering it (fixed per Node, so the first write is enough), a peer
+  catching up via subscribe-replay would receive every past `'group'`-ACL
+  write with no `groupRef` at all and reject every one of them.
 
 See `docs/v5-space-core-guide.md` §3 for the full behavioral contract, and
 `packages/space-core/src/grant.js`'s doc comment for the real Yjs property
@@ -270,16 +351,14 @@ wants "the most recent N pushes" directly.
 
 ### 3.5 Presence, typing, and delivery status — ordinary data, not protocol
 
-Online/offline liveness stays exactly the pre-existing `hello`/
-`PresenceTracker` mechanism (relay-internal, push-routing only — see
-§3.6's event list). Everything else that might look like a "presence
-feature" is deliberately just Node writes:
+Self-reported presence/typing is deliberately just Node writes, never a
+bespoke protocol:
 
 - `@qu/space-core`'s `presence.js` — `presenceKind` (self-certifying
   `acl.write: 'owner'`, `persistence: 'volatile'`) holds `online`/`status`/
-  `updatedAt`/`typingIn`/`typingAt`. `publishPresence()`/`setStatus()`/
-  `setTyping()` write it; `watchPresence()`/`PresenceWatcher` read it
-  (one-shot snapshot vs. a reactive multi-member cache, same split
+  `updatedAt`/`typingIn`/`typingAt`/`onlineVisibility`. `publishPresence()`/
+  `setStatus()`/`setTyping()` write it; `watchPresence()`/`PresenceWatcher`
+  read it (one-shot snapshot vs. a reactive multi-member cache, same split
   `alias.js`'s functions vs. `AliasRegistry` already established).
   `online` is a best-effort, SELF-REPORTED flag (nothing can sign "went
   offline" after its own connection already dropped) — a reader wanting to
@@ -289,7 +368,54 @@ feature" is deliberately just Node writes:
 - `@qu/space-plugins`'s `delivery-status.js` — `awaitRelayAck(bus, nodeId)`
   correlates the relay's write-ack (below) to one write by ordering;
   `readReceiptKind` (durable, unlike `presenceKind`) is the same self-
-  certifying-per-reader shape for a "read up to here" marker.
+  certifying-per-reader shape for a "read up to here"/"received up to
+  here" marker (`upTo`/`at` and `deliveredUpTo`/`deliveredAt`, set
+  independently — see that file's own doc comment).
+
+**UPDATE — LIVE presence (the relay's own `PresenceTracker` ground truth,
+not the self-reported field above) made client-readable, gated by a
+profile-wide `onlineVisibility` setting.** Previously relay-internal,
+push-routing only (§3.6's event list still describes the underlying
+`hello`/`PresenceTracker` mechanism itself, unchanged). `onlineVisibility`
+is deliberately only `'public'`/`'private'` — no relay-computed
+`'contacts'` tier: that would require the relay to know which OTHER
+identities share a Space with a given viewer, a cross-Space membership
+index several of this framework's own ACL modes exist specifically to
+keep the relay from ever needing (private-group membership is meant to
+stay relay-opaque). Same "signed declaration, not relay-side Yjs
+decoding" shape `group-membership.js` established for `'group'`-ACL mode
+— the relay never decodes ANY Node's content, not even a `'public'`
+field, so `presenceKind.onlineVisibility` alone is invisible to it:
+
+- `@qu/space-core`'s `presence-visibility.js` — `signPresenceVisibility()`/
+  `verifyPresenceVisibility()`, a self-certifying `{type:
+  'presence-visibility', pub, onlineVisibility, ts, sig}` control message,
+  `ts`-monotonic same as `group-membership.js`'s own declarations.
+  `presence.js`'s `declareOnlineVisibility(space, onlineVisibility)` sets
+  BOTH the app-readable `presenceKind.onlineVisibility` field AND signs
+  +sends this separate relay declaration in one call, so the two never
+  drift apart.
+- `Space.watchLivePresence(pub)`/`unwatchLivePresence(pub)`/
+  `isLiveOnline(pubB64)` — no new global/space-independent channel; a
+  watcher sends `{type: 'watch-presence', pub}` over whatever Space
+  connection it already has open. Deliberately UNAUTHENTICATED (no
+  signature required) and NOT gated by Space membership at all — a
+  `'public'` setting means exactly that: anyone who knows the pubkey, not
+  just a fellow Space member (`relay.js`'s `handleWatchPresence()` — see
+  that function's own doc comment). The relay replies with the CURRENT
+  state immediately (if visible) and pushes every future
+  `presence-online`/`presence-offline` transition from then on;
+  `presence.js`'s `LivePresenceWatcher` is the reactive multi-identity
+  cache, same shape as `PresenceWatcher` above but backed by this bus
+  topic (`space.presence.live.changed`) instead of `useNode()`.
+- `relay.js`'s `presenceVisibility` (pubB64 → current declared
+  `{onlineVisibility, ts}`) and `presenceWatchers` (pubB64 → Set of
+  watching peerIds) maps — same non-durability scope as `groupMemberships`/
+  `grants` (in-memory, lost on relay restart). An UNDECLARED pubkey is
+  fail-closed (`'private'`) — a watch-presence request for it gets NO
+  reply at all, indistinguishable from "currently offline," so a
+  `'private'` setting never leaks even the fact that it is specifically
+  private via a differently-shaped response.
 
 WRITE-ACK: once a relay mirrors a LOCALLY-originated write, it sends
 `{type: 'write-ack', nodeId, seq}` back to that write's own author — `seq`
@@ -577,6 +703,53 @@ it. Three pieces:
     per-call opt-in, never a silent default (`docs/webrtc.md`'s own
     Datenschutz-Hinweis).
 
+### 3.12 The relay as a blob-storage mirror
+
+`docs/chat-app-concept.md`'s own Phase 2 item 3: `UploadOutbox`
+(`@qu/space-plugins`) already handles the LOCAL save-then-sync state
+machine, but a relay's ordinary envelope-mirroring path (§3.1) is a poor
+fit for large binary data — a Yjs update history has no notion of
+"replace/discard the old bytes" (`upload-outbox.js`'s own top doc
+comment). This gives the relay a SEPARATE, purpose-built mirror path for
+the actual bytes, so any Space member can download a file even once the
+original uploader is offline — the same reason mirroring structured CRDT
+data exists at all.
+
+- `@qu/space-core`'s `blob-auth.js` — `deriveBlobId(ownerPub, localId)` is
+  a pure, self-certifying function (same `deriveXNodeId()`-then-verify
+  shape `grant.js`'s own `verifyGrant()` already uses) — no relay-side
+  ownership registry needed. `signBlobUpload()`/`verifyBlobUpload()` is
+  the upload proof: a relay recomputes the expected `blobId` from the
+  claimed `(pub, localId)` and rejects if it doesn't match the URL path,
+  THEN checks the signature.
+- `@qu/space-transport`'s `relay-blob-server.js` — `createBlobRequestHandler()`,
+  the same shared-HTTP-layer factoring `relay-app-server.js` already uses
+  (`(req, res) => boolean`). `PUT /blob/<blobId>?pub=&localId=&sig=`
+  (ACL-checked via `verifyBlobUpload()`, size-limited via `maxBlobSize`,
+  default 25 MiB) / `GET /blob/<blobId>` (deliberately UNAUTHENTICATED —
+  `blobId` is an opaque SHA-256 digest, unguessable in practice, so
+  "whoever holds the id/url" is itself the access control, the same
+  capability-URL posture `handleWatchPresence()`'s `'public'`
+  `onlineVisibility` already takes — §3.5 UPDATE). `blobStore: null`
+  degrades every `/blob/*` request to 503 rather than removing the route.
+  Wired into `relay-server.js` (the generic `@qu/space-transport`
+  reference relay) under `QU_RELAY_DATA_DIR/blobs` — NOT yet wired into
+  `@qu/app-shell`'s own relay entrypoint (app-specific integration,
+  outside this Phase 2 item's scope).
+- `@qu/space-storage`'s `createBlobFileStore()`/`createMemoryBlobStore()`
+  — the same swappable-adapter convention `createFileStore()`/
+  `createMemoryStore()` already establish, just for raw bytes
+  (`{save(blobId, bytes), load(blobId), remove(blobId)}`) instead of
+  envelopes.
+- `@qu/space-plugins`'s `blob-upload.js` — `uploadToRelayBlob(space,
+  relayHttpUrl, localId, blob)`, designed to be passed DIRECTLY as
+  `UploadOutbox`'s own `upload(record, blob)` callback: it signs the
+  proof, `PUT`s the bytes, and resolves `{url, blobId}` — which
+  `UploadOutbox._attempt()` already merges into the record on `'done'`
+  (task/item 2's own "UPDATE — UPLOAD RESULT" mechanism), so
+  `outbox.statusOf(id)` sees the relay-hosted download URL like any other
+  field, no separate lookup.
+
 ## 4. File-by-file map
 
 ### `packages/core/` — `@qu/core`
@@ -623,7 +796,9 @@ existed.
 | `src/field.js` | `AtomicField`/`TextField`/`ListField` (now also `ListField.slice()` — windowed reads, §3.4 UPDATE), `createField()`, `withWriteContext()` (the shared transact-with-origin wrapper every field mutation goes through), `setFieldValue()` (shape-agnostic "replace the whole value" helper — see `@qu/space-ui` note below). |
 | `src/space.js` | `Space` — the main class, now also reconnect/resync (`onStatusChange` wiring, §3.4) and per-Kind storage routing (`_storageFor()`). See §5 below for its full method surface. |
 | `src/alias.js` | `deriveAliasIdentity()`, `aliasRegistryKind`/`aliasRegistryNodeId()`, `publishAlias()`, `AliasRegistry` — per-space pseudonymity. |
-| `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes (§3.5). |
+| `src/presence.js` | `presenceKind`, `publishPresence()`/`setStatus()`/`setTyping()`, `watchPresence()`/`PresenceWatcher` — presence/typing as ordinary volatile-persistence Node writes; `declareOnlineVisibility()`/`LivePresenceWatcher` — the app-facing half of LIVE presence, §3.5 UPDATE. |
+| `src/presence-visibility.js` | `signPresenceVisibility()`/`verifyPresenceVisibility()` — the `'group'`-membership-declaration-shaped signed control message `onlineVisibility` enforcement runs on (§3.5 UPDATE). |
+| `src/blob-auth.js` | `deriveBlobId(ownerPub, localId)`/`signBlobUpload()`/`verifyBlobUpload()` — the self-certifying proof a relay's blob-storage mirror authorizes an upload with, no relay-side registry needed (§3.12). |
 | `src/user.js` | `userKind` (`qu-user`: `alias`/`epub`/`listed`, all public), `userNodeId()`, `resolveAlias()`, `ensureUserProfile()`, `filterListedUsers()` — the GunDB-style User-Node, the Peer-User-Verwaltung base primitive (§3.8). |
 | `src/wire-codec.js` | `encodeForWire()`/`decodeFromWire()` — Uint8Array ↔ base64 for any JSON serialization boundary (WebSocket, on-disk file). |
 | `src/compaction.js` | `compactIfNeeded(space, id, {threshold})` — opt-in compaction policy on top of `Space.compactNode()`/`envelopeCount()` (§3.4 UPDATE). |
@@ -637,11 +812,15 @@ existed.
 | `src/durable-store.js` | `createDurableStore()` — simulated persistence (in-memory backing object) for tests; same contract as real disk. |
 | `src/file-store.js` | `createFileStore(dataDir)` — real on-disk persistence, one newline-delimited JSON file per Node. Relay-only (`node:fs/promises`) — never import this into browser-bundled code. |
 | `src/indexeddb-store.js` | `createIndexedDbStore()`/`isIndexedDbAvailable()` — the browser CLIENT's own persistent tier (§3.4 UPDATE). Exposed via its own `@qu/space-storage/indexeddb-store` subpath export, not the barrel — see that UPDATE note for why. |
+| `src/blob-file-store.js` | `createBlobFileStore(dataDir)` — real on-disk persistence for raw BLOB bytes (§3.12), one `<blobId>.bin` file per blob. Relay-only. |
+| `src/blob-memory-store.js` | `createMemoryBlobStore()` — ephemeral in-process tier for raw blob bytes (§3.12), `blob-file-store.js`'s test-friendly counterpart. |
 
-All four implement the same contract: `append(nodeId, envelope)`,
-`load(nodeId)`, `replace(nodeId, envelopes)` (compaction — discards prior
-history in favor of the given envelopes, typically one `snapshot: true`
-envelope).
+All four Node-envelope stores implement the same contract:
+`append(nodeId, envelope)`, `load(nodeId)`, `replace(nodeId, envelopes)`
+(compaction — discards prior history in favor of the given envelopes,
+typically one `snapshot: true` envelope). The two blob stores implement a
+SEPARATE, simpler contract instead (§3.12): `save(blobId, bytes)`,
+`load(blobId)`, `remove(blobId)` — raw bytes, no CRDT/compaction concept.
 
 ### `packages/space-transport/` — `@qu/space-transport`
 
@@ -650,7 +829,7 @@ envelope).
 | `src/in-process-transport.js` | `createInProcessHub()`, `InProcessTransport` — same-process transport for tests, star-shaped through a relay. |
 | `src/ws-server-hub.js` | `createWsServerHub(wss)` — the server-side hub over a real `ws` `WebSocketServer`. |
 | `src/ws-client-transport.js` | `WsClientTransport` — real WebSocket client, browser-safe (separate `exports` subpath, no `node:crypto`); now also auto-reconnect + `onStatusChange()` (§3.4). |
-| `src/relay.js` | `createRelayForwarder()` — the Relay itself: signature verification, subscriber-tracking, per-Kind durable/volatile mirroring (§3.4), `'named'`-ACL grant handling, push-notify routing, write-ack (§3.5), federation's `ingestFederated()` integration point, ephemeral `rtc-signal` forwarding (§3.11 — never mirrored, `from` always presence-authenticated). |
+| `src/relay.js` | `createRelayForwarder()` — the Relay itself: signature verification, subscriber-tracking, per-Kind durable/volatile mirroring (§3.4), `'named'`-ACL grant handling, push-notify routing, write-ack (§3.5), federation's `ingestFederated()` integration point, ephemeral `rtc-signal` forwarding (§3.11 — never mirrored, `from` always presence-authenticated); `presenceVisibility`/`presenceWatchers` maps, `handlePresenceVisibility()`/`handleWatchPresence()`/`handleUnwatchPresence()`/`broadcastLivePresence()` — LIVE presence made client-readable (§3.5 UPDATE). |
 | `src/federation.js` | `federateRelay()` — a relay as a subscribing peer of another relay. |
 | `src/presence-tracker.js` | `PresenceTracker` — pubkey ↔ peerId online/offline state, built from signed `hello` messages; gained `peerIdFor(pubB64)` (§3.11 — the inverse of `pubFor()`, routes an `rtc-signal` to its live target connection). |
 | `src/webrtc-signaling.js` | `wrapWithSignaling(transport)` — piggybacks WebRTC SDP/ICE signaling on an existing Transport with zero `Space` changes (§3.11). Browser- AND node-safe. |
@@ -658,15 +837,18 @@ envelope).
 | `src/push-handler.js` | `registerPushHandler(bus, {sendPush})` — reference delivery-channel handler for `relay.notify.**`. |
 | `src/relay-identity.js` | `loadOrCreateIdentity(filePath)`/`describeIdentity()` — a relay's own keypair, auto-generated on first boot and persisted (only needed for federation). |
 | `src/relay-app-server.js` | `createAppRequestHandler()` — the shared HTTP layer (static browser app, `GET /members.json`, `POST /join`) both `relay-server.js` and `demo/relay.mjs` serve alongside their WebSocket endpoint. |
-| `src/relay-server.js` | Standalone, env-var-configured relay process (`QU_*`, see its own doc comment; `--print-identity` CLI flag) — what the Dockerfile runs. Also serves an app (today, `demo/web/`) via `relay-app-server.js` — see its own "SERVES AN APP" doc comment. |
+| `src/relay-blob-server.js` | `createBlobRequestHandler()` — `PUT`/`GET /blob/<blobId>`, the relay's blob-storage mirror (§3.12), same shared-HTTP-layer factoring as `relay-app-server.js`. |
+| `src/relay-server.js` | Standalone, env-var-configured relay process (`QU_*`, see its own doc comment; `--print-identity` CLI flag) — what the Dockerfile runs. Also serves an app (today, `demo/web/`) via `relay-app-server.js` — see its own "SERVES AN APP" doc comment — and a blob mirror via `relay-blob-server.js` under `QU_RELAY_DATA_DIR/blobs` (§3.12, "SERVES A BLOB MIRROR"). |
 | `src/index.js` | Package's public export surface (main entry — excludes `ws-client-transport.js`'s and `webrtc-peer.js`'s own browser-only subpaths, see each file's own doc comment on why; DOES include `webrtc-signaling.js`'s `wrapWithSignaling()`, which is browser- and node-safe). |
 
 ### `packages/space-plugins/` — `@qu/space-plugins` (OPTIONAL)
 
 | File | Purpose |
 |---|---|
-| `src/delivery-status.js` | `awaitRelayAck()`, `readReceiptKind`, `markRead()`/`watchReadReceipts()`/`ReadReceiptWatcher` — local/relay-synced/read lifecycle helpers (§3.5). |
-| `src/upload-outbox.js` | `uploadOutboxKind`, `UploadOutbox` — local-save-then-sync queue for (multiple) file uploads: caller supplies a local blob store + an `upload()` function; this class owns the pending→uploading→done/failed state machine, retry, and a reactive `watch()`. |
+| `src/delivery-status.js` | `awaitRelayAck()`, `readReceiptKind`, `markRead()`/`markDelivered()`/`watchReadReceipts()`/`ReadReceiptWatcher` — local/relay-synced/delivered/read lifecycle helpers (§3.5). |
+| `src/upload-outbox.js` | `uploadOutboxKind`, `UploadOutbox` — local-save-then-sync queue for (multiple) file uploads: caller supplies a local blob store + an `upload()` function; this class owns the pending→uploading→done/failed state machine, retry, and a reactive `watch()`/`watchAll()`. |
+| `src/sync-guard.js` | `guardSync(outbox)` — holds a Screen Wake Lock (`navigator.wakeLock`) while `UploadOutbox` has `'pending'`/`'uploading'` entries, releases once all are settled; re-acquires on `visibilitychange`, degrades to a silent no-op where `wakeLock` is unsupported. |
+| `src/blob-upload.js` | `uploadToRelayBlob(space, relayHttpUrl, localId, blob)` — signs+`PUT`s to `relay-blob-server.js`, designed to be passed directly as `UploadOutbox`'s own `upload()` callback (§3.12). |
 | `src/index.js` | Package's public export surface. |
 
 Built entirely on `@qu/space-core`'s public API — `Space` has zero
@@ -695,8 +877,9 @@ the three gaps a real file exchange needs, without inventing anything new:
    generic "reader confirms receipt of contentId" primitive (its
    `contentNodeId` key is caller-defined, not required to be an actual
    Node). `markFileReceived(space, fileId)`/`watchFileReceipts(space, pub)`
-   are one-line aliases of `markRead()`/`watchReadReceipts()` - a file id
-   works exactly like a chat message id. No new Kind, no duplicated state.
+   are one-line aliases of `markDelivered()`/`watchReadReceipts()` - a file
+   id works exactly like a chat message id. No new Kind, no duplicated
+   state.
 
 Why the blob itself still can't just ride the same "default" CRDT sync
 that the metadata uses: a relay only forwards/mirrors signed envelopes,
@@ -786,7 +969,7 @@ notice.
 | `.unsubscribeNode(id)` | Inverse of the above — drops the local handle, tells the relay to stop forwarding. |
 | `.useNode(id, kindSchema)` | **Recommended default.** Local-first, lazy, reference-counted — see `-> {node, release}`. |
 | `.loadNode(id, kindSchema)` | Local storage only, zero network — the "durable, no live sync" tier. |
-| `.compactNode(id)` | Replace a Node's entire stored history with one GC'd snapshot envelope. |
+| `.compactNode(id, {recipients?})` | Replace a Node's entire stored history with one GC'd snapshot envelope. `recipients` (optional X25519 pubkeys) seals for a narrower audience than this Space's flat membership — e.g. a `'group'`-ACL Kind's own current Group members — and, when given, the snapshot carries the Node's own `groupRef` on the wire so a `'group'`-ACL relay check still passes (`docs/chat-app-concept.md`'s own `messenger.js` `addGroupChatMembers()` is the reference consumer: without this, a member added to an active group chat could never read any future message from an author who posted before they joined). |
 | `.grantWriter(nodeId, kind, granteePub)` | `'named'`-ACL: authorize one more pubkey to write this Node. |
 | `.getNode(id)` | Synchronous lookup of an already-attached Node, or `undefined`. |
 
@@ -817,11 +1000,17 @@ notice.
 | `publishAlias(space, spaceId)` | Derive + publish this Space's alias to the registry. |
 | `aliasRegistryKind` / `aliasRegistryNodeId(realPub)` | The registry Kind and its deterministic per-member nodeId. |
 | `AliasRegistry` | Bus watcher maintaining an alias→real map. |
-| `presenceKind` | Self-certifying `'owner'`-ACL, `persistence: 'volatile'` Kind — `online`/`status`/`updatedAt`/`typingIn`/`typingAt` (§3.5). |
+| `presenceKind` | Self-certifying `'owner'`-ACL, `persistence: 'volatile'` Kind — `online`/`status`/`updatedAt`/`typingIn`/`typingAt`/`onlineVisibility` (§3.5). |
 | `presenceNodeId(pub)` | Deterministic presence Node id for `pub`. |
 | `publishPresence(space, fields)` / `setStatus(space, status)` / `setTyping(space, nodeId, typing)` | Write this Space's own presence Node. |
 | `watchPresence(space, pub)` | One-shot presence snapshot of another identity (subscribes if needed). |
 | `PresenceWatcher` | Reactive multi-member presence cache off the bus — `.watch(pub)` / `.of(pubB64)`. |
+| `declareOnlineVisibility(space, 'public'\|'private')` | Sets `presenceKind.onlineVisibility` AND signs+sends the separate relay declaration LIVE-presence enforcement runs on (§3.5 UPDATE). |
+| `signPresenceVisibility()` / `verifyPresenceVisibility()` | The signed `presence-visibility` control message itself (§3.5 UPDATE). |
+| `Space.watchLivePresence(pub)` / `.unwatchLivePresence(pub)` / `.isLiveOnline(pubB64)` | Subscribe to/read another identity's REAL relay-tracked connection state (§3.5 UPDATE) — distinct from `presenceKind.online` above. |
+| `LivePresenceWatcher` | Reactive multi-identity cache for the relay's own live connection state — `.watch(pub)` / `.unwatch(pub)` / `.isOnline(pubB64)` (§3.5 UPDATE). |
+| `deriveBlobId(ownerPub, localId)` | Self-certifying blob id, no relay registry needed (§3.12). |
+| `signBlobUpload(localId, owner)` / `verifyBlobUpload(msg)` | The signed proof a relay's blob-storage mirror authorizes an upload with (§3.12). |
 | `userKind` | Self-certifying `'owner'`-ACL Kind — `alias`/`epub`/`listed` (§3.8, the GunDB-style User-Node). |
 | `userNodeId(pub)` | Deterministic User-Node id for `pub`. |
 | `resolveAlias(alias, pub)` | `alias` if set, else `pub` base64url-encoded — GunDB's "alias defaults to pub". |
@@ -842,6 +1031,7 @@ notice.
 | `registerPushHandler(bus, {sendPush, pattern?})` | Reference push delivery-channel handler. |
 | `loadOrCreateIdentity(filePath)` / `describeIdentity(identity)` | A relay's own keypair — auto-generate-and-persist, and a printable public summary. |
 | `createAppRequestHandler({webDir, members, relay, allowJoin?, onJoin?, log?})` | Shared HTTP handler: static browser app, `GET /members.json`, `POST /join`. |
+| `createBlobRequestHandler({blobStore, maxBlobSize?, log?})` | Shared HTTP handler: `PUT`/`GET /blob/<blobId>`, the relay's blob-storage mirror (§3.12). `blobStore: null` degrades every request to 503. |
 
 ### Storage (`@qu/space-storage`)
 
@@ -850,6 +1040,8 @@ notice.
 | `createMemoryStore()` | Ephemeral tier: `{append, load, replace}`. |
 | `createDurableStore(backingStore?)` | Simulated-persistence tier (tests): same contract, plus `._backingStore`. |
 | `createFileStore(dataDir)` | Real on-disk tier: same contract, one `.ndjson` file per Node. |
+| `createBlobFileStore(dataDir)` | Real on-disk tier for raw blob bytes (§3.12): `{save(blobId, bytes), load(blobId), remove(blobId)}`, one `.bin` file per blob. |
+| `createMemoryBlobStore()` | Ephemeral tier for raw blob bytes (§3.12): same `{save, load, remove}` contract. |
 
 ### Bootstrap / Adapter Registry (`@qu/bootstrap`, see §3.7, §3.9)
 
@@ -871,13 +1063,16 @@ notice.
 | Export | Purpose |
 |---|---|
 | `awaitRelayAck(bus, nodeId)` | Resolves on the next write-ack for `nodeId` (§3.5) — correlated by ordering. |
-| `readReceiptKind` / `readReceiptNodeId(pub)` | Durable, self-certifying per-reader `'owner'`-ACL Kind holding an encrypted `{contentNodeId: {upTo, at}}` map. |
-| `markRead(space, contentNodeId, upTo)` | Writes this Space's own read marker. |
+| `readReceiptKind` / `readReceiptNodeId(pub)` | Durable, self-certifying per-reader `'owner'`-ACL Kind holding an encrypted `{contentNodeId: {upTo, at, deliveredUpTo, deliveredAt}}` map — `upTo`/`at` (read) and `deliveredUpTo`/`deliveredAt` (received+locally stored, independent of reading) are set independently via a shared merging patch, never clobbering each other. |
+| `markRead(space, contentNodeId, upTo)` | Writes this Space's own read marker (`upTo`/`at`). |
+| `markDelivered(space, contentNodeId, deliveredUpTo)` | Writes this Space's own delivered marker (`deliveredUpTo`/`deliveredAt`), independent of `markRead()`. |
 | `watchReadReceipts(space, pub)` | One-shot snapshot of another identity's read receipts. |
-| `ReadReceiptWatcher` | Reactive multi-reader cache — `.watch(pub)` / `.upToFor(pubB64, contentNodeId)`. |
-| `markFileReceived(space, fileId)` / `watchFileReceipts(space, pub)` | File-scoped aliases of `markRead()`/`watchReadReceipts()` — a file id works exactly like a `contentNodeId`. |
+| `ReadReceiptWatcher` | Reactive multi-reader cache — `.watch(pub)` / `.upToFor(pubB64, contentNodeId)` / `.deliveredUpToFor(pubB64, contentNodeId)`. |
+| `markFileReceived(space, fileId)` / `watchFileReceipts(space, pub)` | File-scoped aliases of `markDelivered()`/`watchReadReceipts()` — a file id works exactly like a `contentNodeId`; a file landing in the outbox is a delivery, not a read. |
 | `uploadOutboxKind` | Self-certifying `'owner'`-ACL Kind, `records: {shape:'atomic', visibility:'public'}` map. |
-| `UploadOutbox` | `.enqueue(meta, blob)` (fire-and-forget upload, resolves once locally saved+queued) / `.retry(id)` / `.statusOf(id)` / `.list()` / `.watch(id, cb)` (reactive). Constructor takes an optional 4th `bus` param — with it, `'done'` records advance to `'synced'` once the relay ack's the metadata write. |
+| `UploadOutbox` | `.enqueue(meta, blob)` (fire-and-forget upload, resolves once locally saved+queued) / `.retry(id)` / `.statusOf(id)` / `.list()` / `.watch(id, cb)` / `.watchAll(cb)` (reactive, all records at once). Constructor takes an optional 4th `bus` param — with it, `'done'` records advance to `'synced'` once the relay ack's the metadata write. |
+| `guardSync(outbox)` | Holds a Screen Wake Lock while `outbox` (any `{watchAll}`-shaped object, e.g. `UploadOutbox`) has `'pending'`/`'uploading'` entries; releases once settled, re-acquires on `visibilitychange`. Returns a `stop()` that unobserves and releases. No-ops silently where `navigator.wakeLock` is unavailable. |
+| `uploadToRelayBlob(space, relayHttpUrl, localId, blob)` | Signs+`PUT`s to a relay's `relay-blob-server.js` endpoint (§3.12); designed to be passed directly as `UploadOutbox`'s own `upload()` callback — resolves `{url, blobId}`. |
 
 ### UI bindings (`@qu/space-ui`, OPTIONAL)
 
@@ -2771,6 +2966,55 @@ grants anything a genuine signature check wouldn't also grant on its own.
 Every `resolveKindSchema` implementation may now be `async` (existing
 synchronous ones keep working - `await`ing a non-Promise value resolves
 immediately) - all four relay.js call sites `await` it.
+
+**`'group'`-ACL Kinds and `userKind` had the exact same class of gap,
+found while building the real messenger (`docs/chat-app-concept.md`,
+`@qu/app-core`'s `messenger.js`) - the first real consumer of either
+through the ACTUAL relay deployment path, not a hand-rolled test
+`idToKind` map.** Three separate, previously-unexercised holes in the same
+resolver, all fixed together:
+1. `createAppResolveKindSchema()` had no notion of `'group'`-ACL Kinds at
+   all - any `chatKind` write fell through to the generic `pageKind`
+   fallback and was rejected. Fixed with a new `groupKinds` param (a small,
+   static list of Kind-Schema objects, analogous to
+   `collectionRegistryKinds` - never per-conversation data, since a
+   `'group'`-ACL Node's own `{groupOwnerPub, groupName}` already
+   self-certifies, the same "unverified claim for CLASSIFICATION ONLY is
+   safe" reasoning `claimedPub` above already established, just keyed off
+   `groupRef` instead): `deriveContentNodeId(groupRef.groupOwnerPub,
+   kind.kind, groupRef.groupName) === nodeId` for each configured kind.
+2. `createLiveAppResolveKindSchema()`'s own `resolveKindSchema` wrapper -
+   the one `relay-server.js` actually runs in platform mode - silently
+   DROPPED the `groupRef` argument entirely (`(nodeId, claimedPub) =>
+   current(nodeId, claimedPub)`), so fix #1 above did nothing in a real
+   deployment until this was also fixed to forward it. It now also defaults
+   `groupKinds` to `[chatKind]`, so the built-in messenger works with zero
+   configuration, the same "built-in surface needs no setup" posture
+   `globalApps`'s own admin-console default already has.
+3. The SAME dynamic `claimedPub` fallback never covered `@qu/space-core`'s
+   `userKind` (`qu-user` - any identity's own self-certifying profile,
+   `epub` included) - there is no "owners" list to enumerate it from, any
+   more than there is for a self-provisioned multiuser participant above,
+   so every profile write/read through the real resolver was misclassified
+   too, invisible from the writer's own Space for the same reason #1 in
+   this section already explains. Now one more line in the same
+   `claimedPub` block, `deriveOwnerNodeId(claimedPub, userKind.kind) ===
+   nodeId`.
+
+Also found in the same pass: `wireInstalledApps()`/`boot.js` never
+threaded a discovered `/apps/*` app's own route `subPath` into its
+`wire()` call - fine for Gästebuch/Blog/Forum (purely CMS-Page-driven,
+never needed it) but a hard requirement for a code-driven app with real
+per-room client-side routes (`#/<prefix>/room/<id>`, apps/chat/'s own
+`actions.js`). Now threaded at all 5 `wireInstalledApps()` call sites in
+`boot.js`. The `/apps/*` descriptor shape also gained an optional
+`templateNames` field (mirroring `viewNames`/`sharedLists`, threaded
+through `admin-actions.js`'s `registerApp()` call) - needed because
+`apps/chat/` is the first file-based app that installs its OWN global root
+Template (`createGlobalApp()`/`createGlobalTemplate()`) instead of relying
+on `@qu/app-renderer`'s framework-default wrapper, so its sidebar+room
+chrome survives every one of its own client-side subroutes, including ones
+with no matching CMS Page at all.
 
 **Reading this as a CMS, not just a router:** the admin console proves the
 general shape - "UI legt sich selbst innerhalb des Storage an und hat

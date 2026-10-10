@@ -124,6 +124,36 @@ test('compactNode() throws for a Kind that mixes visibilities across fields, rat
   await assert.rejects(() => aliceSpace.compactNode(node.id), /mixes visibilities/);
 });
 
+test('compactNode(id, {recipients}) seals for an EXPLICIT narrower audience, not this Space\'s full flat membership - a flat member excluded from `recipients` cannot decrypt the snapshot', async () => {
+  const alice = await actor();
+  const bob = await actor(); // the REAL, narrower audience (e.g. a 'group'-ACL Node's own current Group members).
+  const carol = await actor(); // a flat Space member, but NOT in the narrower `recipients` list.
+  const members = [
+    { pub: alice.signingPub, xPub: alice.xPublicKey },
+    { pub: bob.signingPub, xPub: bob.xPublicKey },
+    { pub: carol.signingPub, xPub: carol.xPublicKey },
+  ];
+  const [aliceTransport, bobTransport] = pairTransports();
+  const aliceStorage = createMemoryStore();
+  const bobStorage = createMemoryStore();
+  const aliceSpace = new Space({ identity: alice, members, transport: aliceTransport, storage: aliceStorage });
+  const bobSpace = new Space({ identity: bob, members, transport: bobTransport, storage: bobStorage });
+
+  const bobNode = bobSpace.subscribeNode('narrow-chat', chatKind);
+  const aliceNode = await aliceSpace.createNode(chatKind, {}, { id: 'narrow-chat', recipients: [alice.xPublicKey, bob.xPublicKey] });
+  await aliceNode.field('messages').push('hi bob, not carol');
+  await waitUntil(async () => (await bobNode.field('messages').toArray()).length === 1);
+
+  await aliceSpace.compactNode('narrow-chat', { recipients: [alice.xPublicKey, bob.xPublicKey] });
+  await waitUntil(async () => (await bobStorage.load('narrow-chat')).length === 1);
+  assert.deepEqual(await bobNode.field('messages').toArray(), ['hi bob, not carol']); // bob (in recipients) still reads it fine.
+
+  const [snapshotEnvelope] = await aliceStorage.load('narrow-chat');
+  assert.equal(snapshotEnvelope.to.length, 2); // alice + bob only - NOT carol, despite carol being a flat Space member.
+  const toXPubs = snapshotEnvelope.to.map((t) => QuCrypto.toBase64(t.pub));
+  assert.ok(!toXPubs.includes(QuCrypto.toBase64(carol.xPublicKey)));
+});
+
 test("a compacted 'public'-visibility Node's snapshot is still plaintext on the wire/in storage - compaction doesn't change WHO can read it", async () => {
   const alice = await actor();
   const members = [{ pub: alice.signingPub, xPub: alice.xPublicKey }];

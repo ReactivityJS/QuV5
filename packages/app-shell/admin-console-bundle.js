@@ -77,12 +77,12 @@ export const adminConsoleBundle = {
 <h2>Beispiel-App installieren</h2>
 <p>Erstellt eine fertig eingerichtete App unter dem gewählten Pfad-Präfix (in diesem, dem Relay-Admin eigenen Space) und registriert sie sofort - kein separates <code>installAppBundle()</code> nötig.</p>
 <form data-qu-action="install-app" data-app-type="guestbook">
-  <label>Pfad-Präfix (z.B. "gaestebuch"): <input name="prefix" required pattern="[a-z0-9\-]+"></label>
+  <label>Pfad-Präfix (z.B. "gaestebuch"): <input name="prefix" required pattern="[a-z0-9\\-]+"></label>
   <button type="submit">Gästebuch installieren</button>
   <p data-qu-status></p>
 </form>
 <form data-qu-action="install-app" data-app-type="blog">
-  <label>Pfad-Präfix (z.B. "blog"): <input name="prefix" required pattern="[a-z0-9\-]+"></label>
+  <label>Pfad-Präfix (z.B. "blog"): <input name="prefix" required pattern="[a-z0-9\\-]+"></label>
   <label>Datums-Schema für Beiträge:
     <select name="routeScheme">
       <option value="flat">Kein Datum (/post/titel)</option>
@@ -95,7 +95,7 @@ export const adminConsoleBundle = {
   <p data-qu-status></p>
 </form>
 <form data-qu-action="install-app" data-app-type="forum">
-  <label>Pfad-Präfix (z.B. "forum"): <input name="prefix" required pattern="[a-z0-9\-]+"></label>
+  <label>Pfad-Präfix (z.B. "forum"): <input name="prefix" required pattern="[a-z0-9\\-]+"></label>
   <button type="submit">Forum installieren</button>
   <p data-qu-status></p>
 </form>
@@ -103,7 +103,7 @@ export const adminConsoleBundle = {
 <h2>App registrieren</h2>
 <p>Setzt voraus, dass die App bereits installiert wurde (z.B. über <code>installAppBundle()</code>) - hier wird sie nur unter einem Pfad-Präfix eingehängt. Für diese Admin-Konsole selbst nicht nötig - sie ist bereits unter ihrem eigenen Präfix registriert.</p>
 <form data-qu-action="register-app">
-  <label>Pfad-Präfix (z.B. "forum"): <input name="prefix" required pattern="[a-z0-9\-]+"></label><br>
+  <label>Pfad-Präfix (z.B. "forum"): <input name="prefix" required pattern="[a-z0-9\\-]+"></label><br>
   <label>App-Admin-Pubkey (base64): <input name="appAdminPub" required size="48"></label><br>
   <label>Name: <input name="name" required></label><br>
   <button type="submit">Registrieren</button>
@@ -121,7 +121,7 @@ export const adminConsoleBundle = {
  * compares this against the registered `admin` prefix's own `bundleVersion`
  * to decide whether to show the button at all.
  */
-export const ADMIN_CONSOLE_VERSION = 1;
+export const ADMIN_CONSOLE_VERSION = 2;
 
 /**
  * BUILT ON `./app-bundle.js`'s `defineAppBundle()` — `content()` maps this

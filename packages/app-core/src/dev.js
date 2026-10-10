@@ -416,6 +416,14 @@ function toBase64Pair({ pub, xPub }) {
  * resolves a group's CURRENT members back into the raw X25519 pubkeys such
  * a write actually needs). Node id = `deriveContentNodeId(space.identity.signingPub,
  * 'qu-group', name)` - many per owner, same as `createPage()`/`createTemplate()`.
+ * Also DECLARES this membership to the relay (`Space.declareGroupMembership()`, `@qu/space-core`'s
+ * group-membership.js) - a SEPARATE signed control message from the ordinary field write above,
+ * needed because the relay never decodes ANY Yjs content (not even this `'content'`-ACL group's own
+ * `visibility: 'public'` fields) - see that method's own doc comment for the full "why a signed
+ * declaration" reasoning. Without it, any `'group'`-ACL Kind referencing THIS group (e.g. a future
+ * chat room) would have every write rejected by the relay, fail-closed, even from a genuine member -
+ * client-side reads/checks are unaffected either way (`Space._currentGroupMembers()` reads this
+ * group's real field content directly, never this declaration).
  * @param {import('@qu/space-core').Space} space
  * @param {{name: string, members: Array<{pub: Uint8Array, xPub: Uint8Array}>}} params -
  *   include the creator's OWN identity in `members` if they want to see themselves
@@ -424,7 +432,9 @@ function toBase64Pair({ pub, xPub }) {
  *   only about the group's own membership LISTING, a separate, cosmetic concern).
  */
 export async function createGroup(space, { name, members }) {
-  return space.createNode(groupKind, { name, members: members.map(toBase64Pair) }, { path: name });
+  const node = await space.createNode(groupKind, { name, members: members.map(toBase64Pair) }, { path: name });
+  await space.declareGroupMembership({ groupName: name, members: members.map((m) => m.pub) });
+  return node;
 }
 
 /**
@@ -438,6 +448,13 @@ export async function createGroup(space, { name, members }) {
  * (re-resolving the group's now-current members first) actually reflects
  * a membership change; this is the exact same "no retroactive re-encryption"
  * tradeoff any group-messaging system with forward secrecy in mind accepts.
+ * Also DECLARES the new membership to the relay (`createGroup()`'s own doc comment has the full
+ * "why a signed declaration" reasoning) - ONLY when `ownerPub` is genuinely THIS identity's own
+ * (the common case: an owner editing their own group). `Space.declareGroupMembership()` is
+ * self-certifying (signed by `space.identity`, carrying `space.identity.signingPub` as the claimed
+ * `groupOwnerPub`) - it has no way to speak for a DIFFERENT owner, so a `'named'`-grantee editing on
+ * someone else's behalf (an explicit `ownerPub` override) skips this declaration; the relay's own
+ * enforcement for that Group simply stays whatever it last was until the actual owner re-declares.
  * @param {import('@qu/space-core').Space} space
  * @param {{name: string, members: Array<{pub: Uint8Array, xPub: Uint8Array}>, ownerPub?: Uint8Array, timeout?: number}} params
  */
@@ -465,6 +482,9 @@ export async function editGroup(space, { name, members, ownerPub = space.identit
     throw new Error(`editGroup: group "${name}" does not exist (or has not synced within ${timeout ?? 3000}ms) - use createGroup() for a genuinely new one`);
   }
   await node.field('members').set(members.map(toBase64Pair));
+  if (QuCrypto.toBase64(ownerPub) === QuCrypto.toBase64(space.identity.signingPub)) {
+    await space.declareGroupMembership({ groupName: name, members: members.map((m) => m.pub) });
+  }
   release();
   return node;
 }

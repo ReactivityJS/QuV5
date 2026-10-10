@@ -59,6 +59,17 @@
  *     `contentNodeId` key is caller-defined, not required to be an actual
  *     Node id). `markFileReceived()`/`watchFileReceipts()` below are thin,
  *     file-scoped aliases of it - no new Kind, no duplicated state.
+ *
+ * UPDATE - UPLOAD RESULT. `_attempt()` used to discard whatever `upload()`
+ * resolved with - fine while nothing needed it, a real gap once a caller's
+ * `upload()` returns something the record itself should carry forward (a
+ * relay-mirrored file's own `{url}}`, an object-storage key, ...). The
+ * resolved value (if any) is now merged into the record ALONGSIDE the
+ * `'done'` transition - `outbox.get(id)`/`watch(id, ...)` see it exactly
+ * like any other field, no separate lookup. `status`/`error` are applied
+ * AFTER the spread so `upload()`'s own result can never accidentally
+ * clobber this class's own lifecycle fields, even if it happens to resolve
+ * with keys of those names.
  */
 import { defineKind, deriveOwnerNodeId } from '@qu/space-core';
 import { awaitRelayAck } from './delivery-status.js';
@@ -90,7 +101,7 @@ export class UploadOutbox {
   /**
    * @param {import('@qu/space-core').Space} space
    * @param {{save(id: string, blob: *): Promise<void>, load(id: string): Promise<*>, remove(id: string): Promise<void>}} localStore
-   * @param {(record: object, blob: *) => Promise<void>} upload
+   * @param {(record: object, blob: *) => Promise<object|void>} upload - a resolved plain object (e.g. `{url}`) is merged into the record on `'done'` - see this file's own "UPDATE - UPLOAD RESULT" doc comment.
    * @param {import('@qu/events').EventBus} [bus] - the SAME bus given to `space`'s own constructor. When supplied, `'done'` records advance to `'synced'` once the relay ack for that metadata write lands - see this file's own "UPDATE" doc comment. Omit for the old `'done'`-is-terminal behaviour.
    */
   constructor(space, localStore, upload, bus) {
@@ -161,8 +172,8 @@ export class UploadOutbox {
     if (!record) return;
     await this._patch(id, { status: 'uploading' });
     try {
-      await this._upload(record, blob);
-      await this._patch(id, { status: 'done', error: null });
+      const result = await this._upload(record, blob);
+      await this._patch(id, { ...(result ?? {}), status: 'done', error: null });
       await this._localStore.remove(id); // "nach relay sync abhaken" - once durably uploaded, the local copy no longer needs to be kept around for a retry.
       if (this._bus) {
         const node = await this._ensureNode();
@@ -203,6 +214,23 @@ export class UploadOutbox {
   async watch(id, callback) {
     const node = await this._ensureNode();
     const notify = async () => callback(await this.statusOf(id));
+    const unobserve = node.field('records').observe(notify);
+    await notify();
+    return unobserve;
+  }
+
+  /**
+   * Reactive status for EVERY queued file at once - same reactive primitive
+   * as `watch(id, ...)`, just unfiltered. For a caller that needs the WHOLE
+   * queue's shape rather than one file's (e.g. `sync-guard.js`'s wake-lock
+   * helper, which needs to know the instant the LAST pending/uploading
+   * entry clears, not any one file in particular).
+   * @param {(records: object[]) => void} callback
+   * @returns {Promise<() => void>} unobserve function.
+   */
+  async watchAll(callback) {
+    const node = await this._ensureNode();
+    const notify = async () => callback(await this.list());
     const unobserve = node.field('records').observe(notify);
     await notify();
     return unobserve;

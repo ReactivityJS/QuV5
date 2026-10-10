@@ -13,7 +13,8 @@ import assert from 'node:assert/strict';
 import { QuCrypto } from '@qu/core';
 import { Space } from '../src/space.js';
 import { EventBus } from '@qu/events';
-import { presenceKind, presenceNodeId, publishPresence, setStatus, setTyping, watchPresence, PresenceWatcher } from '../src/presence.js';
+import { presenceKind, presenceNodeId, publishPresence, setStatus, setTyping, watchPresence, PresenceWatcher, declareOnlineVisibility, LivePresenceWatcher } from '../src/presence.js';
+import { verifyPresenceVisibility } from '../src/presence-visibility.js';
 
 async function actor() {
   const kp = await QuCrypto.generateKeypair();
@@ -103,4 +104,69 @@ test('PresenceWatcher reactively tracks multiple identities\' presence off the b
 test('presenceKind is volatile-persistence by design - a relay mirroring it never durably stores presence/typing churn', () => {
   assert.equal(presenceKind.persistence, 'volatile');
   assert.equal(presenceKind.acl.write, 'owner');
+});
+
+test('declareOnlineVisibility() publishes presenceKind.onlineVisibility AND sends a validly-signed relay declaration', async () => {
+  const alice = await actor();
+  const sent = [];
+  const transport = { async connect() {}, send(data) { sent.push(data); }, onMessage() {} };
+  const space = new Space({ identity: alice, members: [], transport });
+
+  await declareOnlineVisibility(space, 'public');
+
+  const nodeId = await presenceNodeId(alice.signingPub);
+  assert.equal(await space.getNode(nodeId).field('onlineVisibility').get(), 'public'); // the app-readable half.
+
+  const declaration = sent.find((m) => m.type === 'presence-visibility');
+  assert.ok(declaration); // the relay-enforced half - a SEPARATE signed message, see presence-visibility.js's own doc comment.
+  assert.equal(declaration.onlineVisibility, 'public');
+  assert.deepEqual(declaration.pub, alice.signingPub);
+  assert.equal(await verifyPresenceVisibility(declaration), true);
+});
+
+test("Space.watchLivePresence()/isLiveOnline() record the relay's presence-online/presence-offline pushes, and expose them on the bus", async () => {
+  const alice = await actor();
+  const bob = await actor();
+  const [aliceTransport] = pairTransports();
+  const bus = new EventBus();
+  const space = new Space({ identity: alice, members: [], transport: aliceTransport, bus });
+
+  const bobB64 = QuCrypto.toBase64(bob.signingPub);
+  assert.equal(space.isLiveOnline(bobB64), undefined); // never heard anything about bob yet.
+
+  const changes = [];
+  bus.on('space.presence.live.changed', (p) => changes.push(p));
+
+  await space.watchLivePresence(bob.signingPub); // sends 'watch-presence' - this bare test never actually replies to it, the two pushes below are simulated directly.
+  await space._handleIncoming({ type: 'presence-online', pub: bob.signingPub });
+  assert.equal(space.isLiveOnline(bobB64), true);
+  assert.deepEqual(changes.at(-1), { pub: bobB64, online: true });
+
+  await space._handleIncoming({ type: 'presence-offline', pub: bob.signingPub });
+  assert.equal(space.isLiveOnline(bobB64), false);
+  assert.deepEqual(changes.at(-1), { pub: bobB64, online: false });
+});
+
+test('LivePresenceWatcher reactively tracks multiple identities\' live presence off the bus, no polling', async () => {
+  const alice = await actor();
+  const bob = await actor();
+  const [aliceTransport] = pairTransports();
+  const bus = new EventBus();
+  const space = new Space({ identity: alice, members: [], transport: aliceTransport, bus });
+
+  const watcher = new LivePresenceWatcher(space, bus);
+  const bobB64 = QuCrypto.toBase64(bob.signingPub);
+  await watcher.watch(bob.signingPub);
+  assert.equal(watcher.isOnline(bobB64), undefined); // no reply simulated yet.
+
+  await space._handleIncoming({ type: 'presence-online', pub: bob.signingPub });
+  assert.equal(watcher.isOnline(bobB64), true);
+
+  await space._handleIncoming({ type: 'presence-offline', pub: bob.signingPub });
+  assert.equal(watcher.isOnline(bobB64), false);
+
+  await watcher.unwatch(bob.signingPub);
+  await space._handleIncoming({ type: 'presence-online', pub: bob.signingPub }); // a stray push after unwatch() is still absorbed by Space itself (it never asked the relay to stop tracking via _livePresence)...
+  assert.equal(space.isLiveOnline(bobB64), true);
+  assert.equal(watcher.isOnline(bobB64), true); // ...and the watcher, listening on the SAME bus topic regardless of its own unwatch() bookkeeping, reflects it too - unwatch() only ever stops the RELAY from pushing further, never a local filter.
 });

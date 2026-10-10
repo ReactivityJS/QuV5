@@ -73,7 +73,7 @@ export function federateRelay({ relay, bus, transport, identity }) {
   const federatedNodeIds = new Set();
 
   transport.onMessage(({ data }) => {
-    if (data?.nodeId && data?.envelope) relay.ingestFederated(data.nodeId, data.envelope);
+    if (data?.nodeId && data?.envelope) relay.ingestFederated(data.nodeId, data.envelope, data.groupRef);
     // Anything else (an upstream 'member-joined'/'grant' broadcast, etc.) is out of scope for this
     // first version - this relay's OWN local ACL/membership state is provisioned independently,
     // see this file's own "A KNOWN, accepted scope boundary" doc comment.
