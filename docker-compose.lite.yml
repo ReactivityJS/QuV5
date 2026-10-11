@@ -6,8 +6,7 @@
 services:
   qu-lite:
     build:
-      context: .
-      dockerfile: packages/lite/Dockerfile
+      context: packages/lite
     image: qu-lite
     ports:
       - "8787:8787"
