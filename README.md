@@ -1,5 +1,8 @@
 # Qu V5
 
+> **Qu Lite** (`packages/lite`, a separate, self-contained sync core) is being moved into its
+> own repository. What to move and how: [docs/qu-lite-migration.md](docs/qu-lite-migration.md).
+
 A from-scratch, **Yjs-native**, UI-agnostic framework for building
 distributed, real-time-synced apps: every Node is a real `Y.Doc`, every
 field is typed via a Kind-Schema (independent `shape`/`visibility` per

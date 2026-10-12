@@ -10,3 +10,4 @@ demo/app-shell-web/dist
 demo/app-shell-web/index.html
 packages/app-shell/dist-web
 *.log
+packages/lite/demo/dist

@@ -24,3 +24,5 @@ packages/app-shell/dist-web/
 
 # relay deployment data (see docs/v5-space-core-guide.md §5)
 relay-data/
+lite-demo.sqlite*
+mirror.sqlite*
